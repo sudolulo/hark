@@ -90,6 +90,7 @@ def test_login_with_admin_token_and_browse(server):
 
     resp, body = request(server, "GET", "/", cookie=cookie)
     assert resp.status == 200 and "Who covered it?" in body
+    assert "Fully indexed" in body  # fixture's one episode is already extracted
 
     resp, body = request(server, "GET", "/topic/1", cookie=cookie)
     assert resp.status == 200
@@ -100,6 +101,52 @@ def test_login_with_admin_token_and_browse(server):
 
     resp, body = request(server, "GET", "/topics?genre=mystery", cookie=cookie)
     assert resp.status == 200 and "Somerton Man" in body
+
+
+def test_index_status_shows_pending_episodes(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('q', 'Show A', 'http://x')")
+    conn.executemany(
+        "INSERT INTO episodes (show_id, guid, title, extracted_at) VALUES (1, ?, ?, ?)",
+        [("g1", "Done", "2026-01-01T00:00:00Z"), ("g2", "Pending", None)],
+    )
+    conn.commit()
+    conn.close()
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
+        cookie = resp.getheader("Set-Cookie").split(";")[0]
+        resp, body = request(srv, "GET", "/", cookie=cookie)
+        assert "1 episode(s) not yet indexed" in body
+        assert "Indexing in progress" not in body  # last activity is months old, not active
+    finally:
+        srv.shutdown()
+
+
+def test_index_status_shows_active_when_recently_processed(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('q', 'Show A', 'http://x')")
+    conn.executemany(
+        "INSERT INTO episodes (show_id, guid, title, extracted_at) VALUES (1, ?, ?, ?)",
+        [("g1", "Done", web.iso(web.utcnow())), ("g2", "Pending", None)],
+    )
+    conn.commit()
+    conn.close()
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
+        cookie = resp.getheader("Set-Cookie").split(";")[0]
+        resp, body = request(srv, "GET", "/", cookie=cookie)
+        assert "Indexing in progress" in body
+        assert 'class="status active"' in body
+    finally:
+        srv.shutdown()
 
 
 def test_bad_login_rejected(server):

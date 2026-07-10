@@ -74,6 +74,21 @@ def iso(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def parse_iso(value: str) -> datetime:
+    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+
+def relative_time(dt: datetime) -> str:
+    secs = (utcnow() - dt).total_seconds()
+    if secs < 60:
+        return "just now"
+    if secs < 3600:
+        return f"{int(secs // 60)}m ago"
+    if secs < 86400:
+        return f"{int(secs // 3600)}h ago"
+    return f"{int(secs // 86400)}d ago"
+
+
 class Auth:
     """Accounts and sessions in their own database file."""
 
@@ -180,6 +195,9 @@ button { background:var(--acc); border:0; color:#151007; padding:0.45rem 1rem; f
 .login-box input { width:100%; margin-bottom:0.8rem; }
 .err { color:#e07a5f; }
 .qid { font-size:0.78rem; color:var(--dim); }
+.status { border:1px solid var(--line); border-left:3px solid var(--dim); background:var(--panel); padding:0.6rem 1rem; margin:1rem 0; font-size:0.9rem; }
+.status.active { border-left-color:var(--acc); }
+.status p { margin:0.2rem 0; }
 """
 
 PAGE = """<!doctype html>
@@ -243,6 +261,12 @@ class App:
                 "SELECT COUNT(*) FROM episodes WHERE extracted_at IS NOT NULL"
             ).fetchone()[0]
             topics = conn.execute("SELECT COUNT(*) FROM topics").fetchone()[0]
+            canonicalized = conn.execute(
+                "SELECT COUNT(*) FROM topics WHERE wikidata_id IS NOT NULL"
+            ).fetchone()[0]
+            last_extracted_at = conn.execute(
+                "SELECT MAX(extracted_at) FROM episodes WHERE extracted_at IS NOT NULL"
+            ).fetchone()[0]
             cross = conn.execute(
                 """
                 SELECT COUNT(*) FROM (
@@ -261,8 +285,9 @@ class App:
         <div class="card"><div class="big">{extracted}/{episodes}</div>episodes indexed</div>
         <div class="card"><div class="big">{shows}</div>shows</div>
         </div>"""
+        status = index_status_html(episodes - extracted, topics - canonicalized, last_extracted_at)
         body = (
-            "<h1>Who covered it?</h1>"
+            "<h1>Who covered it?</h1>" + status +
             '<form class="search" action="/search" method="get">'
             '<input type="text" name="q" placeholder="Dyatlov, Somerton, Titanic&hellip;" autofocus>'
             "<button>Search</button></form>" + cards +
@@ -426,6 +451,37 @@ def topics_query(genre: str = "", q: str = "", limit: int | None = None) -> tupl
         sql += " LIMIT ?"
         params.append(limit)
     return sql, tuple(params)
+
+
+ACTIVE_WINDOW = timedelta(minutes=15)
+
+
+def index_status_html(pending_episodes: int, pending_canon: int, last_extracted_at: str | None) -> str:
+    """Banner on the home page showing whether extraction/canonicalization
+    is currently running, stalled, or done — so a background load run is
+    visible from the UI, not just inferrable from the raw counts."""
+    last_dt = parse_iso(last_extracted_at) if last_extracted_at else None
+    lines = []
+    if pending_episodes == 0:
+        if last_dt:
+            lines.append(f"<p>Fully indexed — last processed {relative_time(last_dt)}.</p>")
+        active = False
+    else:
+        active = last_dt is not None and utcnow() - last_dt < ACTIVE_WINDOW
+        if active:
+            lines.append(
+                f"<p>Indexing in progress — {pending_episodes} episode(s) queued, "
+                f"last processed {relative_time(last_dt)}.</p>"
+            )
+        else:
+            when = f", last activity {relative_time(last_dt)}" if last_dt else ""
+            lines.append(f"<p>{pending_episodes} episode(s) not yet indexed{when}.</p>")
+    if pending_canon:
+        lines.append(f"<p class=\"dim\">{pending_canon} topic(s) awaiting Wikidata canonicalization.</p>")
+    if not lines:
+        return ""
+    cls = "status active" if active else "status"
+    return f'<div class="{cls}">{"".join(lines)}</div>'
 
 
 def conf(value) -> str:

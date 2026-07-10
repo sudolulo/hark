@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-07-10
+
+### Added
+
+- Home page now shows an indexing-status banner: whether extraction is
+  actively running, how many episodes are still queued, when the last one
+  was processed, and how many topics are still awaiting Wikidata
+  canonicalization — so a background load run is visible from the UI
+  itself instead of only inferrable from the raw counts.
+
 ## [0.3.2] - 2026-07-10
 
 ### Changed
