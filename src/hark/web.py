@@ -322,6 +322,7 @@ class App:
             "<button>Search</button></form>" + cards +
             (f"<p>{pills}</p>" if pills else "") +
             "<h2>Most covered across shows</h2>" + topic_table(rows) +
+            (f'<p><a href="/topics">view all {topics} topics &raquo;</a></p>' if topics > len(rows) else "") +
             "<h2>Recently indexed</h2>"
             f"<table><tr><th>when</th><th>show</th><th>episode</th></tr>{recent_html}</table>"
         )
@@ -390,7 +391,9 @@ class App:
             f"<h1>{esc(topic['label'])}{qid}</h1><p>{pills}</p>"
             f"<h2>covered by {len(shows)} show(s), {len(episodes)} episode(s)</h2>"
             f"<p>{show_pills}</p>"
-            f"<table><tr><th>show</th><th>episode</th><th>date</th><th>conf</th></tr>{rows_html}</table>"
+            f'<table><tr><th>show</th><th>episode</th><th>date</th>'
+            f'<th title="extractor\'s confidence this episode is really about this topic">conf</th></tr>'
+            f"{rows_html}</table>"
         )
         return page(topic["label"], body, user["username"])
 
@@ -431,17 +434,22 @@ class App:
         )
         if q:
             topics_pager = pagination_html("/search", {"q": q}, page_num, topic_total, "topics")
-            body += f"<h2>{topic_total} topic(s)</h2>" + topic_table(topics) + topics_pager
-            eps = "".join(
-                f"<tr><td><a href='/show/{r['show_id']}'>{esc(r['show'])}</a></td>"
-                f"<td>{esc(r['title'])}</td>"
-                f"<td class='dim'>{esc((r['pubdate'] or '')[:10])}</td></tr>"
-                for r in episodes
-            )
+            no_match = f"No topics match “{q}”."
+            body += (f"<h2>{topic_total} topic(s)</h2>"
+                     + topic_table(topics, empty=no_match) + topics_pager)
+            if episodes:
+                eps = "".join(
+                    f"<tr><td><a href='/show/{r['show_id']}'>{esc(r['show'])}</a></td>"
+                    f"<td>{esc(r['title'])}</td>"
+                    f"<td class='dim'>{esc((r['pubdate'] or '')[:10])}</td></tr>"
+                    for r in episodes
+                )
+                eps_table = f"<table><tr><th>show</th><th>episode</th><th>date</th></tr>{eps}</table>"
+            else:
+                eps_table = f'<p class="dim">No episode titles match “{q}”.</p>'
             note = (f'<p class="dim">showing the 50 most recent of {episode_total} — '
                     f"narrow your search to see the rest.</p>") if episode_total > 50 else ""
-            body += (f"<h2>{episode_total} episode title match(es)</h2>"
-                     f"<table>{eps}</table>{note}")
+            body += f"<h2>{episode_total} episode title match(es)</h2>{eps_table}{note}"
         return page("search", body, user["username"])
 
     def view_shows(self, user) -> str:
@@ -649,7 +657,8 @@ def episode_cell(row) -> str:
     # Enclosure URLs come from third-party feeds; only link plain http(s) so a
     # hostile feed can't smuggle a javascript:/data: scheme into an href.
     if urllib.parse.urlsplit(url).scheme in ("http", "https"):
-        return f'{title} <a class="qid" href="{esc(url)}" rel="noreferrer">▶</a>'
+        return (f'{title} <a class="qid" href="{esc(url)}" rel="noreferrer" '
+                f'title="play episode audio">▶</a>')
     return title
 
 
@@ -661,13 +670,13 @@ def topic_pills(topics, extracted_at) -> str:
     return " ".join(f'<a class="pill" href="/topic/{t["topic_id"]}">{esc(t["label"])}</a>' for t in topics)
 
 
-def topic_table(rows) -> str:
+def topic_table(rows, empty: str = "Nothing here yet.") -> str:
     if not rows:
-        return '<p class="dim">Nothing here yet.</p>'
+        return f'<p class="dim">{esc(empty)}</p>'
     body = "".join(
         f"<tr><td><a href='/topic/{r['id']}'>{esc(r['label'])}</a></td>"
         f"<td class='num'>{r['shows']}</td><td class='num'>{r['episodes']}</td>"
-        f"<td class='dim'>{esc(r['genres'])}</td></tr>"
+        f"<td class='dim'>{esc(r['genres'].replace(',', ', '))}</td></tr>"
         for r in rows
     )
     return ("<table><tr><th>topic</th><th>shows</th><th>episodes</th><th>genres</th></tr>"

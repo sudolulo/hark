@@ -103,6 +103,7 @@ def test_login_with_admin_token_and_browse(server):
     assert "Fully indexed" in body  # fixture's one episode is already extracted
     assert 'href="/topics?genre=mystery">mystery (1)' in body  # genre breakdown
     assert "Recently indexed" in body and "Case 1: Somerton" in body
+    assert "view all" not in body  # only 1 topic total, nothing more to link to
 
     resp, body = request(server, "GET", "/topic/1", cookie=cookie)
     assert resp.status == 200
@@ -272,6 +273,42 @@ def test_topics_page_paginates(tmp_path):
         assert resp.status == 200 and "page 1 of 2" in body
         resp, body = request(srv, "GET", "/topics?page=2", cookie=cookie)
         assert resp.status == 200 and "page 2 of 2" in body
+    finally:
+        srv.shutdown()
+
+
+def test_search_no_matches_shows_specific_message(server):
+    cookie = login(server)
+    resp, body = request(server, "GET", "/search?q=zzznonexistentzzz", cookie=cookie)
+    assert resp.status == 200
+    assert "No topics match" in body and "zzznonexistentzzz" in body
+    assert "No episode titles match" in body
+    assert "Nothing here yet." not in body  # generic empty-db message must not leak in
+
+
+def test_home_page_view_all_topics_link(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('q', 'Show', 'http://x')")
+    conn.execute(
+        "INSERT INTO episodes (show_id, guid, title, extracted_at) VALUES (1, 'g', 'ep', '2026-01-01T00:00:00Z')"
+    )
+    for i in range(1, 17):  # 16 topics: one more than the home page's top-15 widget
+        conn.execute("INSERT INTO topics (label) VALUES (?)", (f"Topic {i:02d}",))
+        conn.execute(
+            "INSERT INTO episode_topics (episode_id, topic_id, source) VALUES (1, ?, 't')", (i,)
+        )
+    conn.commit()
+    conn.close()
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
+        cookie = resp.getheader("Set-Cookie").split(";")[0]
+        resp, body = request(srv, "GET", "/", cookie=cookie)
+        assert resp.status == 200
+        assert 'href="/topics">view all 16 topics' in body
     finally:
         srv.shutdown()
 

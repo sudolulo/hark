@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-07-10
+
+### Fixed
+
+- Search's episode-title-match table was missing its header row entirely,
+  and showed nothing at all (no message, empty table) when a search had
+  zero matches — same for the topic results, which incorrectly reused the
+  empty-database message ("Nothing here yet.") for a no-results search.
+  Both now say clearly that nothing matched the query.
+- Topic genre lists ("history,mystery,true_crime") had no space after
+  commas anywhere they're rendered as plain text.
+
+### Added
+
+- Home page's top-topics widget links to the full paginated `/topics` list
+  when there are more topics than the widget shows.
+- Small `title` tooltips on the episode play icon and the topic-detail
+  confidence column header, for anyone unsure what either means.
+
 ## [0.3.6] - 2026-07-10
 
 ### Fixed
