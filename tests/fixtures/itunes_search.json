@@ -1,0 +1,31 @@
+{
+  "resultCount": 3,
+  "results": [
+    {
+      "wrapperType": "track",
+      "kind": "podcast",
+      "collectionId": 111,
+      "artistName": "Example Network",
+      "collectionName": "Example Case Show (No Feed)",
+      "artworkUrl600": "https://example.com/nofeed.jpg"
+    },
+    {
+      "wrapperType": "track",
+      "kind": "podcast",
+      "collectionId": 998568017,
+      "artistName": "Casefile Presents",
+      "collectionName": "Casefile True Crime",
+      "feedUrl": "https://feeds.example.com/casefile",
+      "artworkUrl600": "https://example.com/casefile.jpg"
+    },
+    {
+      "wrapperType": "track",
+      "kind": "podcast",
+      "collectionId": 222,
+      "artistName": "Someone Else",
+      "collectionName": "Casefile Fan Recaps",
+      "feedUrl": "https://feeds.example.com/recaps",
+      "artworkUrl600": "https://example.com/recaps.jpg"
+    }
+  ]
+}
