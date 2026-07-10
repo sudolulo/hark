@@ -276,6 +276,20 @@ class App:
                 """
             ).fetchone()[0]
             rows = conn.execute(*topics_query(limit=15)).fetchall()
+            genre_counts = conn.execute(
+                """
+                SELECT genre, COUNT(DISTINCT topic_id) AS n
+                FROM topic_genres GROUP BY genre ORDER BY n DESC
+                """
+            ).fetchall()
+            recent = conn.execute(
+                """
+                SELECT e.id, e.title, e.extracted_at, COALESCE(s.title, s.query) AS show
+                FROM episodes e JOIN shows s ON s.id = e.show_id
+                WHERE e.extracted_at IS NOT NULL
+                ORDER BY e.extracted_at DESC LIMIT 8
+                """
+            ).fetchall()
         finally:
             conn.close()
         cards = f"""
@@ -286,12 +300,24 @@ class App:
         <div class="card"><div class="big">{shows}</div>shows</div>
         </div>"""
         status = index_status_html(episodes - extracted, topics - canonicalized, last_extracted_at)
+        pills = " ".join(
+            f'<a class="pill" href="/topics?genre={esc(r["genre"])}">{esc(r["genre"])} ({r["n"]})</a>'
+            for r in genre_counts
+        )
+        recent_html = "".join(
+            f"<tr><td class='dim'>{relative_time(parse_iso(r['extracted_at']))}</td>"
+            f"<td>{esc(r['show'])}</td><td>{esc(r['title'])}</td></tr>"
+            for r in recent
+        ) or '<tr><td class="dim" colspan="3">Nothing indexed yet.</td></tr>'
         body = (
             "<h1>Who covered it?</h1>" + status +
             '<form class="search" action="/search" method="get">'
             '<input type="text" name="q" placeholder="Dyatlov, Somerton, Titanic&hellip;" autofocus>'
             "<button>Search</button></form>" + cards +
-            "<h2>Most covered across shows</h2>" + topic_table(rows)
+            (f"<p>{pills}</p>" if pills else "") +
+            "<h2>Most covered across shows</h2>" + topic_table(rows) +
+            "<h2>Recently indexed</h2>"
+            f"<table><tr><th>when</th><th>show</th><th>episode</th></tr>{recent_html}</table>"
         )
         return page("index", body, user["username"])
 
@@ -323,8 +349,8 @@ class App:
                 "SELECT genre FROM topic_genres WHERE topic_id = ? ORDER BY genre", (topic_id,))]
             episodes = conn.execute(
                 """
-                SELECT COALESCE(s.title, s.query) AS show, e.title, e.pubdate,
-                       e.audio_url, et.confidence
+                SELECT s.id AS show_id, COALESCE(s.title, s.query) AS show, e.title,
+                       e.pubdate, e.audio_url, et.confidence
                 FROM episode_topics et
                 JOIN episodes e ON e.id = et.episode_id
                 JOIN shows s ON s.id = e.show_id
@@ -340,9 +366,10 @@ class App:
             qid = (f' <a class="qid" href="https://www.wikidata.org/wiki/'
                    f'{esc(topic["wikidata_id"])}" rel="noreferrer">{esc(topic["wikidata_id"])}</a>')
         pills = " ".join(f'<a class="pill" href="/topics?genre={esc(g)}">{esc(g)}</a>' for g in genres)
-        shows = sorted({r["show"] for r in episodes})
+        shows = sorted({(r["show_id"], r["show"]) for r in episodes}, key=lambda s: s[1])
+        show_pills = " ".join(f'<a class="pill" href="/show/{sid}">{esc(name)}</a>' for sid, name in shows)
         rows_html = "".join(
-            f"<tr><td>{esc(r['show'])}</td><td>{episode_cell(r)}</td>"
+            f"<tr><td><a href='/show/{r['show_id']}'>{esc(r['show'])}</a></td><td>{episode_cell(r)}</td>"
             f"<td class='dim'>{esc((r['pubdate'] or '')[:10])}</td>"
             f"<td class='num dim'>{conf(r['confidence'])}</td></tr>"
             for r in episodes
@@ -350,6 +377,7 @@ class App:
         body = (
             f"<h1>{esc(topic['label'])}{qid}</h1><p>{pills}</p>"
             f"<h2>covered by {len(shows)} show(s), {len(episodes)} episode(s)</h2>"
+            f"<p>{show_pills}</p>"
             f"<table><tr><th>show</th><th>episode</th><th>date</th><th>conf</th></tr>{rows_html}</table>"
         )
         return page(topic["label"], body, user["username"])
@@ -404,7 +432,8 @@ class App:
         finally:
             conn.close()
         table = "".join(
-            f"<tr><td>{esc(r['name'])}</td><td class='num'>{r['episodes']}</td>"
+            f"<tr><td><a href='/show/{r['id']}'>{esc(r['name'])}</a></td>"
+            f"<td class='num'>{r['episodes']}</td>"
             f"<td class='num'>{r['extracted']}</td>"
             f"<td class='dim'>{esc((r['latest'] or '')[:10])}</td></tr>"
             for r in rows
@@ -412,6 +441,56 @@ class App:
         body = ("<h1>shows</h1><table><tr><th>show</th><th>episodes</th>"
                 f"<th>indexed</th><th>latest</th></tr>{table}</table>")
         return page("shows", body, user["username"])
+
+    def view_show(self, user, show_id: int) -> str | None:
+        conn = self.db()
+        try:
+            show = conn.execute(
+                "SELECT id, COALESCE(title, query) AS name FROM shows WHERE id = ?", (show_id,)
+            ).fetchone()
+            if show is None:
+                return None
+            episodes = conn.execute(
+                """
+                SELECT id, title, pubdate, audio_url, extracted_at
+                FROM episodes WHERE show_id = ? ORDER BY pubdate DESC
+                """,
+                (show_id,),
+            ).fetchall()
+            topic_rows = conn.execute(
+                """
+                SELECT et.episode_id, t.id AS topic_id, t.label
+                FROM episode_topics et
+                JOIN topics t ON t.id = et.topic_id
+                WHERE et.episode_id IN (SELECT id FROM episodes WHERE show_id = ?)
+                ORDER BY t.label
+                """,
+                (show_id,),
+            ).fetchall()
+            topic_count = conn.execute(
+                """
+                SELECT COUNT(DISTINCT et.topic_id) FROM episode_topics et
+                JOIN episodes e ON e.id = et.episode_id WHERE e.show_id = ?
+                """,
+                (show_id,),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        topics_by_episode: dict[int, list] = {}
+        for r in topic_rows:
+            topics_by_episode.setdefault(r["episode_id"], []).append(r)
+        rows_html = "".join(
+            f"<tr><td>{episode_cell(r)}</td>"
+            f"<td class='dim'>{esc((r['pubdate'] or '')[:10])}</td>"
+            f"<td>{topic_pills(topics_by_episode.get(r['id'], []), r['extracted_at'])}</td></tr>"
+            for r in episodes
+        )
+        body = (
+            f"<h1>{esc(show['name'])}</h1>"
+            f"<h2>{len(episodes)} episode(s), {topic_count} topic(s) covered</h2>"
+            f"<table><tr><th>episode</th><th>date</th><th>topics</th></tr>{rows_html}</table>"
+        )
+        return page(show["name"], body, user["username"])
 
     def view_account(self, user, msg: str = "", err: str = "") -> str:
         note = f'<p class="err">{esc(err)}</p>' if err else (f"<p>{esc(msg)}</p>" if msg else "")
@@ -496,6 +575,14 @@ def episode_cell(row) -> str:
     if urllib.parse.urlsplit(url).scheme in ("http", "https"):
         return f'{title} <a class="qid" href="{esc(url)}" rel="noreferrer">▶</a>'
     return title
+
+
+def topic_pills(topics, extracted_at) -> str:
+    """Per-episode topic links for the show page, or a note when an episode
+    hasn't been indexed yet (as opposed to genuinely having no subject)."""
+    if not topics:
+        return "" if extracted_at else '<span class="dim">not yet indexed</span>'
+    return " ".join(f'<a class="pill" href="/topic/{t["topic_id"]}">{esc(t["label"])}</a>' for t in topics)
 
 
 def topic_table(rows) -> str:
@@ -634,6 +721,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(200, app.view_search(user, params))
             if route == "/shows":
                 return self.respond(200, app.view_shows(user))
+            if route.startswith("/show/"):
+                try:
+                    show_id = int(route.rsplit("/", 1)[1])
+                except ValueError:
+                    return self.not_found(user)
+                body = app.view_show(user, show_id)
+                if body is None:
+                    return self.not_found(user)
+                return self.respond(200, body)
             if route == "/account":
                 return self.respond(200, app.view_account(user))
         except sqlite3.OperationalError:

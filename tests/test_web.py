@@ -66,7 +66,7 @@ def login(srv, password="letmein"):
 
 
 def test_everything_gated_except_allowlist(server):
-    for path in ("/", "/topics", "/topic/1", "/search", "/shows", "/account"):
+    for path in ("/", "/topics", "/topic/1", "/search", "/shows", "/show/1", "/account"):
         resp, _ = request(server, "GET", path)
         assert resp.status == 303, path
         assert resp.getheader("Location") == "/login"
@@ -91,10 +91,24 @@ def test_login_with_admin_token_and_browse(server):
     resp, body = request(server, "GET", "/", cookie=cookie)
     assert resp.status == 200 and "Who covered it?" in body
     assert "Fully indexed" in body  # fixture's one episode is already extracted
+    assert 'href="/topics?genre=mystery">mystery (1)' in body  # genre breakdown
+    assert "Recently indexed" in body and "Case 1: Somerton" in body
 
     resp, body = request(server, "GET", "/topic/1", cookie=cookie)
     assert resp.status == 200
     assert "Somerton Man" in body and "Q923144" in body and "Show A" in body
+    assert "href='/show/1'>Show A</a>" in body  # covered-by show pill
+
+    resp, body = request(server, "GET", "/show/1", cookie=cookie)
+    assert resp.status == 200
+    assert "Show A" in body and "Case 1: Somerton" in body
+    assert 'href="/topic/1">Somerton Man</a>' in body  # per-episode topic pill
+
+    resp, _ = request(server, "GET", "/show/999", cookie=cookie)
+    assert resp.status == 404
+
+    resp, body = request(server, "GET", "/shows", cookie=cookie)
+    assert resp.status == 200 and "href='/show/1'>Show A</a>" in body
 
     resp, body = request(server, "GET", "/search?q=somerton", cookie=cookie)
     assert resp.status == 200 and "Somerton Man" in body

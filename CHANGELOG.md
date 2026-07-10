@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-07-10
+
+### Added
+
+- Show detail page (`/show/<id>`): every episode for a show with its
+  extracted topics linked inline, closing the loop with topic pages (which
+  already linked shows -> now shows link back). Show names on `/shows` and
+  the "covered by" line on topic pages both link here.
+- Home page: genre breakdown with per-genre topic counts, and a "recently
+  indexed" feed of the last 8 episodes processed — useful for watching a
+  backfill run live, and for browsing entry points beyond the top-topics list.
+
 ## [0.3.3] - 2026-07-10
 
 ### Added
