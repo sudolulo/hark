@@ -1,4 +1,4 @@
-"""hark command line: resolve, ingest, stats."""
+"""hark command line: resolve, ingest, extract, stats, topics, who."""
 
 from __future__ import annotations
 
@@ -8,10 +8,11 @@ import sys
 
 import httpx
 
-from . import __version__, db, ingest, resolve
+from . import __version__, db, extract, ingest, pipeline, resolve, wikidata
 
 DEFAULT_DB = os.environ.get("HARK_DB", "hark.db")
 DEFAULT_FEEDS = "feeds.txt"
+DEFAULT_MODEL = os.environ.get("HARK_MODEL", extract.DEFAULT_MODEL)
 USER_AGENT = f"hark/{__version__} (homelab podcast indexer)"
 
 
@@ -55,6 +56,117 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         else:
             print(f"  ok    {r.query}: +{r.inserted} new, {r.updated} updated ({r.total} in feed)")
     return 1 if errors else 0
+
+
+def cmd_extract(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db)
+    pending = pipeline.pending_episodes(conn, args.limit)
+    total_pending = conn.execute(
+        "SELECT COUNT(*) FROM episodes WHERE extracted_at IS NULL"
+    ).fetchone()[0]
+    if args.dry_run or not pending:
+        print(f"pending episodes: {total_pending}"
+              + (f" (would process {len(pending)} this run)" if args.limit else ""))
+        return 0
+
+    import anthropic  # deferred: other commands must work without a key
+
+    try:
+        client = anthropic.Anthropic()
+    except anthropic.AnthropicError as exc:
+        print(f"anthropic client: {exc}", file=sys.stderr)
+        print("hint: export ANTHROPIC_API_KEY first (it lives in rbw, not in a file)",
+              file=sys.stderr)
+        return 1
+
+    extractor = extract.ClaudeExtractor(client, model=args.model)
+    ok = failed = 0
+
+    def report(r: pipeline.ExtractResult) -> None:
+        nonlocal ok, failed
+        if r.error:
+            failed += 1
+            print(f"  FAIL  {r.show} — {r.title}: {r.error}")
+        else:
+            ok += 1
+            labels = "; ".join(r.labels) if r.labels else "(no subject)"
+            print(f"  ok    {r.show} — {r.title} -> {labels}")
+
+    with make_client() as http_client:
+        canon = wikidata.Canonicalizer(http_client)
+        pipeline.extract_pending(
+            conn, extractor, canon.canonicalize, source=args.model,
+            limit=args.limit, on_result=report,
+        )
+    remaining = conn.execute(
+        "SELECT COUNT(*) FROM episodes WHERE extracted_at IS NULL"
+    ).fetchone()[0]
+    print(f"extracted {ok} episodes ({failed} failed, {remaining} still pending)")
+    return 1 if failed else 0
+
+
+def cmd_topics(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db)
+    rows = conn.execute(
+        """
+        SELECT t.label, t.wikidata_id,
+               COUNT(DISTINCT et.episode_id) AS episodes,
+               COUNT(DISTINCT e.show_id) AS shows,
+               COALESCE(GROUP_CONCAT(DISTINCT tg.genre), '') AS genres
+        FROM topics t
+        JOIN episode_topics et ON et.topic_id = t.id
+        JOIN episodes e ON e.id = et.episode_id
+        LEFT JOIN topic_genres tg ON tg.topic_id = t.id
+        GROUP BY t.id
+        ORDER BY shows DESC, episodes DESC, t.label
+        LIMIT ?
+        """,
+        (args.limit,),
+    ).fetchall()
+    if not rows:
+        print("no topics yet — run `hark extract` first", file=sys.stderr)
+        return 1
+    for row in rows:
+        qid = row["wikidata_id"] or "-"
+        print(f"  {row['label']:<48} {row['shows']} shows / {row['episodes']:>3} eps"
+              f"   {qid:<12} {row['genres']}")
+    return 0
+
+
+def cmd_who(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db)
+    query = args.topic
+    rows = conn.execute(
+        """
+        SELECT t.id, t.label, t.wikidata_id
+        FROM topics t
+        WHERE t.label LIKE ? COLLATE NOCASE OR t.wikidata_id = ?
+        ORDER BY t.label
+        """,
+        (f"%{query}%", query),
+    ).fetchall()
+    if not rows:
+        print(f"no topic matching {query!r}", file=sys.stderr)
+        return 1
+    for topic in rows:
+        qid = f" [{topic['wikidata_id']}]" if topic["wikidata_id"] else ""
+        print(f"{topic['label']}{qid}")
+        episodes = conn.execute(
+            """
+            SELECT COALESCE(s.title, s.query) AS show, e.title, e.pubdate, et.confidence
+            FROM episode_topics et
+            JOIN episodes e ON e.id = et.episode_id
+            JOIN shows s ON s.id = e.show_id
+            WHERE et.topic_id = ?
+            ORDER BY e.pubdate
+            """,
+            (topic["id"],),
+        ).fetchall()
+        for ep in episodes:
+            date = (ep["pubdate"] or "-")[:10]
+            conf = f"{ep['confidence']:.2f}" if ep["confidence"] is not None else "-"
+            print(f"  {date}  {ep['show']:<30} {ep['title']}  ({conf})")
+    return 0
 
 
 def cmd_stats(args: argparse.Namespace) -> int:
@@ -102,8 +214,24 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("ingest", help="fetch resolved feeds and upsert episodes")
     p.set_defaults(func=cmd_ingest)
 
+    p = sub.add_parser("extract", help="extract episode topics with a Claude model")
+    p.add_argument("--limit", type=int, help="max episodes to process this run")
+    p.add_argument("--model", default=DEFAULT_MODEL,
+                   help=f"Claude model id (default: $HARK_MODEL or {extract.DEFAULT_MODEL})")
+    p.add_argument("--dry-run", action="store_true",
+                   help="only report how many episodes are pending")
+    p.set_defaults(func=cmd_extract)
+
     p = sub.add_parser("stats", help="print database counts per show")
     p.set_defaults(func=cmd_stats)
+
+    p = sub.add_parser("topics", help="list topics by cross-show coverage")
+    p.add_argument("--limit", type=int, default=25, help="rows to show (default: 25)")
+    p.set_defaults(func=cmd_topics)
+
+    p = sub.add_parser("who", help="who covered a topic: search by label or QID")
+    p.add_argument("topic", help="topic label substring or Wikidata QID")
+    p.set_defaults(func=cmd_who)
 
     args = parser.parse_args(argv)
     return args.func(args)
