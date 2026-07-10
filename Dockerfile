@@ -22,8 +22,19 @@ RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev
 ENV PATH="/app/.venv/bin:$PATH" \
     HARK_DB=/app/data/hark.db \
     HARK_AUTH_DB=/app/data/auth.db
+
+# gosu drops from root to the unprivileged `hark` user after the entrypoint
+# fixes ownership of /app/data — Docker creates bind mounts and anonymous
+# volumes as root, which uid 8710 can't write to on its own.
+RUN apt-get update && apt-get install -y --no-install-recommends gosu \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 8710 --no-create-home hark
+
+COPY docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
 VOLUME ["/app/data"]
 EXPOSE 8710
 
-ENTRYPOINT ["hark"]
-CMD ["web", "--bind", "0.0.0.0:8710"]
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["hark", "web", "--bind", "0.0.0.0:8710"]

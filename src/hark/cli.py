@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from typing import Callable
 
 import httpx
 
@@ -20,6 +21,25 @@ def make_client() -> httpx.Client:
     return httpx.Client(
         timeout=30.0, follow_redirects=True, headers={"User-Agent": USER_AGENT}
     )
+
+
+def make_reporter() -> tuple[Callable[[pipeline.ExtractResult], None], dict[str, int]]:
+    """Shared per-episode progress printer for `extract` and `load`."""
+    counts = {"ok": 0, "failed": 0, "skipped": 0}
+
+    def report(r: pipeline.ExtractResult) -> None:
+        if r.error:
+            counts["failed"] += 1
+            print(f"  FAIL  {r.show} — {r.title}: {r.error}")
+        elif r.skipped:
+            counts["skipped"] += 1
+            print(f"  skip  {r.show} — {r.title}: already extracted")
+        else:
+            counts["ok"] += 1
+            labels = "; ".join(r.labels) if r.labels else "(no subject)"
+            print(f"  ok    {r.show} — {r.title} -> {labels}")
+
+    return report, counts
 
 
 def cmd_resolve(args: argparse.Namespace) -> int:
@@ -80,17 +100,7 @@ def cmd_extract(args: argparse.Namespace) -> int:
         return 1
 
     extractor = extract.ClaudeExtractor(client, model=args.model)
-    ok = failed = 0
-
-    def report(r: pipeline.ExtractResult) -> None:
-        nonlocal ok, failed
-        if r.error:
-            failed += 1
-            print(f"  FAIL  {r.show} — {r.title}: {r.error}")
-        else:
-            ok += 1
-            labels = "; ".join(r.labels) if r.labels else "(no subject)"
-            print(f"  ok    {r.show} — {r.title} -> {labels}")
+    report, counts = make_reporter()
 
     with make_client() as http_client:
         canon = wikidata.Canonicalizer(http_client)
@@ -101,8 +111,8 @@ def cmd_extract(args: argparse.Namespace) -> int:
     remaining = conn.execute(
         "SELECT COUNT(*) FROM episodes WHERE extracted_at IS NULL"
     ).fetchone()[0]
-    print(f"extracted {ok} episodes ({failed} failed, {remaining} still pending)")
-    return 1 if failed else 0
+    print(f"extracted {counts['ok']} episodes ({counts['failed']} failed, {remaining} still pending)")
+    return 1 if counts["failed"] else 0
 
 
 def cmd_load(args: argparse.Namespace) -> int:
@@ -115,13 +125,16 @@ def cmd_load(args: argparse.Namespace) -> int:
     except (OSError, json.JSONDecodeError) as exc:
         print(f"cannot read {args.file}: {exc}", file=sys.stderr)
         return 1
-    ok = failed = 0
+    ok = failed = skipped = 0
 
     def report(r: pipeline.ExtractResult) -> None:
-        nonlocal ok, failed
+        nonlocal ok, failed, skipped
         if r.error:
             failed += 1
             print(f"  FAIL  {r.show} — {r.title}: {r.error}")
+        elif r.skipped:
+            skipped += 1
+            print(f"  skip  {r.show} — {r.title}: already extracted")
         else:
             ok += 1
             labels = "; ".join(r.labels) if r.labels else "(no subject)"
@@ -132,7 +145,7 @@ def cmd_load(args: argparse.Namespace) -> int:
         pipeline.load_extractions(
             conn, records, canon.canonicalize, source=args.source, on_result=report
         )
-    print(f"loaded {ok} episodes ({failed} failed)")
+    print(f"loaded {ok} episodes ({skipped} already loaded, {failed} failed)")
     return 1 if failed else 0
 
 
@@ -152,23 +165,10 @@ def cmd_canon(args: argparse.Namespace) -> int:
 
 
 def cmd_topics(args: argparse.Namespace) -> int:
+    from . import web  # deferred: other commands work without importing the web module
+
     conn = db.connect(args.db)
-    rows = conn.execute(
-        """
-        SELECT t.label, t.wikidata_id,
-               COUNT(DISTINCT et.episode_id) AS episodes,
-               COUNT(DISTINCT e.show_id) AS shows,
-               COALESCE(GROUP_CONCAT(DISTINCT tg.genre), '') AS genres
-        FROM topics t
-        JOIN episode_topics et ON et.topic_id = t.id
-        JOIN episodes e ON e.id = et.episode_id
-        LEFT JOIN topic_genres tg ON tg.topic_id = t.id
-        GROUP BY t.id
-        ORDER BY shows DESC, episodes DESC, t.label
-        LIMIT ?
-        """,
-        (args.limit,),
-    ).fetchall()
+    rows = conn.execute(*web.topics_query(limit=args.limit)).fetchall()
     if not rows:
         print("no topics yet — run `hark extract` first", file=sys.stderr)
         return 1
