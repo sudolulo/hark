@@ -5,20 +5,29 @@ Cross-podcast topic index and discovery service for subject-per-episode genres
 real-world case/event/person they cover, so you can ask "who covered the Dyatlov
 Pass incident?" and compare treatments across shows.
 
-See `docs/PLAN.md` for milestones. Current state (0.1.0 / M0): feed resolution and
-episode ingest into SQLite. Topic extraction lands in M1.
+See `docs/PLAN.md` for milestones. Current state (0.2.0 / M1): feed resolution,
+episode ingest, LLM topic extraction with Wikidata canonicalization, and the
+cross-show topic index.
 
 ## Usage
 
 ```
 uv sync
-uv run hark resolve    # feeds.txt show names -> feed URLs (iTunes Search API)
-uv run hark ingest     # fetch feeds, upsert episodes (idempotent)
-uv run hark stats      # counts per show
+uv run hark resolve            # feeds.txt show names -> feed URLs (iTunes Search API)
+uv run hark ingest             # fetch feeds, upsert episodes (idempotent)
+uv run hark extract --limit 20 # extract episode subjects (needs $ANTHROPIC_API_KEY)
+uv run hark stats              # counts per show
+uv run hark topics             # topics ranked by cross-show coverage
+uv run hark who "dyatlov"      # who covered X (label substring or Wikidata QID)
 ```
 
 The database defaults to `./hark.db`; override with `--db` or `$HARK_DB`.
 Show names live in `feeds.txt`, one per line, `#` for comments.
+
+Extraction calls the Anthropic API (default model `claude-opus-4-8`; override
+with `--model` or `$HARK_MODEL`) and canonicalizes labels against Wikidata so
+aliases merge ("BTK" = "Dennis Rader"). Runs are idempotent and resumable:
+processed episodes are marked and skipped, failures are retried next run.
 
 ## Development
 

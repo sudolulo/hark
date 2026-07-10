@@ -39,6 +39,21 @@ def test_episode_guid_unique_per_show(conn):
         conn.execute("INSERT INTO episodes (show_id, guid) VALUES (1, 'ep-1')")
 
 
+def test_migration_adds_extracted_at_to_old_db(tmp_path):
+    """A 0.1.0-era database (no extracted_at) gains the column on connect."""
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.executescript(db.SCHEMA.replace("    extracted_at     TEXT,\n", ""))
+    old.execute("INSERT INTO shows (query) VALUES ('a')")
+    old.execute("INSERT INTO episodes (show_id, guid) VALUES (1, 'g')")
+    old.commit()
+    old.close()
+
+    conn = db.connect(path)
+    row = conn.execute("SELECT extracted_at FROM episodes").fetchone()
+    assert row["extracted_at"] is None
+
+
 def test_utcnow_format():
     value = db.utcnow()
     assert len(value) == 20 and value.endswith("Z") and value[10] == "T"
