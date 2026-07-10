@@ -18,12 +18,30 @@ Milestones. Each one ships something usable and gets a CHANGELOG version.
 - LLM extraction of subject entities from title/description (stub interface in M0; model
   wiring decided when we get here).
   - Wired to the Anthropic API (`claude-opus-4-8` default, `--model`/`$HARK_MODEL` to
-    override, e.g. `claude-haiku-4-5` for cheap runs). Backfill of the ~2,200-episode
-    backlog is triggered manually with `hark extract` once a key is exported.
+    override, e.g. `claude-haiku-4-5` for cheap runs). In practice no `$ANTHROPIC_API_KEY`
+    was ever available on the dev box, so the ~2,200-episode backfill was done by hand:
+    a Claude session acted as the extractor directly, writing structured extraction JSONL
+    across 22 batches, ingested via the new `hark load` command (same canonicalize+store
+    path as `hark extract`, just fed pre-computed records instead of calling the API).
 - Canonicalization against Wikidata (aliases: "BTK" = "Dennis Rader"); multi-part/serial
-  episode handling; multi-genre topics.
-- Topic pages: "who covered X" — the core query. CLI-only for now (`hark who`,
-  `hark topics`); a web UI belongs to a later milestone.
+  episode handling; multi-genre topics. `hark canon` retries unmatched topics.
+- Topic pages: "who covered X" — the core query. Shipped as both CLI (`hark who`,
+  `hark topics`) and web UI (see below) — not CLI-only as originally planned.
+
+## Web UI + deployment (done, 0.3.0–0.3.5)
+
+Not in the original milestone list — added mid-stream on explicit request, ahead of M2.
+
+- Dependency-free stdlib web frontend (`hark web`): home dashboard (coverage stats, genre
+  breakdown, live indexing-status banner, recently-indexed feed), topic pages, per-show
+  pages, genre-filtered and paginated topic listing, search, account/session management.
+- Security model mirrors `~/influence-registry`: session auth, HttpOnly/SameSite cookies,
+  stretched+salted passwords, fail-closed bootstrap via `HARK_ADMIN_TOKEN`.
+- Docker packaging (Dockerfile + compose.yaml) mirrors `~/tiltmeter`'s pattern; runs as
+  uid/gid 568 via a root→chown→`gosu` entrypoint.
+- Deployed live on the homelab TrueNAS box as a custom app.
+- Two full audit passes (security + code-quality, then a screenshot-driven UX pass against
+  the real dataset) — see CHANGELOG 0.3.1 and 0.3.5 for what each one caught.
 
 ## M2 — discovery
 

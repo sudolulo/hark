@@ -84,6 +84,16 @@ def test_security_headers_on_every_response(server):
         assert resp.getheader("Referrer-Policy") == "same-origin"
 
 
+def test_no_inline_styles(server):
+    # The CSP has no style-src 'unsafe-inline', so any style="..." attribute
+    # is silently no-op'd by the browser rather than erroring — easy to miss
+    # without actually rendering the page. Guard against it creeping back in.
+    cookie = login(server)
+    for path in ("/login", "/", "/topics", "/topic/1", "/shows", "/show/1", "/search", "/account"):
+        _, body = request(server, "GET", path, cookie=cookie)
+        assert 'style="' not in body, path
+
+
 def test_login_with_admin_token_and_browse(server):
     cookie = login(server)
     assert cookie.startswith("hark_session=")

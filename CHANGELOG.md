@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-07-10
+
+### Fixed
+
+- The CSP has no `style-src 'unsafe-inline'`, so every inline `style="..."`
+  attribute in the app was being silently dropped by the browser rather than
+  erroring — invisible without actually rendering a page. Found by measuring
+  computed layout, not by reading the HTML. Replaced all three occurrences
+  (login heading spacing, account page layout) with proper CSS classes, and
+  added a regression test asserting no rendered page ever contains a
+  `style="` attribute.
+- Account page: the password-change box and "Log out" button had an
+  unintended ~130px gap between them (a direct symptom of the above — the
+  margin override meant to close it was silently inert). "Log out" is now
+  also visually secondary (outlined) instead of matching "Change password"'s
+  primary button styling, reflecting that they're very different-stakes
+  actions.
+- `/shows`: rows for a show with an indexing backlog (indexed < episodes)
+  now highlight the indexed count instead of looking identical to a fully
+  caught-up show.
+
 ## [0.3.5] - 2026-07-10
 
 Screenshot-driven UX audit found real usability defects, not just polish —

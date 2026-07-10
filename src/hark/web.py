@@ -188,16 +188,21 @@ th { color:var(--dim); font-weight:normal; font-size:0.85rem; text-transform:upp
 form.search { display:flex; gap:0.5rem; margin:1rem 0; }
 input[type=text], input[type=password] { background:var(--panel); border:1px solid var(--line); color:var(--ink); padding:0.45rem 0.6rem; font:inherit; flex:1; }
 button { background:var(--acc); border:0; color:#151007; padding:0.45rem 1rem; font:inherit; cursor:pointer; }
+button.ghost { background:transparent; border:1px solid var(--line); color:var(--ink); }
 .cards { display:grid; grid-template-columns:repeat(auto-fit, minmax(10rem,1fr)); gap:0.8rem; margin:1.2rem 0; }
 .card { background:var(--panel); border:1px solid var(--line); padding:0.8rem 1rem; }
 .card .big { font-size:1.6rem; color:var(--acc); }
 .login-box { max-width:22rem; margin:14vh auto; background:var(--panel); border:1px solid var(--line); padding:1.6rem; }
 .login-box input { width:100%; margin-bottom:0.8rem; }
+.login-box h1 { margin-top:0; }
+.account-actions { display:flex; flex-direction:column; gap:1rem; align-items:flex-start; }
+.account-actions .login-box { margin:0; }
 .err { color:#e07a5f; }
 .qid { font-size:0.78rem; color:var(--dim); }
 .status { border:1px solid var(--line); border-left:3px solid var(--dim); background:var(--panel); padding:0.6rem 1rem; margin:1rem 0; font-size:0.9rem; }
 .status.active { border-left-color:var(--acc); }
 .status p { margin:0.2rem 0; }
+.pending { color:var(--acc); }
 """
 
 PAGE = """<!doctype html>
@@ -456,7 +461,7 @@ class App:
         table = "".join(
             f"<tr><td><a href='/show/{r['id']}'>{esc(r['name'])}</a></td>"
             f"<td class='num'>{r['episodes']}</td>"
-            f"<td class='num'>{r['extracted']}</td>"
+            f"<td class='num{'' if r['extracted'] == r['episodes'] else ' pending'}'>{r['extracted']}</td>"
             f"<td class='dim'>{esc((r['latest'] or '')[:10])}</td></tr>"
             for r in rows
         )
@@ -526,13 +531,15 @@ class App:
     def view_account(self, user, msg: str = "", err: str = "") -> str:
         note = f'<p class="err">{esc(err)}</p>' if err else (f"<p>{esc(msg)}</p>" if msg else "")
         body = f"""<h1>account — {esc(user['username'])}</h1>{note}
-<form method="post" action="/account/password" class="login-box" style="margin:1rem 0">
+<div class="account-actions">
+<form method="post" action="/account/password" class="login-box">
 <label>New password</label><input type="password" name="password" minlength="8" required>
 <label>Repeat</label><input type="password" name="password2" minlength="8" required>
 <button>Change password</button>
 <p class="dim">Changing the password signs out every session.</p>
 </form>
-<form method="post" action="/logout"><button>Log out</button></form>"""
+<form method="post" action="/logout"><button class="ghost">Log out</button></form>
+</div>"""
         return page("account", body, user["username"])
 
 
@@ -668,7 +675,7 @@ def topic_table(rows) -> str:
 
 
 LOGIN_PAGE = """<div class="login-box">
-<h1 style="margin-top:0">hark</h1>
+<h1>hark</h1>
 {err}
 <form method="post" action="/login">
 <label>User</label><input type="text" name="username" autofocus>
