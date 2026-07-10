@@ -163,6 +163,109 @@ def test_index_status_shows_active_when_recently_processed(tmp_path):
         srv.shutdown()
 
 
+def test_show_page_distinguishes_unindexed_from_topicless_episodes(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('q', 'Show A', 'http://x')")
+    conn.executemany(
+        "INSERT INTO episodes (show_id, guid, title, extracted_at) VALUES (1, ?, ?, ?)",
+        [
+            ("g1", "Has topic", "2026-01-01T00:00:00Z"),
+            ("g2", "Trailer, no subject", "2026-01-01T00:00:00Z"),
+            ("g3", "Not indexed yet", None),
+        ],
+    )
+    conn.execute("INSERT INTO topics (label) VALUES ('Something')")
+    conn.execute("INSERT INTO episode_topics (episode_id, topic_id, source) VALUES (1, 1, 't')")
+    conn.commit()
+    conn.close()
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
+        cookie = resp.getheader("Set-Cookie").split(";")[0]
+        resp, body = request(srv, "GET", "/show/1", cookie=cookie)
+        assert resp.status == 200
+        # episode with a topic: pill, no "not yet indexed" note
+        has_topic_row = body.split("Has topic")[1].split("</tr>")[0]
+        assert 'href="/topic/1">Something</a>' in has_topic_row
+        assert "not yet indexed" not in has_topic_row
+        # extracted but genuinely topic-less: neither a pill nor the note
+        topicless_row = body.split("Trailer, no subject")[1].split("</tr>")[0]
+        assert "pill" not in topicless_row and "not yet indexed" not in topicless_row
+        # never extracted: the note, no pill
+        pending_row = body.split("Not indexed yet")[1].split("</tr>")[0]
+        assert "not yet indexed" in pending_row and "pill" not in pending_row
+    finally:
+        srv.shutdown()
+
+
+def test_show_page_paginates_episodes(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('q', 'Big Show', 'http://x')")
+    conn.executemany(
+        "INSERT INTO episodes (show_id, guid, title, pubdate, extracted_at) VALUES (1, ?, ?, ?, ?)",
+        [(f"g{i}", f"Episode {i}", f"2020-01-{i:02d}T00:00:00Z", "2026-01-01T00:00:00Z")
+         for i in range(1, 61)],  # 60 episodes, one more page than PAGE_SIZE (50)
+    )
+    conn.commit()
+    conn.close()
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
+        cookie = resp.getheader("Set-Cookie").split(";")[0]
+
+        resp, body = request(srv, "GET", "/show/1", cookie=cookie)
+        assert resp.status == 200
+        assert "60 episode(s)" in body  # total is the real count, not the page size
+        assert body.count("<tr><td>") == web.PAGE_SIZE  # only one page's worth rendered
+        assert "page 1 of 2" in body
+
+        resp, body = request(srv, "GET", "/show/1?page=2", cookie=cookie)
+        assert resp.status == 200
+        assert body.count("<tr><td>") == 10  # remainder on the second page
+        assert "page 2 of 2" in body
+        assert "&laquo; prev" in body and 'href="/show/1?page=1"' in body
+
+        # out-of-range page clamps to the last page instead of rendering empty
+        resp, body = request(srv, "GET", "/show/1?page=999", cookie=cookie)
+        assert resp.status == 200 and "page 2 of 2" in body
+    finally:
+        srv.shutdown()
+
+
+def test_topics_page_paginates(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('q', 'Show', 'http://x')")
+    conn.execute(
+        "INSERT INTO episodes (show_id, guid, title, extracted_at) VALUES (1, 'g', 'ep', '2026-01-01T00:00:00Z')"
+    )
+    for i in range(1, 55):  # 54 topics, more than one page
+        conn.execute("INSERT INTO topics (label) VALUES (?)", (f"Topic {i:02d}",))
+        conn.execute(
+            "INSERT INTO episode_topics (episode_id, topic_id, source) VALUES (1, ?, 't')", (i,)
+        )
+    conn.commit()
+    conn.close()
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
+        cookie = resp.getheader("Set-Cookie").split(";")[0]
+        resp, body = request(srv, "GET", "/topics", cookie=cookie)
+        assert resp.status == 200 and "page 1 of 2" in body
+        resp, body = request(srv, "GET", "/topics?page=2", cookie=cookie)
+        assert resp.status == 200 and "page 2 of 2" in body
+    finally:
+        srv.shutdown()
+
+
 def test_bad_login_rejected(server):
     resp, _ = request(server, "POST", "/login", body={"username": "admin", "password": "wrong"})
     assert resp.status == 401

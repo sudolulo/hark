@@ -284,7 +284,8 @@ class App:
             ).fetchall()
             recent = conn.execute(
                 """
-                SELECT e.id, e.title, e.extracted_at, COALESCE(s.title, s.query) AS show
+                SELECT e.id, e.title, e.extracted_at, s.id AS show_id,
+                       COALESCE(s.title, s.query) AS show
                 FROM episodes e JOIN shows s ON s.id = e.show_id
                 WHERE e.extracted_at IS NOT NULL
                 ORDER BY e.extracted_at DESC LIMIT 8
@@ -306,7 +307,7 @@ class App:
         )
         recent_html = "".join(
             f"<tr><td class='dim'>{relative_time(parse_iso(r['extracted_at']))}</td>"
-            f"<td>{esc(r['show'])}</td><td>{esc(r['title'])}</td></tr>"
+            f"<td><a href='/show/{r['show_id']}'>{esc(r['show'])}</a></td><td>{esc(r['title'])}</td></tr>"
             for r in recent
         ) or '<tr><td class="dim" colspan="3">Nothing indexed yet.</td></tr>'
         body = (
@@ -325,16 +326,22 @@ class App:
         genre = params.get("genre", [""])[0]
         if genre not in GENRES_FILTER:
             genre = ""
+        page_num = paginate(params)
         conn = self.db()
         try:
-            rows = conn.execute(*topics_query(genre=genre, limit=200)).fetchall()
+            total = conn.execute(*topics_count(genre=genre)).fetchone()[0]
+            rows = conn.execute(
+                *topics_query(genre=genre, limit=PAGE_SIZE, offset=(page_num - 1) * PAGE_SIZE)
+            ).fetchall()
         finally:
             conn.close()
         pills = " ".join(
             f'<a class="pill" href="/topics?genre={g}">{g}</a>' for g in GENRES_FILTER
         )
         title = f"topics — {genre}" if genre else "topics"
-        body = f"<h1>{esc(title)}</h1><p>{pills}</p>" + topic_table(rows)
+        query = {"genre": genre} if genre else {}
+        pager = pagination_html("/topics", query, page_num, total, "topics")
+        body = f"<h1>{esc(title)}</h1><p>{pills}</p>" + topic_table(rows) + pager
         return page(title, body, user["username"])
 
     def view_topic(self, user, topic_id: int) -> str | None:
@@ -384,15 +391,26 @@ class App:
 
     def view_search(self, user, params) -> str:
         q = params.get("q", [""])[0].strip()
-        topics, episodes = [], []
+        page_num = paginate(params)
+        topics, episodes, topic_total, episode_total = [], [], 0, 0
         if q:
             like = f"%{q}%"
             conn = self.db()
             try:
-                topics = conn.execute(*topics_query(q=q, limit=200)).fetchall()
+                topic_total = conn.execute(*topics_count(q=q)).fetchone()[0]
+                topics = conn.execute(
+                    *topics_query(q=q, limit=PAGE_SIZE, offset=(page_num - 1) * PAGE_SIZE)
+                ).fetchall()
+                episode_total = conn.execute(
+                    """
+                    SELECT COUNT(*) FROM episodes e WHERE e.title LIKE ? COLLATE NOCASE
+                    """,
+                    (like,),
+                ).fetchone()[0]
                 episodes = conn.execute(
                     """
-                    SELECT e.id, e.title, e.pubdate, COALESCE(s.title, s.query) AS show
+                    SELECT e.id, e.title, e.pubdate, s.id AS show_id,
+                           COALESCE(s.title, s.query) AS show
                     FROM episodes e JOIN shows s ON s.id = e.show_id
                     WHERE e.title LIKE ? COLLATE NOCASE
                     ORDER BY e.pubdate DESC LIMIT 50
@@ -407,14 +425,18 @@ class App:
             f'<input type="text" name="q" value="{esc(q)}" autofocus><button>Search</button></form>'
         )
         if q:
-            body += f"<h2>{len(topics)} topic(s)</h2>" + topic_table(topics)
+            topics_pager = pagination_html("/search", {"q": q}, page_num, topic_total, "topics")
+            body += f"<h2>{topic_total} topic(s)</h2>" + topic_table(topics) + topics_pager
             eps = "".join(
-                f"<tr><td>{esc(r['show'])}</td><td>{esc(r['title'])}</td>"
+                f"<tr><td><a href='/show/{r['show_id']}'>{esc(r['show'])}</a></td>"
+                f"<td>{esc(r['title'])}</td>"
                 f"<td class='dim'>{esc((r['pubdate'] or '')[:10])}</td></tr>"
                 for r in episodes
             )
-            body += (f"<h2>{len(episodes)} episode title match(es)</h2>"
-                     f"<table>{eps}</table>")
+            note = (f'<p class="dim">showing the 50 most recent of {episode_total} — '
+                    f"narrow your search to see the rest.</p>") if episode_total > 50 else ""
+            body += (f"<h2>{episode_total} episode title match(es)</h2>"
+                     f"<table>{eps}</table>{note}")
         return page("search", body, user["username"])
 
     def view_shows(self, user) -> str:
@@ -442,7 +464,8 @@ class App:
                 f"<th>indexed</th><th>latest</th></tr>{table}</table>")
         return page("shows", body, user["username"])
 
-    def view_show(self, user, show_id: int) -> str | None:
+    def view_show(self, user, show_id: int, params) -> str | None:
+        page_num = paginate(params)
         conn = self.db()
         try:
             show = conn.execute(
@@ -450,23 +473,30 @@ class App:
             ).fetchone()
             if show is None:
                 return None
+            total_episodes = conn.execute(
+                "SELECT COUNT(*) FROM episodes WHERE show_id = ?", (show_id,)
+            ).fetchone()[0]
             episodes = conn.execute(
                 """
                 SELECT id, title, pubdate, audio_url, extracted_at
-                FROM episodes WHERE show_id = ? ORDER BY pubdate DESC
+                FROM episodes WHERE show_id = ? ORDER BY pubdate DESC LIMIT ? OFFSET ?
                 """,
-                (show_id,),
+                (show_id, PAGE_SIZE, (page_num - 1) * PAGE_SIZE),
             ).fetchall()
-            topic_rows = conn.execute(
-                """
-                SELECT et.episode_id, t.id AS topic_id, t.label
-                FROM episode_topics et
-                JOIN topics t ON t.id = et.topic_id
-                WHERE et.episode_id IN (SELECT id FROM episodes WHERE show_id = ?)
-                ORDER BY t.label
-                """,
-                (show_id,),
-            ).fetchall()
+            episode_ids = [r["id"] for r in episodes]
+            topic_rows = []
+            if episode_ids:
+                placeholders = ",".join("?" * len(episode_ids))
+                topic_rows = conn.execute(
+                    f"""
+                    SELECT et.episode_id, t.id AS topic_id, t.label
+                    FROM episode_topics et
+                    JOIN topics t ON t.id = et.topic_id
+                    WHERE et.episode_id IN ({placeholders})
+                    ORDER BY t.label
+                    """,
+                    episode_ids,
+                ).fetchall()
             topic_count = conn.execute(
                 """
                 SELECT COUNT(DISTINCT et.topic_id) FROM episode_topics et
@@ -485,10 +515,11 @@ class App:
             f"<td>{topic_pills(topics_by_episode.get(r['id'], []), r['extracted_at'])}</td></tr>"
             for r in episodes
         )
+        pager = pagination_html(f"/show/{show_id}", {}, page_num, total_episodes, "episodes")
         body = (
             f"<h1>{esc(show['name'])}</h1>"
-            f"<h2>{len(episodes)} episode(s), {topic_count} topic(s) covered</h2>"
-            f"<table><tr><th>episode</th><th>date</th><th>topics</th></tr>{rows_html}</table>"
+            f"<h2>{total_episodes} episode(s), {topic_count} topic(s) covered</h2>"
+            f"<table><tr><th>episode</th><th>date</th><th>topics</th></tr>{rows_html}</table>{pager}"
         )
         return page(show["name"], body, user["username"])
 
@@ -505,9 +536,18 @@ class App:
         return page("account", body, user["username"])
 
 
-def topics_query(genre: str = "", q: str = "", limit: int | None = None) -> tuple[str, tuple]:
+def _topics_filter(genre: str, q: str) -> tuple[str, list]:
+    if genre:
+        return " WHERE t.id IN (SELECT topic_id FROM topic_genres WHERE genre = ?)", [genre]
+    if q:
+        return " WHERE (t.label LIKE ? COLLATE NOCASE OR t.wikidata_id = ?)", [f"%{q}%", q]
+    return "", []
+
+
+def topics_query(genre: str = "", q: str = "", limit: int | None = None,
+                  offset: int = 0) -> tuple[str, tuple]:
     """Build the shared topic-listing query: base coverage stats, optionally
-    filtered by genre or a label/QID search term, optionally capped."""
+    filtered by genre or a label/QID search term, optionally paginated."""
     sql = """
         SELECT t.id, t.label, t.wikidata_id,
                COUNT(DISTINCT et.episode_id) AS episodes,
@@ -518,18 +558,47 @@ def topics_query(genre: str = "", q: str = "", limit: int | None = None) -> tupl
         JOIN episodes e ON e.id = et.episode_id
         LEFT JOIN topic_genres tg ON tg.topic_id = t.id
     """
-    params: list = []
-    if genre:
-        sql += " WHERE t.id IN (SELECT topic_id FROM topic_genres WHERE genre = ?)"
-        params.append(genre)
-    elif q:
-        sql += " WHERE (t.label LIKE ? COLLATE NOCASE OR t.wikidata_id = ?)"
-        params.extend([f"%{q}%", q])
-    sql += " GROUP BY t.id ORDER BY shows DESC, episodes DESC, t.label"
+    where, params = _topics_filter(genre, q)
+    sql += where + " GROUP BY t.id ORDER BY shows DESC, episodes DESC, t.label"
     if limit:
-        sql += " LIMIT ?"
-        params.append(limit)
+        sql += " LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
     return sql, tuple(params)
+
+
+def topics_count(genre: str = "", q: str = "") -> tuple[str, tuple]:
+    """Total topics matching the same filter as topics_query, for pagination.
+    The filter only ever references columns on `t`, so no join is needed —
+    unlike topics_query, which joins to compute per-topic episode/show counts."""
+    where, params = _topics_filter(genre, q)
+    return f"SELECT COUNT(*) FROM topics t{where}", tuple(params)
+
+
+PAGE_SIZE = 50
+
+
+def paginate(params: dict) -> int:
+    """Parse ?page=N from query params, clamped to >= 1."""
+    try:
+        return max(1, int(params.get("page", ["1"])[0]))
+    except ValueError:
+        return 1
+
+
+def pagination_html(path: str, query: dict, page: int, total: int, label: str,
+                     page_size: int = PAGE_SIZE) -> str:
+    if total <= page_size:
+        return ""
+    last = (total - 1) // page_size + 1
+    page = min(page, last)
+
+    def link(p: int) -> str:
+        return f"{path}?{urllib.parse.urlencode({**query, 'page': p})}"
+
+    prev = f'<a href="{link(page - 1)}">&laquo; prev</a>' if page > 1 else '<span class="dim">&laquo; prev</span>'
+    nxt = f'<a href="{link(page + 1)}">next &raquo;</a>' if page < last else '<span class="dim">next &raquo;</span>'
+    return (f'<p class="dim">{prev} &nbsp; page {page} of {last} '
+            f'({total} {esc(label)}) &nbsp; {nxt}</p>')
 
 
 ACTIVE_WINDOW = timedelta(minutes=15)
@@ -726,7 +795,7 @@ class Handler(BaseHTTPRequestHandler):
                     show_id = int(route.rsplit("/", 1)[1])
                 except ValueError:
                     return self.not_found(user)
-                body = app.view_show(user, show_id)
+                body = app.view_show(user, show_id, params)
                 if body is None:
                     return self.not_found(user)
                 return self.respond(200, body)

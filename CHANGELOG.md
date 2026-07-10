@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-07-10
+
+Screenshot-driven UX audit found real usability defects, not just polish —
+fixed and re-verified against the live dataset.
+
+### Fixed
+
+- Show pages rendered every episode on one page with no pagination — the
+  411-episode Casefile True Crime page was 23,607px tall (724 episodes for
+  the largest show would have been worse). Now paginated at 50/page.
+- `/topics` and search results silently capped at 200 rows with no way to
+  reach anything beyond that — a genre with more topics than the cap (e.g.
+  history at 783) had the majority permanently unreachable through
+  browsing. Now paginated, with an honest total count.
+- Search's episode-title matches (capped at 50, uncapped in the underlying
+  data) now say so explicitly instead of silently truncating.
+- Home page's "recently indexed" show names are now links, matching every
+  other place in the app where a show name appears.
+
 ## [0.3.4] - 2026-07-10
 
 ### Added
