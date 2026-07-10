@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
+  <channel>
+    <title>Example Case Show</title>
+    <link>https://example.com/show</link>
+    <description>One real-world case per episode.</description>
+    <image>
+      <url>https://example.com/art.png</url>
+      <title>Example Case Show</title>
+      <link>https://example.com/show</link>
+    </image>
+    <item>
+      <title>Case 4: The Antikythera Mechanism</title>
+      <guid isPermaLink="false">ep-004</guid>
+      <description>An ancient Greek device recovered from a shipwreck in 1901.</description>
+      <pubDate>Wed, 22 Jan 2025 06:00:00 GMT</pubDate>
+      <itunes:duration>50:00</itunes:duration>
+      <enclosure url="https://example.com/audio/ep4.mp3" length="100" type="audio/mpeg"/>
+    </item>
+    <item>
+      <title>Case 1: The Somerton Man</title>
+      <guid isPermaLink="false">ep-001</guid>
+      <description>An unidentified man found on Somerton Beach in 1948.</description>
+      <pubDate>Wed, 01 Jan 2025 06:00:00 GMT</pubDate>
+      <itunes:duration>01:02:03</itunes:duration>
+      <enclosure url="https://example.com/audio/ep1.mp3" length="100" type="audio/mpeg"/>
+    </item>
+    <item>
+      <title>Case 2: Dyatlov Pass (remastered)</title>
+      <guid isPermaLink="false">ep-002</guid>
+      <description>Nine hikers die in the Ural Mountains in 1959. Remastered audio.</description>
+      <pubDate>Wed, 08 Jan 2025 06:00:00 GMT</pubDate>
+      <itunes:duration>46:30</itunes:duration>
+      <enclosure url="https://example.com/audio/ep2-remaster.mp3" length="100" type="audio/mpeg"/>
+    </item>
+    <item>
+      <title>Case 3: No GUID</title>
+      <description>Entry without a guid falls back to the enclosure URL.</description>
+      <pubDate>Wed, 15 Jan 2025 06:00:00 GMT</pubDate>
+      <itunes:duration>1800</itunes:duration>
+      <enclosure url="https://example.com/audio/ep3.mp3" length="100" type="audio/mpeg"/>
+    </item>
+  </channel>
+</rss>
