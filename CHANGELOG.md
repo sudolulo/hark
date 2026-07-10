@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-07-10
+
+### Changed
+
+- Docker: the container's unprivileged user now runs as uid/gid 568 (TrueNAS
+  SCALE's standard "apps" account) instead of an arbitrary 8710, so files in
+  the data volume land owned consistently with every other app on that host.
+  Ownership is still fixed up automatically by the entrypoint on start,
+  regardless of the mounted directory's prior owner.
+
 ## [0.3.1] - 2026-07-10
 
 Hardening pass ahead of the TrueNAS deploy: a full audit surfaced 15 issues,

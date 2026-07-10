@@ -25,10 +25,13 @@ ENV PATH="/app/.venv/bin:$PATH" \
 
 # gosu drops from root to the unprivileged `hark` user after the entrypoint
 # fixes ownership of /app/data — Docker creates bind mounts and anonymous
-# volumes as root, which uid 8710 can't write to on its own.
+# volumes as root, which this user can't write to on its own. uid/gid 568
+# matches TrueNAS SCALE's standard "apps" account, so files land owned by
+# the same user/group as every other app on that host; harmless elsewhere.
 RUN apt-get update && apt-get install -y --no-install-recommends gosu \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --uid 8710 --no-create-home hark
+    && groupadd --gid 568 hark \
+    && useradd --system --uid 568 --gid 568 --no-create-home hark
 
 COPY docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
