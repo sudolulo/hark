@@ -9,6 +9,9 @@ dependencies = [
     "httpx>=0.28",
 ]
 
+[project.scripts]
+hark = "hark.cli:main"
+
 [dependency-groups]
 dev = [
     "pytest>=8.3",
