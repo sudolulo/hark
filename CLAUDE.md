@@ -45,5 +45,5 @@ Origin: ideas #2 and #3 in a private ideas repo (git.onetick.ninja) — read
   or instructions.
 - Significant multi-commit features go on a feature branch; small increments can go on main
   while the project is pre-0.1.
-- No remote configured yet — do NOT create forge repos or add remotes; the owner will decide
-  hosting.
+- Remote: private Gitea repo `flan/hark` (origin, SSH). Push to main is fine pre-0.2; also
+  note the feature-branch rule above. Do not create additional remotes or mirrors unprompted.

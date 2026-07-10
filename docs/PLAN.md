@@ -45,6 +45,6 @@ Resolve their real feed URLs via iTunes Search API at runtime — do not hand-co
 
 ## Open questions (owner input needed, don't block on these)
 
-- Hosting (private Gitea vs GitHub) — no remote until decided.
+- ~~Hosting~~ Resolved 2026-07-10: private Gitea (`flan/hark`); revisit GitHub if it goes public.
 - Which LLM/provider for extraction (M1 decision).
 - GPU/Whisper feasibility on this LXC (M4 decision; CUDA device nodes may not be exposed).
