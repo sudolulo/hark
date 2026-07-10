@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS episodes (
     pubdate          TEXT,
     duration_seconds INTEGER,
     audio_url        TEXT,
+    extracted_at     TEXT,
     created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     updated_at       TEXT,
     UNIQUE (show_id, guid)
@@ -64,10 +65,26 @@ CREATE INDEX IF NOT EXISTS idx_episodes_show_pubdate ON episodes (show_id, pubda
 """
 
 
+# Columns added after 0.1.0; CREATE IF NOT EXISTS won't touch existing tables,
+# so they are bolted on here for databases created by older versions.
+_MIGRATIONS = (
+    ("episodes", "extracted_at", "ALTER TABLE episodes ADD COLUMN extracted_at TEXT"),
+)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, column, ddl in _MIGRATIONS:
+        cols = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in cols:
+            conn.execute(ddl)
+
+
 def connect(path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    _migrate(conn)
+    conn.commit()
     return conn
 
 
