@@ -32,6 +32,7 @@ class ExtractResult:
     title: str
     labels: list[str] = field(default_factory=list)
     error: str | None = None
+    skipped: bool = False  # e.g. already extracted — not a failure, just a no-op
 
 
 def pending_episodes(conn: sqlite3.Connection, limit: int | None = None) -> list[sqlite3.Row]:
@@ -153,24 +154,48 @@ def recanonicalize(
     """Retry Wikidata canonicalization for topics without a QID.
 
     Used after throttled or offline runs. A fresh match either upgrades the
-    topic in place (label + QID) or, when another topic already owns that QID
-    or label, merges this topic into it: episode links and genres move over,
-    the duplicate row is deleted.
+    topic in place (label + QID) or, when another topic already owns that
+    QID, merges this topic into it: episode links and genres move over, the
+    duplicate row is deleted. A label collision with a topic that already
+    carries a *different* QID is not a merge — that's two distinct entities
+    sharing a display string (e.g. "Mercury" the planet vs. the element) —
+    so it's left as an in-place update rather than corrupting the existing
+    topic's identity.
     """
     results: list[CanonResult] = []
-    rows = conn.execute("SELECT id, label FROM topics WHERE wikidata_id IS NULL").fetchall()
-    for row in rows:
+    for row in conn.execute("SELECT id, label FROM topics WHERE wikidata_id IS NULL").fetchall():
+        # Re-check: an earlier iteration in this same pass may have already
+        # merged this row away or resolved it as a merge target.
+        current = conn.execute(
+            "SELECT wikidata_id FROM topics WHERE id = ?", (row["id"],)
+        ).fetchone()
+        if current is None or current["wikidata_id"] is not None:
+            continue
         match = canonicalize(row["label"])
         if match is None:
             continue
         target = conn.execute(
-            "SELECT id FROM topics WHERE (wikidata_id = ? OR label = ?) AND id != ?",
-            (match.qid, match.label, row["id"]),
+            "SELECT id FROM topics WHERE wikidata_id = ? AND id != ?",
+            (match.qid, row["id"]),
         ).fetchone()
         if target is None:
+            target = conn.execute(
+                "SELECT id FROM topics WHERE label = ? AND wikidata_id IS NULL AND id != ?",
+                (match.label, row["id"]),
+            ).fetchone()
+        if target is None:
+            # A different, already-resolved topic may already occupy this
+            # exact label (the "Mercury" planet/element case) — topics.label
+            # is UNIQUE, so adopting it verbatim would crash. Disambiguate
+            # with the QID instead of colliding or clobbering that topic.
+            label = match.label
+            if conn.execute(
+                "SELECT 1 FROM topics WHERE label = ? AND id != ?", (label, row["id"])
+            ).fetchone():
+                label = f"{match.label} ({match.qid})"
             conn.execute(
                 "UPDATE topics SET label = ?, wikidata_id = ? WHERE id = ?",
-                (match.label, match.qid, row["id"]),
+                (label, match.qid, row["id"]),
             )
             merged = False
         else:
@@ -194,8 +219,9 @@ def recanonicalize(
             )
             conn.execute("DELETE FROM topics WHERE id = ?", (row["id"],))
             merged = True
+            label = match.label
         conn.commit()
-        results.append(CanonResult(row["label"], match.label, match.qid, merged))
+        results.append(CanonResult(row["label"], label, match.qid, merged))
     return results
 
 
@@ -227,22 +253,26 @@ def load_extractions(
                                    error=f"unknown episode_id {episode_id!r}")
         elif row["extracted_at"] is not None:
             result = ExtractResult(episode_id=row["id"], show=row["show"],
-                                   title=row["title"] or "", error="already extracted")
+                                   title=row["title"] or "", skipped=True)
         else:
-            topics = [
-                ExtractedTopic(
-                    label=str(t.get("label", "")).strip(),
-                    genres=tuple(g for g in t.get("genres", ()) if g in GENRES),
-                    confidence=None if t.get("confidence") is None
-                    else max(0.0, min(1.0, float(t["confidence"]))),
-                )
-                for t in record.get("topics", [])
-                if str(t.get("label", "")).strip()
-            ]
             result = ExtractResult(episode_id=row["id"], show=row["show"],
                                    title=row["title"] or "")
-            result.labels = _store(conn, row["id"], topics, canonicalize, source)
-            conn.commit()
+            try:
+                topics = [
+                    ExtractedTopic(
+                        label=str(t.get("label", "")).strip(),
+                        genres=tuple(g for g in t.get("genres", ()) if g in GENRES),
+                        confidence=None if t.get("confidence") is None
+                        else max(0.0, min(1.0, float(t["confidence"]))),
+                    )
+                    for t in record.get("topics", [])
+                    if str(t.get("label", "")).strip()
+                ]
+                result.labels = _store(conn, row["id"], topics, canonicalize, source)
+                conn.commit()
+            except Exception as exc:  # noqa: BLE001 — per-record isolation, keep the batch going
+                conn.rollback()
+                result.error = str(exc)
         results.append(result)
         if on_result:
             on_result(result)

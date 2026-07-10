@@ -75,3 +75,42 @@ def test_canonicalize_gives_up_after_retries():
     canon = make_canon(handler, retries=2)
     assert canon.canonicalize("Anything") is None
     assert len(calls) == 3
+
+
+def test_canonicalize_retries_http_date_retry_after(monkeypatch):
+    from hark import wikidata
+
+    calls = []
+    sleeps = []
+    monkeypatch.setattr(wikidata.time, "sleep", lambda s: sleeps.append(s))
+
+    def handler(request):
+        calls.append(1)
+        if len(calls) == 1:
+            # RFC 7231 permits an HTTP-date here, not just delta-seconds.
+            return httpx.Response(429, headers={"retry-after": "Wed, 21 Oct 2099 07:28:00 GMT"})
+        return search_response([{"id": "Q1", "label": "Whatever"}])
+
+    canon = make_canon(handler)
+    match = canon.canonicalize("whatever")
+    assert match.qid == "Q1"
+    assert len(calls) == 2
+    assert sleeps == [wikidata.MAX_BACKOFF]  # far-future date clamps to the cap, doesn't crash
+
+
+def test_canonicalize_retries_transport_errors(monkeypatch):
+    from hark import wikidata
+
+    monkeypatch.setattr(wikidata.time, "sleep", lambda s: None)
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        if len(calls) == 1:
+            raise httpx.ConnectError("boom", request=request)
+        return search_response([{"id": "Q99", "label": "Recovered"}])
+
+    canon = make_canon(handler)
+    match = canon.canonicalize("flaky")
+    assert match.qid == "Q99"
+    assert len(calls) == 2

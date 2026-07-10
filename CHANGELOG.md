@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-10
+
+Hardening pass ahead of the TrueNAS deploy: a full audit surfaced 15 issues,
+all fixed and covered by regression tests.
+
+### Fixed
+
+- `hark canon`: a topic sharing another entity's Wikidata display label
+  (e.g. "Mercury" the planet vs. the element) could silently overwrite that
+  entity's QID and merge unrelated episodes onto it. Only an actual QID match
+  (or an unresolved same-label topic) is now treated as a merge target; a
+  genuine label collision between two resolved entities is disambiguated
+  with the QID instead of colliding on the `topics.label` unique constraint.
+- Web UI: a missing or not-yet-created `hark.db` (e.g. a fresh volume before
+  the first ingest) crashed every authenticated route with an unhandled
+  exception and no HTTP response; now returns a clear 503.
+- Web UI: POST requests that redirected before reading the body (expired
+  session, unmatched route) left it undrained, desyncing the next
+  HTTP/1.1 keep-alive request on the same connection; the body is now always
+  consumed. An oversized body now closes the connection instead of risking
+  the same desync.
+- Docker: the non-root `hark` user couldn't write a freshly-created bind
+  mount or volume (Docker creates these as root), so the container
+  crash-looped on first start. The entrypoint now fixes ownership as root
+  before dropping to the unprivileged user via `gosu`.
+- `hark load`: a malformed record no longer aborts the whole batch — each
+  record is isolated like `hark extract` already isolates episodes.
+  Re-loading already-extracted episodes is now reported as a skip, not a
+  failure (previously exit code 1 on an idempotent re-run).
+- Wikidata canonicalizer: a `Retry-After` header in HTTP-date form (RFC 7231
+  permits either format) crashed and was silently swallowed as "no match";
+  parsing now handles both forms and caps the wait. Transport-level failures
+  (timeouts, connection resets) now retry like throttling responses do,
+  instead of giving up on the first attempt.
+
+### Changed
+
+- Consolidated three near-duplicate topic-listing queries (home, `/topics`,
+  `/search`, and `hark topics`) into one query builder; `/search`'s topic
+  results are now capped like every other list view.
+- `GENRES_FILTER` in the web UI is no longer a second copy of `extract.GENRES`.
+
 ## [0.3.0] - 2026-07-10
 
 Web frontend + deployment.

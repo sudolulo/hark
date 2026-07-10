@@ -124,6 +124,42 @@ def test_fail_closed_without_token(tmp_path):
         srv.shutdown()
 
 
+def test_missing_hark_db_returns_503_not_crash(tmp_path):
+    # hark.db is never created — simulates a fresh volume before any ingest.
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        cookie = login(srv, password="t")
+        resp, body = request(srv, "GET", "/", cookie=cookie)
+        assert resp.status == 503
+        assert "Not ready" in body
+        # /healthz never touches hark.db, so it stays healthy regardless
+        resp, _ = request(srv, "GET", "/healthz")
+        assert resp.status == 200
+    finally:
+        srv.shutdown()
+
+
+def test_post_without_session_drains_body_no_keepalive_desync(server):
+    conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+    body = urllib.parse.urlencode({"password": "x", "password2": "x"})
+    conn.request("POST", "/account/password", body=body,
+                 headers={"Content-Type": "application/x-www-form-urlencoded"})
+    resp1 = conn.getresponse()
+    assert resp1.status == 303  # no session -> redirected to /login
+    resp1.read()
+
+    # If the body above wasn't drained, this next request on the same
+    # connection would be parsed starting mid-body and come back mangled.
+    conn.request("GET", "/healthz")
+    resp2 = conn.getresponse()
+    assert resp2.status == 200
+    assert resp2.read() == b"ok"
+    conn.close()
+
+
 def test_password_change_revokes_sessions_and_disables_token(server):
     cookie = login(server)
     resp, _ = request(server, "POST", "/account/password",
@@ -168,6 +204,38 @@ def test_cookie_secure_flag(tmp_path):
     try:
         resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
         assert "Secure" in resp.getheader("Set-Cookie")
+    finally:
+        srv.shutdown()
+
+
+def test_audio_link_scheme_allowlist(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('q', 'S', 'http://x')")
+    conn.executemany(
+        "INSERT INTO episodes (show_id, guid, title, audio_url, extracted_at)"
+        " VALUES (1, ?, ?, ?, '2026-01-01T00:00:00Z')",
+        [
+            ("g1", "ok", "https://cdn/a.mp3"),
+            ("g2", "evil", "javascript:alert(1)"),
+        ],
+    )
+    conn.execute("INSERT INTO topics (label) VALUES ('T')")
+    conn.executemany(
+        "INSERT INTO episode_topics (episode_id, topic_id, source) VALUES (?, 1, 't')",
+        [(1,), (2,)],
+    )
+    conn.commit()
+    conn.close()
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
+        cookie = resp.getheader("Set-Cookie").split(";")[0]
+        resp, body = request(srv, "GET", "/topic/1", cookie=cookie)
+        assert 'href="https://cdn/a.mp3"' in body
+        assert "javascript:" not in body
     finally:
         srv.shutdown()
 

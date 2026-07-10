@@ -138,7 +138,8 @@ def test_load_extractions_validates_and_stores(tmp_path):
     assert pipeline.pending_episodes(conn) == []  # both marked, incl. zero-topic
 
     again = pipeline.load_extractions(conn, records[:1], canonicalize, source="sess")
-    assert again[0].error == "already extracted"
+    assert again[0].error is None
+    assert again[0].skipped is True
 
 
 def test_recanonicalize_upgrades_in_place(tmp_path):
@@ -179,6 +180,30 @@ def test_recanonicalize_merges_duplicates(tmp_path):
     assert [row["episode_id"] for row in links] == [1, 2]
     genres = {r["genre"] for r in conn.execute("SELECT genre FROM topic_genres")}
     assert genres == {"true_crime", "biography"}
+
+
+def test_recanonicalize_does_not_clobber_unrelated_qid_on_label_collision(tmp_path):
+    """Two distinct entities sharing a display label (planet vs. element,
+    both called "Mercury") must not get merged just because their labels
+    coincide — only a QID match (or an unresolved label match) may merge."""
+    conn = db.connect(tmp_path / "t.db")
+    seed(conn, ["ep1", "ep2"])
+    extractor = FakeExtractor({
+        "ep1": [ExtractedTopic(label="the planet", genres=("history",))],
+        "ep2": [ExtractedTopic(label="quicksilver metal", genres=("history",))],
+    })
+    pipeline.extract_pending(conn, extractor, lambda label: None, source="test")
+
+    matches = {
+        "the planet": WikidataMatch(qid="Q308", label="Mercury"),
+        "quicksilver metal": WikidataMatch(qid="Q925", label="Mercury"),
+    }
+    pipeline.recanonicalize(conn, lambda label: matches[label.casefold()])
+
+    rows = {r["wikidata_id"]: r["label"] for r in conn.execute("SELECT label, wikidata_id FROM topics")}
+    assert set(rows) == {"Q308", "Q925"}  # two rows, neither QID overwritten
+    assert list(rows.values()).count("Mercury") == 1  # one keeps the plain label
+    assert any(v.startswith("Mercury (Q9") for v in rows.values())  # the other is disambiguated
 
 
 def test_recanonicalize_skips_unmatched(tmp_path):

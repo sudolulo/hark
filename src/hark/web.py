@@ -18,6 +18,7 @@ embedded stylesheet served from /static/style.css so the CSP can stay strict
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import html
 import os
@@ -31,15 +32,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from . import __version__
+from .extract import GENRES as GENRES_FILTER
 
 PW_ITERS = 120_000
 SESSION_DAYS = 30
 COOKIE = "hark_session"
-
-GENRES_FILTER = (
-    "true_crime", "history", "disaster", "scam_fraud", "biography",
-    "espionage", "cult", "mystery", "other",
-)
+MAX_FORM_BYTES = 65536
 
 AUTH_SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -82,11 +80,10 @@ class Auth:
     def __init__(self, path: str | Path, admin_token: str | None, admin_user: str = "admin"):
         self.path = str(path)
         self.admin_token = admin_token or None
-        conn = self._connect()
-        conn.executescript(AUTH_SCHEMA)
-        conn.execute("INSERT OR IGNORE INTO users (username) VALUES (?)", (admin_user,))
-        conn.commit()
-        conn.close()
+        with contextlib.closing(self._connect()) as conn:
+            conn.executescript(AUTH_SCHEMA)
+            conn.execute("INSERT OR IGNORE INTO users (username) VALUES (?)", (admin_user,))
+            conn.commit()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path)
@@ -97,8 +94,7 @@ class Auth:
         """Return user id on success. Fail-closed: an account with no stored
         password only accepts the bootstrap admin token, and if that is unset
         nothing is accepted."""
-        conn = self._connect()
-        try:
+        with contextlib.closing(self._connect()) as conn:
             row = conn.execute(
                 "SELECT id, salt, password_hash FROM users WHERE username = ?", (username,)
             ).fetchone()
@@ -112,25 +108,21 @@ class Auth:
             if self.admin_token and constant_eq(password, self.admin_token):
                 return row["id"]
             return None
-        finally:
-            conn.close()
 
     def create_session(self, user_id: int) -> str:
         token = secrets.token_hex(32)
-        conn = self._connect()
-        conn.execute(
-            "INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)",
-            (token, user_id, iso(utcnow() + timedelta(days=SESSION_DAYS))),
-        )
-        conn.commit()
-        conn.close()
+        with contextlib.closing(self._connect()) as conn:
+            conn.execute(
+                "INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)",
+                (token, user_id, iso(utcnow() + timedelta(days=SESSION_DAYS))),
+            )
+            conn.commit()
         return token
 
     def session_user(self, token: str | None) -> sqlite3.Row | None:
         if not token:
             return None
-        conn = self._connect()
-        try:
+        with contextlib.closing(self._connect()) as conn:
             return conn.execute(
                 """
                 SELECT u.id, u.username FROM sessions s JOIN users u ON u.id = s.user_id
@@ -138,28 +130,24 @@ class Auth:
                 """,
                 (token, iso(utcnow())),
             ).fetchone()
-        finally:
-            conn.close()
 
     def drop_session(self, token: str | None) -> None:
         if not token:
             return
-        conn = self._connect()
-        conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
-        conn.commit()
-        conn.close()
+        with contextlib.closing(self._connect()) as conn:
+            conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+            conn.commit()
 
     def set_password(self, user_id: int, password: str) -> None:
         """Set a new password and revoke every session (all devices log out)."""
         salt = secrets.token_hex(16)
-        conn = self._connect()
-        conn.execute(
-            "UPDATE users SET salt = ?, password_hash = ? WHERE id = ?",
-            (salt, stretch(salt, password), user_id),
-        )
-        conn.execute("DELETE FROM sessions")
-        conn.commit()
-        conn.close()
+        with contextlib.closing(self._connect()) as conn:
+            conn.execute(
+                "UPDATE users SET salt = ?, password_hash = ? WHERE id = ?",
+                (salt, stretch(salt, password), user_id),
+            )
+            conn.execute("DELETE FROM sessions")
+            conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -263,7 +251,7 @@ class App:
                     GROUP BY et.topic_id HAVING COUNT(DISTINCT e.show_id) > 1)
                 """
             ).fetchone()[0]
-            rows = conn.execute(TOP_TOPICS_SQL + " LIMIT 15").fetchall()
+            rows = conn.execute(*topics_query(limit=15)).fetchall()
         finally:
             conn.close()
         cards = f"""
@@ -284,13 +272,11 @@ class App:
 
     def view_topics(self, user, params) -> str:
         genre = params.get("genre", [""])[0]
+        if genre not in GENRES_FILTER:
+            genre = ""
         conn = self.db()
         try:
-            if genre in GENRES_FILTER:
-                rows = conn.execute(TOP_TOPICS_BY_GENRE_SQL, (genre,)).fetchall()
-            else:
-                genre = ""
-                rows = conn.execute(TOP_TOPICS_SQL + " LIMIT 200").fetchall()
+            rows = conn.execute(*topics_query(genre=genre, limit=200)).fetchall()
         finally:
             conn.close()
         pills = " ".join(
@@ -350,10 +336,7 @@ class App:
             like = f"%{q}%"
             conn = self.db()
             try:
-                topics = conn.execute(
-                    TOP_TOPICS_SQL.replace("GROUP BY", "WHERE t.label LIKE ? COLLATE NOCASE OR t.wikidata_id = ? GROUP BY"),
-                    (like, q),
-                ).fetchall()
+                topics = conn.execute(*topics_query(q=q, limit=200)).fetchall()
                 episodes = conn.execute(
                     """
                     SELECT e.id, e.title, e.pubdate, COALESCE(s.title, s.query) AS show
@@ -418,33 +401,31 @@ class App:
         return page("account", body, user["username"])
 
 
-TOP_TOPICS_SQL = """
-SELECT t.id, t.label, t.wikidata_id,
-       COUNT(DISTINCT et.episode_id) AS episodes,
-       COUNT(DISTINCT e.show_id) AS shows,
-       COALESCE(GROUP_CONCAT(DISTINCT tg.genre), '') AS genres
-FROM topics t
-JOIN episode_topics et ON et.topic_id = t.id
-JOIN episodes e ON e.id = et.episode_id
-LEFT JOIN topic_genres tg ON tg.topic_id = t.id
-GROUP BY t.id
-ORDER BY shows DESC, episodes DESC, t.label
-"""
-
-TOP_TOPICS_BY_GENRE_SQL = """
-SELECT t.id, t.label, t.wikidata_id,
-       COUNT(DISTINCT et.episode_id) AS episodes,
-       COUNT(DISTINCT e.show_id) AS shows,
-       COALESCE(GROUP_CONCAT(DISTINCT tg.genre), '') AS genres
-FROM topics t
-JOIN episode_topics et ON et.topic_id = t.id
-JOIN episodes e ON e.id = et.episode_id
-LEFT JOIN topic_genres tg ON tg.topic_id = t.id
-WHERE t.id IN (SELECT topic_id FROM topic_genres WHERE genre = ?)
-GROUP BY t.id
-ORDER BY shows DESC, episodes DESC, t.label
-LIMIT 200
-"""
+def topics_query(genre: str = "", q: str = "", limit: int | None = None) -> tuple[str, tuple]:
+    """Build the shared topic-listing query: base coverage stats, optionally
+    filtered by genre or a label/QID search term, optionally capped."""
+    sql = """
+        SELECT t.id, t.label, t.wikidata_id,
+               COUNT(DISTINCT et.episode_id) AS episodes,
+               COUNT(DISTINCT e.show_id) AS shows,
+               COALESCE(GROUP_CONCAT(DISTINCT tg.genre), '') AS genres
+        FROM topics t
+        JOIN episode_topics et ON et.topic_id = t.id
+        JOIN episodes e ON e.id = et.episode_id
+        LEFT JOIN topic_genres tg ON tg.topic_id = t.id
+    """
+    params: list = []
+    if genre:
+        sql += " WHERE t.id IN (SELECT topic_id FROM topic_genres WHERE genre = ?)"
+        params.append(genre)
+    elif q:
+        sql += " WHERE (t.label LIKE ? COLLATE NOCASE OR t.wikidata_id = ?)"
+        params.extend([f"%{q}%", q])
+    sql += " GROUP BY t.id ORDER BY shows DESC, episodes DESC, t.label"
+    if limit:
+        sql += " LIMIT ?"
+        params.append(limit)
+    return sql, tuple(params)
 
 
 def conf(value) -> str:
@@ -453,8 +434,11 @@ def conf(value) -> str:
 
 def episode_cell(row) -> str:
     title = esc(row["title"])
-    if row["audio_url"]:
-        return f'{title} <a class="qid" href="{esc(row["audio_url"])}" rel="noreferrer">▶</a>'
+    url = row["audio_url"] or ""
+    # Enclosure URLs come from third-party feeds; only link plain http(s) so a
+    # hostile feed can't smuggle a javascript:/data: scheme into an href.
+    if urllib.parse.urlsplit(url).scheme in ("http", "https"):
+        return f'{title} <a class="qid" href="{esc(url)}" rel="noreferrer">▶</a>'
     return title
 
 
@@ -490,8 +474,11 @@ class Handler(BaseHTTPRequestHandler):
     server_version = f"hark/{__version__}"
     protocol_version = "HTTP/1.1"
 
-    def log_message(self, fmt, *args):  # quiet access log; errors still surface
+    def log_message(self, fmt, *args):  # quiet access log
         pass
+
+    def log_error(self, fmt, *args):  # bypass log_message so errors still surface
+        BaseHTTPRequestHandler.log_message(self, fmt, *args)
 
     # -- helpers -------------------------------------------------------------
 
@@ -534,8 +521,25 @@ class Handler(BaseHTTPRequestHandler):
 
     def form(self) -> dict:
         length = int(self.headers.get("Content-Length", 0) or 0)
-        raw = self.rfile.read(min(length, 65536)).decode(errors="replace")
+        if length > MAX_FORM_BYTES:
+            # Too large to read safely; don't try to keep the connection
+            # alive with an unread tail still sitting in the socket.
+            self.close_connection = True
+            return {}
+        raw = self.rfile.read(length).decode(errors="replace")
         return {k: v[0] for k, v in urllib.parse.parse_qs(raw).items()}
+
+    def not_found(self, user) -> None:
+        return self.respond(404, page("404", "<h1>Not found</h1>", user["username"]))
+
+    def db_unavailable(self, user) -> None:
+        return self.respond(503, page(
+            "unavailable",
+            "<h1>Not ready</h1><p>The topic database hasn't been created yet — "
+            "run <code>hark ingest</code> and <code>hark extract</code> "
+            "(or <code>hark load</code>) first.</p>",
+            user["username"],
+        ))
 
     # -- routing -------------------------------------------------------------
 
@@ -556,33 +560,36 @@ class Handler(BaseHTTPRequestHandler):
         if user is None:
             return self.redirect("/login")
 
-        if route == "/":
-            return self.respond(200, app.view_home(user))
-        if route == "/topics":
-            return self.respond(200, app.view_topics(user, params))
-        if route.startswith("/topic/"):
-            try:
-                topic_id = int(route.rsplit("/", 1)[1])
-            except ValueError:
-                return self.respond(404, page("404", "<h1>Not found</h1>", user["username"]))
-            body = app.view_topic(user, topic_id)
-            if body is None:
-                return self.respond(404, page("404", "<h1>Not found</h1>", user["username"]))
-            return self.respond(200, body)
-        if route == "/search":
-            return self.respond(200, app.view_search(user, params))
-        if route == "/shows":
-            return self.respond(200, app.view_shows(user))
-        if route == "/account":
-            return self.respond(200, app.view_account(user))
-        return self.respond(404, page("404", "<h1>Not found</h1>", user["username"]))
+        try:
+            if route == "/":
+                return self.respond(200, app.view_home(user))
+            if route == "/topics":
+                return self.respond(200, app.view_topics(user, params))
+            if route.startswith("/topic/"):
+                try:
+                    topic_id = int(route.rsplit("/", 1)[1])
+                except ValueError:
+                    return self.not_found(user)
+                body = app.view_topic(user, topic_id)
+                if body is None:
+                    return self.not_found(user)
+                return self.respond(200, body)
+            if route == "/search":
+                return self.respond(200, app.view_search(user, params))
+            if route == "/shows":
+                return self.respond(200, app.view_shows(user))
+            if route == "/account":
+                return self.respond(200, app.view_account(user))
+        except sqlite3.OperationalError:
+            return self.db_unavailable(user)
+        return self.not_found(user)
 
     def do_POST(self):
         app = self.app
         route = self.path.rstrip("/")
+        form = self.form()  # always drain the body, even on routes that ignore it
 
         if route == "/login":
-            form = self.form()
             user_id = app.auth.verify(form.get("username", ""), form.get("password", ""))
             if user_id is None:
                 time.sleep(0.4)  # blunt brute-force throttle
@@ -595,19 +602,21 @@ class Handler(BaseHTTPRequestHandler):
         if user is None:
             return self.redirect("/login")
 
-        if route == "/logout":
-            app.auth.drop_session(self.cookie_token())
-            return self.redirect("/login", {"Set-Cookie": app.cookie_attrs("", 0)})
-        if route == "/account/password":
-            form = self.form()
-            pw, pw2 = form.get("password", ""), form.get("password2", "")
-            if len(pw) < 8:
-                return self.respond(400, app.view_account(user, err="Password too short (min 8)."))
-            if pw != pw2:
-                return self.respond(400, app.view_account(user, err="Passwords do not match."))
-            app.auth.set_password(user["id"], pw)
-            return self.redirect("/login", {"Set-Cookie": app.cookie_attrs("", 0)})
-        return self.respond(404, page("404", "<h1>Not found</h1>", user["username"]))
+        try:
+            if route == "/logout":
+                app.auth.drop_session(self.cookie_token())
+                return self.redirect("/login", {"Set-Cookie": app.cookie_attrs("", 0)})
+            if route == "/account/password":
+                pw, pw2 = form.get("password", ""), form.get("password2", "")
+                if len(pw) < 8:
+                    return self.respond(400, app.view_account(user, err="Password too short (min 8)."))
+                if pw != pw2:
+                    return self.respond(400, app.view_account(user, err="Passwords do not match."))
+                app.auth.set_password(user["id"], pw)
+                return self.redirect("/login", {"Set-Cookie": app.cookie_attrs("", 0)})
+        except sqlite3.OperationalError:
+            return self.db_unavailable(user)
+        return self.not_found(user)
 
 
 def make_server(db_path: str | Path, auth_path: str | Path, bind: str = "0.0.0.0:8710",
@@ -615,8 +624,12 @@ def make_server(db_path: str | Path, auth_path: str | Path, bind: str = "0.0.0.0
     auth = Auth(auth_path, admin_token=admin_token)
     app = App(db_path, auth, cookie_secure=cookie_secure)
     host, _, port = bind.rpartition(":")
+    try:
+        port_num = int(port)
+    except ValueError:
+        raise SystemExit(f"invalid --bind {bind!r}: expected host:port or :port")
     handler = type("BoundHandler", (Handler,), {"app": app})
-    return ThreadingHTTPServer((host or "0.0.0.0", int(port)), handler)
+    return ThreadingHTTPServer((host or "0.0.0.0", port_num), handler)
 
 
 def serve(db_path: str | Path, auth_path: str | Path, bind: str, admin_token: str | None,
