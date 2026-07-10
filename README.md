@@ -24,6 +24,20 @@ uv run hark who "dyatlov"      # who covered X (label substring or Wikidata QID)
 The database defaults to `./hark.db`; override with `--db` or `$HARK_DB`.
 Show names live in `feeds.txt`, one per line, `#` for comments.
 
+## Web UI
+
+`hark web` serves the topic index (default `0.0.0.0:8710`). The whole site is
+behind a session login wall; only `/login`, `/logout` and `/healthz` are open.
+Bootstrap: set `HARK_ADMIN_TOKEN`, sign in as `admin` with that token, then set
+a real password at `/account` (the token stops working once a password exists;
+with neither set, login is impossible — fail-closed). Sessions live in a
+separate `auth.db` (`--auth-db` / `$HARK_AUTH_DB`) so replacing `hark.db` with
+a fresh data snapshot never logs anyone out. Set `HARK_COOKIE_SECURE=1` when
+serving behind a TLS-terminating proxy.
+
+In Docker: `docker compose up -d` (mounts `./data`, serves :8710); pipeline
+stages run as one-shots, e.g. `docker compose run --rm hark ingest`.
+
 Extraction calls the Anthropic API (default model `claude-opus-4-8`; override
 with `--model` or `$HARK_MODEL`) and canonicalizes labels against Wikidata so
 aliases merge ("BTK" = "Dennis Rader"). Runs are idempotent and resumable:

@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-10
+
+Web frontend + deployment.
+
+### Added
+
+- Web UI (`hark web`, dependency-free stdlib server): index dashboard, topic
+  list with genre filters, topic pages ("who covered X" across shows, with
+  episode dates, confidence and audio links), search over topic labels and
+  episode titles, show list with indexing progress.
+- Security model per the influence-registry spec: whole site behind a session
+  login wall (only `/login`, `/logout`, `/healthz`, `/static/*` open);
+  fail-closed when no password and no `HARK_ADMIN_TOKEN` exist; server-side
+  sessions in HttpOnly/SameSite=Lax cookies (`HARK_COOKIE_SECURE=1` adds
+  `Secure` behind a TLS proxy); iterated salted SHA-256 password stretching
+  with constant-time compare; password change revokes all sessions; strict
+  security headers (CSP `default-src 'self'`, nosniff, DENY framing,
+  same-origin referrer) on every response.
+- Auth state lives in a separate `auth.db` so data snapshots can replace
+  `hark.db` without wiping accounts or sessions.
+- `hark load` — ingest pre-computed extraction JSONL (batch runs or session
+  output) through the same canonicalize + store path.
+- `hark canon` — retry Wikidata canonicalization for unmatched topics,
+  merging duplicates that resolve to an existing QID.
+- Canonicalizer: politeness delay between lookups and retry with backoff on
+  429/5xx (previously throttled responses were swallowed as "no match").
+- Dockerfile + compose (tiltmeter pattern): web UI by default, every pipeline
+  stage as a one-shot command; data volume at `/app/data`.
+
 ## [0.2.0] - 2026-07-10
 
 M1: topic extraction + index.

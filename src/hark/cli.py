@@ -215,6 +215,19 @@ def cmd_who(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_web(args: argparse.Namespace) -> int:
+    from . import web
+
+    web.serve(
+        db_path=args.db,
+        auth_path=args.auth_db,
+        bind=args.bind,
+        admin_token=os.environ.get("HARK_ADMIN_TOKEN"),
+        cookie_secure=os.environ.get("HARK_COOKIE_SECURE", "0") == "1",
+    )
+    return 0
+
+
 def cmd_stats(args: argparse.Namespace) -> int:
     conn = db.connect(args.db)
     shows = conn.execute(
@@ -281,6 +294,14 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("canon", help="retry Wikidata canonicalization for unmatched topics")
     p.set_defaults(func=cmd_canon)
+
+    p = sub.add_parser("web", help="serve the web frontend (login-walled)")
+    p.add_argument("--bind", default=os.environ.get("HARK_BIND", "0.0.0.0:8710"),
+                   help="host:port (default: $HARK_BIND or 0.0.0.0:8710)")
+    p.add_argument("--auth-db", default=os.environ.get("HARK_AUTH_DB", "auth.db"),
+                   help="auth database path, kept separate from hark.db "
+                        "(default: $HARK_AUTH_DB or auth.db)")
+    p.set_defaults(func=cmd_web)
 
     p = sub.add_parser("topics", help="list topics by cross-show coverage")
     p.add_argument("--limit", type=int, default=25, help="rows to show (default: 25)")

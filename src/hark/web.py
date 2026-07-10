@@ -1,0 +1,632 @@
+"""Web frontend: the cross-show topic index behind a login wall.
+
+Security model follows the influence-registry spec: the whole site is gated
+by server-side sessions carried in an HttpOnly cookie; only /login, /logout
+and /healthz are reachable unauthenticated; fail-closed — with no admin
+password and no HARK_ADMIN_TOKEN the site cannot be entered at all.
+Passwords are stretched (iterated salted SHA-256) and compared in constant
+time; changing the password revokes every session.
+
+Auth state lives in its own SQLite file (auth.db), NOT in hark.db — data
+snapshots pushed from the pipeline replace hark.db wholesale and must never
+wipe accounts or sessions.
+
+Dependency-free by design: stdlib http.server, hashlib, secrets. Single
+embedded stylesheet served from /static/style.css so the CSP can stay strict
+(default-src 'self', no inline anything).
+"""
+
+from __future__ import annotations
+
+import hashlib
+import html
+import os
+import secrets
+import sqlite3
+import time
+import urllib.parse
+from datetime import datetime, timedelta, timezone
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+from . import __version__
+
+PW_ITERS = 120_000
+SESSION_DAYS = 30
+COOKIE = "hark_session"
+
+GENRES_FILTER = (
+    "true_crime", "history", "disaster", "scam_fraud", "biography",
+    "espionage", "cult", "mystery", "other",
+)
+
+AUTH_SCHEMA = """
+CREATE TABLE IF NOT EXISTS users (
+    id            INTEGER PRIMARY KEY,
+    username      TEXT NOT NULL UNIQUE,
+    salt          TEXT,
+    password_hash TEXT,
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    token      TEXT PRIMARY KEY,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at TEXT NOT NULL
+);
+"""
+
+
+def stretch(salt: str, password: str) -> str:
+    h = hashlib.sha256(f"{salt}:{password}".encode()).hexdigest()
+    for _ in range(PW_ITERS):
+        h = hashlib.sha256(h.encode()).hexdigest()
+    return h
+
+
+def constant_eq(a: str, b: str) -> bool:
+    return secrets.compare_digest(a.encode(), b.encode())
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def iso(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class Auth:
+    """Accounts and sessions in their own database file."""
+
+    def __init__(self, path: str | Path, admin_token: str | None, admin_user: str = "admin"):
+        self.path = str(path)
+        self.admin_token = admin_token or None
+        conn = self._connect()
+        conn.executescript(AUTH_SCHEMA)
+        conn.execute("INSERT OR IGNORE INTO users (username) VALUES (?)", (admin_user,))
+        conn.commit()
+        conn.close()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def verify(self, username: str, password: str) -> int | None:
+        """Return user id on success. Fail-closed: an account with no stored
+        password only accepts the bootstrap admin token, and if that is unset
+        nothing is accepted."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT id, salt, password_hash FROM users WHERE username = ?", (username,)
+            ).fetchone()
+            if row is None:
+                stretch("timing-pad", password)  # equalise timing for unknown users
+                return None
+            if row["password_hash"]:
+                if constant_eq(stretch(row["salt"], password), row["password_hash"]):
+                    return row["id"]
+                return None
+            if self.admin_token and constant_eq(password, self.admin_token):
+                return row["id"]
+            return None
+        finally:
+            conn.close()
+
+    def create_session(self, user_id: int) -> str:
+        token = secrets.token_hex(32)
+        conn = self._connect()
+        conn.execute(
+            "INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)",
+            (token, user_id, iso(utcnow() + timedelta(days=SESSION_DAYS))),
+        )
+        conn.commit()
+        conn.close()
+        return token
+
+    def session_user(self, token: str | None) -> sqlite3.Row | None:
+        if not token:
+            return None
+        conn = self._connect()
+        try:
+            return conn.execute(
+                """
+                SELECT u.id, u.username FROM sessions s JOIN users u ON u.id = s.user_id
+                WHERE s.token = ? AND s.expires_at > ?
+                """,
+                (token, iso(utcnow())),
+            ).fetchone()
+        finally:
+            conn.close()
+
+    def drop_session(self, token: str | None) -> None:
+        if not token:
+            return
+        conn = self._connect()
+        conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+        conn.commit()
+        conn.close()
+
+    def set_password(self, user_id: int, password: str) -> None:
+        """Set a new password and revoke every session (all devices log out)."""
+        salt = secrets.token_hex(16)
+        conn = self._connect()
+        conn.execute(
+            "UPDATE users SET salt = ?, password_hash = ? WHERE id = ?",
+            (salt, stretch(salt, password), user_id),
+        )
+        conn.execute("DELETE FROM sessions")
+        conn.commit()
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# HTML
+# ---------------------------------------------------------------------------
+
+STYLE = """
+:root { --bg:#101418; --panel:#1a2027; --ink:#e6e1d6; --dim:#8b9299; --acc:#d9a441; --line:#2a323b; }
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.55 Georgia, 'Times New Roman', serif; }
+a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underline; }
+header { border-bottom:1px solid var(--line); padding:0.8rem 1.2rem; display:flex; gap:1.2rem; align-items:baseline; flex-wrap:wrap; }
+header .brand { font-size:1.25rem; letter-spacing:0.12em; color:var(--acc); }
+header nav { display:flex; gap:1rem; } header .spacer { flex:1; }
+main { max-width: 62rem; margin: 1.4rem auto; padding: 0 1.2rem; }
+h1 { font-size:1.4rem; font-weight:normal; border-bottom:1px solid var(--line); padding-bottom:0.4rem; }
+h2 { font-size:1.1rem; color:var(--dim); font-weight:normal; }
+table { border-collapse:collapse; width:100%; }
+td, th { padding:0.35rem 0.6rem 0.35rem 0; text-align:left; vertical-align:top; border-bottom:1px solid var(--line); }
+th { color:var(--dim); font-weight:normal; font-size:0.85rem; text-transform:uppercase; letter-spacing:0.08em; }
+.dim { color:var(--dim); font-size:0.9rem; } .num { text-align:right; }
+.pill { display:inline-block; border:1px solid var(--line); border-radius:9px; padding:0 0.5rem; margin:0 0.2rem 0.2rem 0; font-size:0.78rem; color:var(--dim); }
+form.search { display:flex; gap:0.5rem; margin:1rem 0; }
+input[type=text], input[type=password] { background:var(--panel); border:1px solid var(--line); color:var(--ink); padding:0.45rem 0.6rem; font:inherit; flex:1; }
+button { background:var(--acc); border:0; color:#151007; padding:0.45rem 1rem; font:inherit; cursor:pointer; }
+.cards { display:grid; grid-template-columns:repeat(auto-fit, minmax(10rem,1fr)); gap:0.8rem; margin:1.2rem 0; }
+.card { background:var(--panel); border:1px solid var(--line); padding:0.8rem 1rem; }
+.card .big { font-size:1.6rem; color:var(--acc); }
+.login-box { max-width:22rem; margin:14vh auto; background:var(--panel); border:1px solid var(--line); padding:1.6rem; }
+.login-box input { width:100%; margin-bottom:0.8rem; }
+.err { color:#e07a5f; }
+.qid { font-size:0.78rem; color:var(--dim); }
+"""
+
+PAGE = """<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>{title} — hark</title>
+<link rel="stylesheet" href="/static/style.css">
+</head><body>
+{header}
+<main>
+{body}
+</main>
+</body></html>"""
+
+HEADER = """<header>
+<a class="brand" href="/">HARK</a>
+<nav><a href="/topics">topics</a> <a href="/shows">shows</a> <a href="/search">search</a></nav>
+<span class="spacer"></span>
+<nav><span class="dim">{user}</span> <a href="/account">account</a></nav>
+</header>"""
+
+
+def esc(value) -> str:
+    return html.escape(str(value if value is not None else ""))
+
+
+def page(title: str, body: str, user: str | None = None) -> str:
+    header = HEADER.format(user=esc(user)) if user else ""
+    return PAGE.format(title=esc(title), header=header, body=body)
+
+
+# ---------------------------------------------------------------------------
+# App: routing + views over hark.db
+# ---------------------------------------------------------------------------
+
+class App:
+    def __init__(self, db_path: str | Path, auth: Auth, cookie_secure: bool = False):
+        self.db_path = str(db_path)
+        self.auth = auth
+        self.cookie_secure = cookie_secure
+
+    def db(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def cookie_attrs(self, token: str, max_age: int) -> str:
+        secure = "; Secure" if self.cookie_secure else ""
+        return f"{COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age={max_age}"
+
+    # -- views ---------------------------------------------------------------
+
+    def view_home(self, user) -> str:
+        conn = self.db()
+        try:
+            shows = conn.execute("SELECT COUNT(*) FROM shows").fetchone()[0]
+            episodes = conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
+            extracted = conn.execute(
+                "SELECT COUNT(*) FROM episodes WHERE extracted_at IS NOT NULL"
+            ).fetchone()[0]
+            topics = conn.execute("SELECT COUNT(*) FROM topics").fetchone()[0]
+            cross = conn.execute(
+                """
+                SELECT COUNT(*) FROM (
+                    SELECT et.topic_id FROM episode_topics et
+                    JOIN episodes e ON e.id = et.episode_id
+                    GROUP BY et.topic_id HAVING COUNT(DISTINCT e.show_id) > 1)
+                """
+            ).fetchone()[0]
+            rows = conn.execute(TOP_TOPICS_SQL + " LIMIT 15").fetchall()
+        finally:
+            conn.close()
+        cards = f"""
+        <div class="cards">
+        <div class="card"><div class="big">{topics}</div>topics</div>
+        <div class="card"><div class="big">{cross}</div>covered by 2+ shows</div>
+        <div class="card"><div class="big">{extracted}/{episodes}</div>episodes indexed</div>
+        <div class="card"><div class="big">{shows}</div>shows</div>
+        </div>"""
+        body = (
+            "<h1>Who covered it?</h1>"
+            '<form class="search" action="/search" method="get">'
+            '<input type="text" name="q" placeholder="Dyatlov, Somerton, Titanic&hellip;" autofocus>'
+            "<button>Search</button></form>" + cards +
+            "<h2>Most covered across shows</h2>" + topic_table(rows)
+        )
+        return page("index", body, user["username"])
+
+    def view_topics(self, user, params) -> str:
+        genre = params.get("genre", [""])[0]
+        conn = self.db()
+        try:
+            if genre in GENRES_FILTER:
+                rows = conn.execute(TOP_TOPICS_BY_GENRE_SQL, (genre,)).fetchall()
+            else:
+                genre = ""
+                rows = conn.execute(TOP_TOPICS_SQL + " LIMIT 200").fetchall()
+        finally:
+            conn.close()
+        pills = " ".join(
+            f'<a class="pill" href="/topics?genre={g}">{g}</a>' for g in GENRES_FILTER
+        )
+        title = f"topics — {genre}" if genre else "topics"
+        body = f"<h1>{esc(title)}</h1><p>{pills}</p>" + topic_table(rows)
+        return page(title, body, user["username"])
+
+    def view_topic(self, user, topic_id: int) -> str | None:
+        conn = self.db()
+        try:
+            topic = conn.execute(
+                "SELECT id, label, wikidata_id FROM topics WHERE id = ?", (topic_id,)
+            ).fetchone()
+            if topic is None:
+                return None
+            genres = [r["genre"] for r in conn.execute(
+                "SELECT genre FROM topic_genres WHERE topic_id = ? ORDER BY genre", (topic_id,))]
+            episodes = conn.execute(
+                """
+                SELECT COALESCE(s.title, s.query) AS show, e.title, e.pubdate,
+                       e.audio_url, et.confidence
+                FROM episode_topics et
+                JOIN episodes e ON e.id = et.episode_id
+                JOIN shows s ON s.id = e.show_id
+                WHERE et.topic_id = ?
+                ORDER BY show, e.pubdate
+                """,
+                (topic_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+        qid = ""
+        if topic["wikidata_id"]:
+            qid = (f' <a class="qid" href="https://www.wikidata.org/wiki/'
+                   f'{esc(topic["wikidata_id"])}" rel="noreferrer">{esc(topic["wikidata_id"])}</a>')
+        pills = " ".join(f'<a class="pill" href="/topics?genre={esc(g)}">{esc(g)}</a>' for g in genres)
+        shows = sorted({r["show"] for r in episodes})
+        rows_html = "".join(
+            f"<tr><td>{esc(r['show'])}</td><td>{episode_cell(r)}</td>"
+            f"<td class='dim'>{esc((r['pubdate'] or '')[:10])}</td>"
+            f"<td class='num dim'>{conf(r['confidence'])}</td></tr>"
+            for r in episodes
+        )
+        body = (
+            f"<h1>{esc(topic['label'])}{qid}</h1><p>{pills}</p>"
+            f"<h2>covered by {len(shows)} show(s), {len(episodes)} episode(s)</h2>"
+            f"<table><tr><th>show</th><th>episode</th><th>date</th><th>conf</th></tr>{rows_html}</table>"
+        )
+        return page(topic["label"], body, user["username"])
+
+    def view_search(self, user, params) -> str:
+        q = params.get("q", [""])[0].strip()
+        topics, episodes = [], []
+        if q:
+            like = f"%{q}%"
+            conn = self.db()
+            try:
+                topics = conn.execute(
+                    TOP_TOPICS_SQL.replace("GROUP BY", "WHERE t.label LIKE ? COLLATE NOCASE OR t.wikidata_id = ? GROUP BY"),
+                    (like, q),
+                ).fetchall()
+                episodes = conn.execute(
+                    """
+                    SELECT e.id, e.title, e.pubdate, COALESCE(s.title, s.query) AS show
+                    FROM episodes e JOIN shows s ON s.id = e.show_id
+                    WHERE e.title LIKE ? COLLATE NOCASE
+                    ORDER BY e.pubdate DESC LIMIT 50
+                    """,
+                    (like,),
+                ).fetchall()
+            finally:
+                conn.close()
+        body = (
+            "<h1>search</h1>"
+            '<form class="search" action="/search" method="get">'
+            f'<input type="text" name="q" value="{esc(q)}" autofocus><button>Search</button></form>'
+        )
+        if q:
+            body += f"<h2>{len(topics)} topic(s)</h2>" + topic_table(topics)
+            eps = "".join(
+                f"<tr><td>{esc(r['show'])}</td><td>{esc(r['title'])}</td>"
+                f"<td class='dim'>{esc((r['pubdate'] or '')[:10])}</td></tr>"
+                for r in episodes
+            )
+            body += (f"<h2>{len(episodes)} episode title match(es)</h2>"
+                     f"<table>{eps}</table>")
+        return page("search", body, user["username"])
+
+    def view_shows(self, user) -> str:
+        conn = self.db()
+        try:
+            rows = conn.execute(
+                """
+                SELECT s.id, COALESCE(s.title, s.query) AS name, COUNT(e.id) AS episodes,
+                       COALESCE(SUM(e.extracted_at IS NOT NULL), 0) AS extracted,
+                       MAX(e.pubdate) AS latest
+                FROM shows s LEFT JOIN episodes e ON e.show_id = s.id
+                GROUP BY s.id ORDER BY name
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+        table = "".join(
+            f"<tr><td>{esc(r['name'])}</td><td class='num'>{r['episodes']}</td>"
+            f"<td class='num'>{r['extracted']}</td>"
+            f"<td class='dim'>{esc((r['latest'] or '')[:10])}</td></tr>"
+            for r in rows
+        )
+        body = ("<h1>shows</h1><table><tr><th>show</th><th>episodes</th>"
+                f"<th>indexed</th><th>latest</th></tr>{table}</table>")
+        return page("shows", body, user["username"])
+
+    def view_account(self, user, msg: str = "", err: str = "") -> str:
+        note = f'<p class="err">{esc(err)}</p>' if err else (f"<p>{esc(msg)}</p>" if msg else "")
+        body = f"""<h1>account — {esc(user['username'])}</h1>{note}
+<form method="post" action="/account/password" class="login-box" style="margin:1rem 0">
+<label>New password</label><input type="password" name="password" minlength="8" required>
+<label>Repeat</label><input type="password" name="password2" minlength="8" required>
+<button>Change password</button>
+<p class="dim">Changing the password signs out every session.</p>
+</form>
+<form method="post" action="/logout"><button>Log out</button></form>"""
+        return page("account", body, user["username"])
+
+
+TOP_TOPICS_SQL = """
+SELECT t.id, t.label, t.wikidata_id,
+       COUNT(DISTINCT et.episode_id) AS episodes,
+       COUNT(DISTINCT e.show_id) AS shows,
+       COALESCE(GROUP_CONCAT(DISTINCT tg.genre), '') AS genres
+FROM topics t
+JOIN episode_topics et ON et.topic_id = t.id
+JOIN episodes e ON e.id = et.episode_id
+LEFT JOIN topic_genres tg ON tg.topic_id = t.id
+GROUP BY t.id
+ORDER BY shows DESC, episodes DESC, t.label
+"""
+
+TOP_TOPICS_BY_GENRE_SQL = """
+SELECT t.id, t.label, t.wikidata_id,
+       COUNT(DISTINCT et.episode_id) AS episodes,
+       COUNT(DISTINCT e.show_id) AS shows,
+       COALESCE(GROUP_CONCAT(DISTINCT tg.genre), '') AS genres
+FROM topics t
+JOIN episode_topics et ON et.topic_id = t.id
+JOIN episodes e ON e.id = et.episode_id
+LEFT JOIN topic_genres tg ON tg.topic_id = t.id
+WHERE t.id IN (SELECT topic_id FROM topic_genres WHERE genre = ?)
+GROUP BY t.id
+ORDER BY shows DESC, episodes DESC, t.label
+LIMIT 200
+"""
+
+
+def conf(value) -> str:
+    return f"{value:.2f}" if value is not None else "–"
+
+
+def episode_cell(row) -> str:
+    title = esc(row["title"])
+    if row["audio_url"]:
+        return f'{title} <a class="qid" href="{esc(row["audio_url"])}" rel="noreferrer">▶</a>'
+    return title
+
+
+def topic_table(rows) -> str:
+    if not rows:
+        return '<p class="dim">Nothing here yet.</p>'
+    body = "".join(
+        f"<tr><td><a href='/topic/{r['id']}'>{esc(r['label'])}</a></td>"
+        f"<td class='num'>{r['shows']}</td><td class='num'>{r['episodes']}</td>"
+        f"<td class='dim'>{esc(r['genres'])}</td></tr>"
+        for r in rows
+    )
+    return ("<table><tr><th>topic</th><th>shows</th><th>episodes</th><th>genres</th></tr>"
+            f"{body}</table>")
+
+
+LOGIN_PAGE = """<div class="login-box">
+<h1 style="margin-top:0">hark</h1>
+{err}
+<form method="post" action="/login">
+<label>User</label><input type="text" name="username" autofocus>
+<label>Password</label><input type="password" name="password">
+<button>Sign in</button>
+</form></div>"""
+
+
+# ---------------------------------------------------------------------------
+# HTTP plumbing
+# ---------------------------------------------------------------------------
+
+class Handler(BaseHTTPRequestHandler):
+    app: App  # set by make_server
+    server_version = f"hark/{__version__}"
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):  # quiet access log; errors still surface
+        pass
+
+    # -- helpers -------------------------------------------------------------
+
+    def _security_headers(self):
+        self.send_header("Content-Security-Policy",
+                         "default-src 'self'; img-src 'self'; media-src *; frame-ancestors 'none'")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "same-origin")
+        self.send_header("Cache-Control", "no-store")
+
+    def respond(self, status: int, body: str, content_type="text/html; charset=utf-8",
+                extra_headers: dict | None = None):
+        data = body.encode()
+        self.send_response(status)
+        self._security_headers()
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        for k, v in (extra_headers or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(data)
+
+    def redirect(self, location: str, extra_headers: dict | None = None):
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self._security_headers()
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        for k, v in (extra_headers or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+
+    def cookie_token(self) -> str | None:
+        raw = self.headers.get("Cookie", "")
+        for part in raw.split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == COOKIE:
+                return v
+        return None
+
+    def form(self) -> dict:
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        raw = self.rfile.read(min(length, 65536)).decode(errors="replace")
+        return {k: v[0] for k, v in urllib.parse.parse_qs(raw).items()}
+
+    # -- routing -------------------------------------------------------------
+
+    def do_GET(self):
+        app = self.app
+        url = urllib.parse.urlsplit(self.path)
+        params = urllib.parse.parse_qs(url.query)
+        route = url.path.rstrip("/") or "/"
+
+        if route == "/healthz":
+            return self.respond(200, "ok", "text/plain; charset=utf-8")
+        if route == "/static/style.css":
+            return self.respond(200, STYLE, "text/css; charset=utf-8")
+        if route == "/login":
+            return self.respond(200, page("login", LOGIN_PAGE.format(err="")))
+
+        user = app.auth.session_user(self.cookie_token())
+        if user is None:
+            return self.redirect("/login")
+
+        if route == "/":
+            return self.respond(200, app.view_home(user))
+        if route == "/topics":
+            return self.respond(200, app.view_topics(user, params))
+        if route.startswith("/topic/"):
+            try:
+                topic_id = int(route.rsplit("/", 1)[1])
+            except ValueError:
+                return self.respond(404, page("404", "<h1>Not found</h1>", user["username"]))
+            body = app.view_topic(user, topic_id)
+            if body is None:
+                return self.respond(404, page("404", "<h1>Not found</h1>", user["username"]))
+            return self.respond(200, body)
+        if route == "/search":
+            return self.respond(200, app.view_search(user, params))
+        if route == "/shows":
+            return self.respond(200, app.view_shows(user))
+        if route == "/account":
+            return self.respond(200, app.view_account(user))
+        return self.respond(404, page("404", "<h1>Not found</h1>", user["username"]))
+
+    def do_POST(self):
+        app = self.app
+        route = self.path.rstrip("/")
+
+        if route == "/login":
+            form = self.form()
+            user_id = app.auth.verify(form.get("username", ""), form.get("password", ""))
+            if user_id is None:
+                time.sleep(0.4)  # blunt brute-force throttle
+                body = page("login", LOGIN_PAGE.format(err='<p class="err">No.</p>'))
+                return self.respond(HTTPStatus.UNAUTHORIZED, body)
+            token = app.auth.create_session(user_id)
+            return self.redirect("/", {"Set-Cookie": app.cookie_attrs(token, SESSION_DAYS * 86_400)})
+
+        user = app.auth.session_user(self.cookie_token())
+        if user is None:
+            return self.redirect("/login")
+
+        if route == "/logout":
+            app.auth.drop_session(self.cookie_token())
+            return self.redirect("/login", {"Set-Cookie": app.cookie_attrs("", 0)})
+        if route == "/account/password":
+            form = self.form()
+            pw, pw2 = form.get("password", ""), form.get("password2", "")
+            if len(pw) < 8:
+                return self.respond(400, app.view_account(user, err="Password too short (min 8)."))
+            if pw != pw2:
+                return self.respond(400, app.view_account(user, err="Passwords do not match."))
+            app.auth.set_password(user["id"], pw)
+            return self.redirect("/login", {"Set-Cookie": app.cookie_attrs("", 0)})
+        return self.respond(404, page("404", "<h1>Not found</h1>", user["username"]))
+
+
+def make_server(db_path: str | Path, auth_path: str | Path, bind: str = "0.0.0.0:8710",
+                admin_token: str | None = None, cookie_secure: bool = False) -> ThreadingHTTPServer:
+    auth = Auth(auth_path, admin_token=admin_token)
+    app = App(db_path, auth, cookie_secure=cookie_secure)
+    host, _, port = bind.rpartition(":")
+    handler = type("BoundHandler", (Handler,), {"app": app})
+    return ThreadingHTTPServer((host or "0.0.0.0", int(port)), handler)
+
+
+def serve(db_path: str | Path, auth_path: str | Path, bind: str, admin_token: str | None,
+          cookie_secure: bool) -> None:
+    server = make_server(db_path, auth_path, bind, admin_token, cookie_secure)
+    print(f"hark web on http://{bind} (db={db_path}, auth={auth_path})")
+    if not admin_token:
+        print("note: no HARK_ADMIN_TOKEN set — login is impossible until a "
+              "password exists in the auth db (fail-closed)")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        server.shutdown()
