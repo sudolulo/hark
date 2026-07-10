@@ -1,0 +1,9 @@
+# Seed shows — one per line. Resolved to feed URLs via iTunes Search API (`hark resolve`).
+# true crime
+Casefile True Crime
+The Casual Criminalist
+Swindled
+# history
+The Rest Is History
+Short History Of
+Cautionary Tales
