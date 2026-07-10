@@ -2,7 +2,7 @@
 
 Milestones. Each one ships something usable and gets a CHANGELOG version.
 
-## M0 — scaffold + ingest (current)
+## M0 — scaffold + ingest (done, 0.1.0)
 
 - Project scaffold: uv/pyproject, src layout, pytest.
 - SQLite schema: shows, episodes, topics, episode_topics (extraction fields nullable —
@@ -13,13 +13,17 @@ Milestones. Each one ships something usable and gets a CHANGELOG version.
 - CLI: `hark resolve`, `hark ingest`, `hark stats`.
 - Unit tests with feed fixtures (no network in tests).
 
-## M1 — topic extraction + index
+## M1 — topic extraction + index (done, 0.2.0)
 
 - LLM extraction of subject entities from title/description (stub interface in M0; model
   wiring decided when we get here).
+  - Wired to the Anthropic API (`claude-opus-4-8` default, `--model`/`$HARK_MODEL` to
+    override, e.g. `claude-haiku-4-5` for cheap runs). Backfill of the ~2,200-episode
+    backlog is triggered manually with `hark extract` once a key is exported.
 - Canonicalization against Wikidata (aliases: "BTK" = "Dennis Rader"); multi-part/serial
   episode handling; multi-genre topics.
-- Topic pages: "who covered X" — the core query.
+- Topic pages: "who covered X" — the core query. CLI-only for now (`hark who`,
+  `hark topics`); a web UI belongs to a later milestone.
 
 ## M2 — discovery
 
