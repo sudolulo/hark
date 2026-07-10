@@ -105,6 +105,37 @@ def cmd_extract(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
+def cmd_load(args: argparse.Namespace) -> int:
+    import json
+
+    conn = db.connect(args.db)
+    try:
+        with open(args.file, encoding="utf-8") as fh:
+            records = [json.loads(line) for line in fh if line.strip()]
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"cannot read {args.file}: {exc}", file=sys.stderr)
+        return 1
+    ok = failed = 0
+
+    def report(r: pipeline.ExtractResult) -> None:
+        nonlocal ok, failed
+        if r.error:
+            failed += 1
+            print(f"  FAIL  {r.show} — {r.title}: {r.error}")
+        else:
+            ok += 1
+            labels = "; ".join(r.labels) if r.labels else "(no subject)"
+            print(f"  ok    {r.show} — {r.title} -> {labels}")
+
+    with make_client() as http_client:
+        canon = wikidata.Canonicalizer(http_client)
+        pipeline.load_extractions(
+            conn, records, canon.canonicalize, source=args.source, on_result=report
+        )
+    print(f"loaded {ok} episodes ({failed} failed)")
+    return 1 if failed else 0
+
+
 def cmd_topics(args: argparse.Namespace) -> int:
     conn = db.connect(args.db)
     rows = conn.execute(
@@ -221,6 +252,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true",
                    help="only report how many episodes are pending")
     p.set_defaults(func=cmd_extract)
+
+    p = sub.add_parser(
+        "load", help="load pre-computed extraction JSONL (batch runs, session output)"
+    )
+    p.add_argument("file", help="JSONL: {episode_id, topics: [{label, genres, confidence}]}")
+    p.add_argument("--source", default="batch",
+                   help="value stored in episode_topics.source (default: batch)")
+    p.set_defaults(func=cmd_load)
 
     p = sub.add_parser("stats", help="print database counts per show")
     p.set_defaults(func=cmd_stats)

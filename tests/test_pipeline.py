@@ -114,6 +114,33 @@ def test_later_qid_backfills_topic(tmp_path):
     assert topics[0]["wikidata_id"] == "Q2295394"
 
 
+def test_load_extractions_validates_and_stores(tmp_path):
+    conn = db.connect(tmp_path / "t.db")
+    seed(conn, ["ep1", "ep2"])
+    records = [
+        {"episode_id": 1, "topics": [
+            {"label": "BTK", "genres": ["true_crime", "bogus"], "confidence": 1.4},
+            {"label": "  ", "genres": [], "confidence": 0.5},
+        ]},
+        {"episode_id": 2, "topics": []},
+        {"episode_id": 999, "topics": []},
+    ]
+    results = pipeline.load_extractions(conn, records, canonicalize, source="sess")
+    assert [r.error for r in results] == [None, None, "unknown episode_id 999"]
+    assert results[0].labels == ["Dennis Rader"]
+
+    row = conn.execute("SELECT label, wikidata_id FROM topics").fetchone()
+    assert (row["label"], row["wikidata_id"]) == ("Dennis Rader", "Q2295394")
+    genres = [r["genre"] for r in conn.execute("SELECT genre FROM topic_genres")]
+    assert genres == ["true_crime"]  # bogus genre dropped
+    conf = conn.execute("SELECT confidence, source FROM episode_topics").fetchone()
+    assert (conf["confidence"], conf["source"]) == (1.0, "sess")  # clamped
+    assert pipeline.pending_episodes(conn) == []  # both marked, incl. zero-topic
+
+    again = pipeline.load_extractions(conn, records[:1], canonicalize, source="sess")
+    assert again[0].error == "already extracted"
+
+
 def test_rerun_is_idempotent(tmp_path):
     conn = db.connect(tmp_path / "t.db")
     seed(conn, ["ep1"])

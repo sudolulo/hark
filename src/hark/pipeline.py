@@ -5,6 +5,11 @@ Idempotent like ingest: episodes are marked with extracted_at once processed
 and re-runs only touch unmarked episodes. Topics are deduped by Wikidata QID
 first, exact label second, so "BTK" and "Dennis Rader" end up as one row.
 Commits happen per episode; an interrupted run keeps its progress.
+
+load_extractions() is the offline twin of extract_pending(): it takes
+pre-computed extraction records (from a Batch API run, or a Claude session
+acting as the extractor) and pushes them through the same canonicalize +
+store path.
 """
 
 from __future__ import annotations
@@ -14,7 +19,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from .db import utcnow
-from .extract import ExtractedTopic, TopicExtractor
+from .extract import GENRES, ExtractedTopic, TopicExtractor
 from .wikidata import WikidataMatch
 
 Canonicalize = Callable[[str], WikidataMatch | None]
@@ -131,4 +136,54 @@ def extract_pending(
             on_result(result)
         if consecutive_errors >= max_consecutive_errors:
             break
+    return results
+
+
+def load_extractions(
+    conn: sqlite3.Connection,
+    records: list[dict],
+    canonicalize: Canonicalize,
+    source: str,
+    on_result: Callable[[ExtractResult], None] | None = None,
+) -> list[ExtractResult]:
+    """Store pre-computed extractions: [{episode_id, topics: [{label, genres,
+    confidence}]}]. Applies the same validation as ClaudeExtractor (unknown
+    genres dropped, confidence clamped, blank labels skipped). Episodes already
+    extracted or unknown are reported as errors and left untouched.
+    """
+    results: list[ExtractResult] = []
+    for record in records:
+        episode_id = record.get("episode_id")
+        row = conn.execute(
+            """
+            SELECT e.id, e.title, e.extracted_at, COALESCE(s.title, s.query) AS show
+            FROM episodes e JOIN shows s ON s.id = e.show_id
+            WHERE e.id = ?
+            """,
+            (episode_id,),
+        ).fetchone()
+        if row is None:
+            result = ExtractResult(episode_id=episode_id or -1, show="?", title="?",
+                                   error=f"unknown episode_id {episode_id!r}")
+        elif row["extracted_at"] is not None:
+            result = ExtractResult(episode_id=row["id"], show=row["show"],
+                                   title=row["title"] or "", error="already extracted")
+        else:
+            topics = [
+                ExtractedTopic(
+                    label=str(t.get("label", "")).strip(),
+                    genres=tuple(g for g in t.get("genres", ()) if g in GENRES),
+                    confidence=None if t.get("confidence") is None
+                    else max(0.0, min(1.0, float(t["confidence"]))),
+                )
+                for t in record.get("topics", [])
+                if str(t.get("label", "")).strip()
+            ]
+            result = ExtractResult(episode_id=row["id"], show=row["show"],
+                                   title=row["title"] or "")
+            result.labels = _store(conn, row["id"], topics, canonicalize, source)
+            conn.commit()
+        results.append(result)
+        if on_result:
+            on_result(result)
     return results
