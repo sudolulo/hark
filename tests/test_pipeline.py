@@ -141,6 +141,58 @@ def test_load_extractions_validates_and_stores(tmp_path):
     assert again[0].error == "already extracted"
 
 
+def test_recanonicalize_upgrades_in_place(tmp_path):
+    conn = db.connect(tmp_path / "t.db")
+    seed(conn, ["ep1"])
+    extractor = FakeExtractor({
+        "ep1": [ExtractedTopic(label="Snowtown murders", genres=("true_crime",))],
+    })
+    pipeline.extract_pending(conn, extractor, lambda label: None, source="test")
+
+    results = pipeline.recanonicalize(
+        conn, lambda label: WikidataMatch(qid="Q2862221", label="Snowtown murders")
+    )
+    assert len(results) == 1 and not results[0].merged
+    row = conn.execute("SELECT label, wikidata_id FROM topics").fetchone()
+    assert (row["label"], row["wikidata_id"]) == ("Snowtown murders", "Q2862221")
+
+
+def test_recanonicalize_merges_duplicates(tmp_path):
+    conn = db.connect(tmp_path / "t.db")
+    seed(conn, ["ep1", "ep2"])
+    extractor = FakeExtractor({
+        "ep1": [ExtractedTopic(label="BTK", genres=("true_crime",), confidence=0.9)],
+        "ep2": [ExtractedTopic(label="Dennis Rader", genres=("biography",), confidence=0.8)],
+    })
+    # offline first pass: no QIDs, so aliases become two separate topics
+    pipeline.extract_pending(conn, extractor, lambda label: None, source="test")
+    assert conn.execute("SELECT COUNT(*) FROM topics").fetchone()[0] == 2
+
+    results = pipeline.recanonicalize(conn, canonicalize)
+    assert any(r.merged for r in results)
+    topics = conn.execute("SELECT label, wikidata_id FROM topics").fetchall()
+    assert len(topics) == 1
+    assert (topics[0]["label"], topics[0]["wikidata_id"]) == ("Dennis Rader", "Q2295394")
+    links = conn.execute(
+        "SELECT episode_id, confidence FROM episode_topics ORDER BY episode_id"
+    ).fetchall()
+    assert [row["episode_id"] for row in links] == [1, 2]
+    genres = {r["genre"] for r in conn.execute("SELECT genre FROM topic_genres")}
+    assert genres == {"true_crime", "biography"}
+
+
+def test_recanonicalize_skips_unmatched(tmp_path):
+    conn = db.connect(tmp_path / "t.db")
+    seed(conn, ["ep1"])
+    extractor = FakeExtractor({
+        "ep1": [ExtractedTopic(label="Some Obscure Case", genres=())],
+    })
+    pipeline.extract_pending(conn, extractor, lambda label: None, source="test")
+    assert pipeline.recanonicalize(conn, lambda label: None) == []
+    row = conn.execute("SELECT label, wikidata_id FROM topics").fetchone()
+    assert (row["label"], row["wikidata_id"]) == ("Some Obscure Case", None)
+
+
 def test_rerun_is_idempotent(tmp_path):
     conn = db.connect(tmp_path / "t.db")
     seed(conn, ["ep1"])

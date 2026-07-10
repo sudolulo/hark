@@ -8,6 +8,7 @@ episodes, recurring subjects) to one request each.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 import httpx
@@ -22,18 +23,26 @@ class WikidataMatch:
 
 
 class Canonicalizer:
-    def __init__(self, client: httpx.Client):
+    """`delay` seconds between uncached lookups keeps bulk runs under
+    Wikimedia's burst limits; 429/5xx responses are retried after backing off
+    instead of being swallowed as "no match"."""
+
+    def __init__(self, client: httpx.Client, delay: float = 0.25, retries: int = 2):
         self.client = client
+        self.delay = delay
+        self.retries = retries
         self._cache: dict[str, WikidataMatch | None] = {}
 
     def canonicalize(self, label: str) -> WikidataMatch | None:
         key = label.casefold()
         if key not in self._cache:
+            if self.delay and self._cache:
+                time.sleep(self.delay)
             self._cache[key] = self._lookup(label)
         return self._cache[key]
 
-    def _lookup(self, label: str) -> WikidataMatch | None:
-        try:
+    def _get(self, label: str) -> httpx.Response:
+        for attempt in range(self.retries + 1):
             resp = self.client.get(
                 API_URL,
                 params={
@@ -45,6 +54,15 @@ class Canonicalizer:
                     "format": "json",
                 },
             )
+            if resp.status_code in (429, 500, 502, 503) and attempt < self.retries:
+                time.sleep(float(resp.headers.get("retry-after", 5)))
+                continue
+            return resp
+        return resp
+
+    def _lookup(self, label: str) -> WikidataMatch | None:
+        try:
+            resp = self._get(label)
             resp.raise_for_status()
             hits = resp.json().get("search", [])
         except (httpx.HTTPError, ValueError):

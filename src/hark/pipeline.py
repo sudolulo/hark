@@ -139,6 +139,66 @@ def extract_pending(
     return results
 
 
+@dataclass
+class CanonResult:
+    old_label: str
+    new_label: str
+    qid: str
+    merged: bool  # True when the topic was folded into an existing one
+
+
+def recanonicalize(
+    conn: sqlite3.Connection, canonicalize: Canonicalize
+) -> list[CanonResult]:
+    """Retry Wikidata canonicalization for topics without a QID.
+
+    Used after throttled or offline runs. A fresh match either upgrades the
+    topic in place (label + QID) or, when another topic already owns that QID
+    or label, merges this topic into it: episode links and genres move over,
+    the duplicate row is deleted.
+    """
+    results: list[CanonResult] = []
+    rows = conn.execute("SELECT id, label FROM topics WHERE wikidata_id IS NULL").fetchall()
+    for row in rows:
+        match = canonicalize(row["label"])
+        if match is None:
+            continue
+        target = conn.execute(
+            "SELECT id FROM topics WHERE (wikidata_id = ? OR label = ?) AND id != ?",
+            (match.qid, match.label, row["id"]),
+        ).fetchone()
+        if target is None:
+            conn.execute(
+                "UPDATE topics SET label = ?, wikidata_id = ? WHERE id = ?",
+                (match.label, match.qid, row["id"]),
+            )
+            merged = False
+        else:
+            conn.execute(
+                "UPDATE OR IGNORE topics SET wikidata_id = ? WHERE id = ?",
+                (match.qid, target["id"]),
+            )
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO episode_topics
+                    (episode_id, topic_id, confidence, source)
+                SELECT episode_id, ?, confidence, source FROM episode_topics
+                WHERE topic_id = ?
+                """,
+                (target["id"], row["id"]),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO topic_genres (topic_id, genre)"
+                " SELECT ?, genre FROM topic_genres WHERE topic_id = ?",
+                (target["id"], row["id"]),
+            )
+            conn.execute("DELETE FROM topics WHERE id = ?", (row["id"],))
+            merged = True
+        conn.commit()
+        results.append(CanonResult(row["label"], match.label, match.qid, merged))
+    return results
+
+
 def load_extractions(
     conn: sqlite3.Connection,
     records: list[dict],

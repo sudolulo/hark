@@ -136,6 +136,21 @@ def cmd_load(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
+def cmd_canon(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db)
+    with make_client() as http_client:
+        canon = wikidata.Canonicalizer(http_client)
+        results = pipeline.recanonicalize(conn, canon.canonicalize)
+    for r in results:
+        action = "merged into" if r.merged else "->"
+        print(f"  {r.old_label} {action} {r.new_label} [{r.qid}]")
+    remaining = conn.execute(
+        "SELECT COUNT(*) FROM topics WHERE wikidata_id IS NULL"
+    ).fetchone()[0]
+    print(f"canonicalized {len(results)} topics ({remaining} still unmatched)")
+    return 0
+
+
 def cmd_topics(args: argparse.Namespace) -> int:
     conn = db.connect(args.db)
     rows = conn.execute(
@@ -263,6 +278,9 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("stats", help="print database counts per show")
     p.set_defaults(func=cmd_stats)
+
+    p = sub.add_parser("canon", help="retry Wikidata canonicalization for unmatched topics")
+    p.set_defaults(func=cmd_canon)
 
     p = sub.add_parser("topics", help="list topics by cross-show coverage")
     p.add_argument("--limit", type=int, default=25, help="rows to show (default: 25)")
