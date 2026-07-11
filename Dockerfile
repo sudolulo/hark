@@ -10,13 +10,16 @@
 #   docker compose run --rm hark detect-ads
 #   docker compose run --rm hark cut
 #
-# KNOWN GAP, not solved here: hark depends on adscrub as a local path
-# dependency (../adscrub, editable — see pyproject.toml [tool.uv.sources]).
-# This build context only COPYs hark's own files, so `uv sync` below will
-# fail to resolve that dependency as written. Real fix is a packaging
-# decision (git dependency + deploy key, vendoring a built adscrub wheel into
-# this context, or a small multi-repo build script) — see docs/PLAN.md open
-# questions. Don't paper over this by quietly dropping the dependency.
+# hark depends on adscrub as a local path dependency (../adscrub, editable —
+# see pyproject.toml [tool.uv.sources] and uv.lock's `source = { editable =
+# "../adscrub" }`). That path is resolved relative to /app (this image's
+# WORKDIR, where hark's own pyproject.toml/uv.lock land), so adscrub's source
+# needs to exist at /adscrub in this image. The build context is NOT this
+# repo alone — it's a staging directory containing both `hark/` and
+# `adscrub/` (git-archive-clean, no .venv/data/.git), assembled by
+# scripts/build-image.sh. Building this Dockerfile directly against just this
+# repo's own directory will fail to resolve the dependency; use that script
+# instead of `docker build .` here.
 #
 # Build with --build-arg GPU=1 (or `docker compose -f compose.yaml -f compose.gpu.yaml
 # build`) to pull in the cuBLAS/cuDNN extra for faster-whisper's CUDA path — only
@@ -30,13 +33,17 @@ WORKDIR /app
 ENV UV_LINK_MODE=copy UV_COMPILE_BYTECODE=1
 ARG GPU=0
 
-# dependency layer first: rebuilds only when the lockfile changes
-COPY pyproject.toml uv.lock README.md ./
+# adscrub's source first — the editable path dependency needs it present
+# before the very first `uv sync` (which installs dependencies, including
+# this one, even with --no-install-project), and changes to adscrub's source
+# should invalidate this layer same as changes to hark's own lockfile do.
+COPY adscrub /adscrub
+COPY hark/pyproject.toml hark/uv.lock hark/README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$GPU" = "1" ]; then uv sync --frozen --no-dev --no-install-project --extra gpu; \
     else uv sync --frozen --no-dev --no-install-project; fi
 
-COPY src ./src
+COPY hark/src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$GPU" = "1" ]; then uv sync --frozen --no-dev --extra gpu; \
     else uv sync --frozen --no-dev; fi
@@ -57,7 +64,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends gosu ffmpeg \
     && groupadd --gid 568 hark \
     && useradd --system --uid 568 --gid 568 --no-create-home hark
 
-COPY docker-entrypoint.sh /usr/local/bin/
+COPY hark/docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 VOLUME ["/app/data"]

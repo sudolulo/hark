@@ -67,11 +67,11 @@ beats fingerprinting/crowdsourcing) is in adscrub's own repo history.
   are unauthenticated (no cookie login — a podcast app can't do that) but gated by a random
   per-show `feed_token` embedded in the URL, compared with `secrets.compare_digest`. Not the
   dashboard's session system, and not wide open either.
-- **Known unsolved gap:** the adscrub path dependency doesn't resolve in the Docker build
-  (build context only has hark's own files). Don't quietly work around this by copying
-  adscrub's source into the build context or removing the dependency — it's a real packaging
-  decision (git dependency + deploy key, vendored wheel, multi-repo build script) that needs
-  to actually be made, not paved over. See docs/PLAN.md open questions.
+- **Docker build:** hark's adscrub path dependency needs adscrub's source alongside this
+  repo in the build context, which `docker build .`/`docker compose build` run from this
+  repo alone can't provide. Resolved via `scripts/build-image.sh` (stages git-archive-clean
+  copies of both repos into a temp directory, builds against that) — use it instead of
+  `docker build .` directly. See docs/PLAN.md's ad-stripping section for the full story.
 
 ## Conventions
 

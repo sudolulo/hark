@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-07-11
+
+### Fixed
+
+- The Docker build's known packaging gap (documented since 0.4.0): hark
+  depends on adscrub as a local path dependency, but the build context only
+  ever contained hark's own files, so `docker build .` couldn't resolve it.
+  Fixed with the "multi-repo build script" option from docs/PLAN.md's open
+  questions: `scripts/build-image.sh` stages git-archive-clean copies of both
+  `hark/` and `adscrub/` side by side and builds against that directory;
+  Dockerfile's COPY paths updated to match. `docker build .` run directly
+  against this repo alone still won't work — use the script.
+
 ## [0.6.0] - 2026-07-11
 
 ### Added

@@ -83,12 +83,15 @@ CLAUDE.md for why, and don't repeat that mistake).
   registered; `compose.gpu.yaml` requests it, and hark's own `gpu` extra just
   passes through to `adscrub[gpu]` rather than duplicating the cuBLAS/cuDNN
   package list.
-- **Known gap, not solved:** the path dependency (`../adscrub`, editable)
-  only works for local dev. The Docker build context doesn't include
-  adscrub's source, so `docker compose build` doesn't actually work yet —
-  needs a real packaging decision (git dependency + deploy key, vendoring a
-  built wheel into the build context, or a small multi-repo build script).
-  See open questions below.
+- **Docker packaging gap: resolved (0.6.1)**, via the "small multi-repo build
+  script" option. `scripts/build-image.sh` stages git-archive-clean copies of
+  `hark/` and `adscrub/` (tracked files only) side by side into a temp
+  directory and builds against that as the Docker context; Dockerfile's COPY
+  paths were updated to expect that layout (`adscrub` at the context root,
+  hark's own files under `hark/`). Plain `docker build .`/`docker compose
+  build` run from this repo alone still won't work — the script is the real
+  entry point now, `compose.yaml`'s `build:` directive was removed since it
+  was never functional to begin with.
 - **Per-show toggle + feed URL (0.6.0):** the pipeline originally ran
   unconditionally against every show — no way to exclude a show you don't
   want transcribed (real compute per episode). `shows.ad_stripping_enabled`
@@ -180,11 +183,8 @@ Resolve their real feed URLs via iTunes Search API at runtime — do not hand-co
 - Which LLM/provider for extraction (M1 decision).
 - ~~GPU/Whisper feasibility~~ Resolved 2026-07-11: `code` has a real GPU, Docker's
   `nvidia` runtime is registered — see the adscrub dependency section above.
-- **How to make the adscrub path dependency work in the Docker build.** Not solved;
-  the build context currently only has hark's own files. Options: git dependency
-  (needs a deploy key baked into the build, or a build secret), vendor a built
-  adscrub wheel into the build context, or a small script that builds both repos
-  together. Don't guess at this — it's a real infra decision.
+- ~~How to make the adscrub path dependency work in the Docker build~~ Resolved
+  2026-07-11: `scripts/build-image.sh`, see the ad-stripping section above.
 - `hark detect-ads` currently defaults to `claude-opus-4-8`; revisit cost vs.
   accuracy on ad-span boundaries once run against real transcripts.
 - When to actually wire the gpodder/Nextcloud subscription sync (M3) so ad-stripping

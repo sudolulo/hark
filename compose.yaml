@@ -11,11 +11,14 @@
 # password at /account afterwards (the token stops working once one exists).
 # HARK_BASE_URL must be set to wherever the podcast player can actually reach
 # this container (not localhost) — it's embedded in generated feeds' links.
-# NOTE: build doesn't actually work yet — see Dockerfile's KNOWN GAP comment
-# about the adscrub path dependency not resolving in this build context.
+# NOTE: `docker compose build`/`up --build` won't work from this directory
+# alone — hark's adscrub path dependency needs adscrub's source alongside
+# this repo in the build context. Build with scripts/build-image.sh instead
+# (produces git.onetick.ninja/flan/hark:<tag> locally); `docker compose up -d`
+# then just runs whatever's already tagged `hark:latest` — retag the built
+# image to that, or point `image:` below at the registry tag directly.
 services:
   hark:
-    build: .
     image: hark:latest
     ports:
       - "8710:8710"
