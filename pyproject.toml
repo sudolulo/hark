@@ -1,6 +1,6 @@
 [project]
 name = "hark"
-version = "0.3.7"
+version = "0.4.0"
 description = "Cross-podcast topic index and discovery service"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -8,10 +8,32 @@ dependencies = [
     "anthropic>=0.116.0",
     "feedparser>=6.0.11",
     "httpx>=0.28",
+    "feedgen>=1.0.0",
+    "adscrub",
 ]
+
+# adscrub (flan/adscrub, sibling checkout) does ad-detection/transcription/cutting
+# as its own standalone product; hark depends on it as a library for the reusable,
+# schema-agnostic pieces (chapter-JSON parsing, keep-span math, ffmpeg cutting,
+# Whisper model loading, the Claude ad-span detector) rather than duplicating that
+# code. hark's own glue (chapters.py/transcribe.py/detect.py/cut.py) wires those
+# into hark's own shows/episodes schema — see docs/PLAN.md and CLAUDE.md.
+#
+# Path dependency for now since both repos live on this host; revisit for Docker
+# builds / other hosts (git dependency + deploy key, or a published package) —
+# not solved yet, see docs/PLAN.md open questions.
+[tool.uv.sources]
+adscrub = { path = "../adscrub", editable = true }
 
 [project.scripts]
 hark = "hark.cli:main"
+
+[project.optional-dependencies]
+# Passes through to adscrub's own gpu extra (cuBLAS/cuDNN for faster-whisper's
+# CUDA path) rather than duplicating that package list here.
+gpu = [
+    "adscrub[gpu]",
+]
 
 [dependency-groups]
 dev = [

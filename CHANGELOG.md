@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-11
+
+### Added
+
+- Ad-stripping via `flan/adscrub`, added as a **library dependency**
+  (`[tool.uv.sources]` path dependency, editable) — not a code merge. hark's
+  `episodes`/`shows`/`ad_segments` schema was deliberately shaped to match
+  adscrub's own, so adscrub's schema-coupled functions work unchanged against
+  hark's database: `hark chapters`/`transcribe`/`detect-ads`/`cut` call
+  straight into the `adscrub` package. No duplicated pipeline code exists in
+  this repo.
+- `hark web` now also serves `GET /feed/<show_id>/<token>` (regenerated clean
+  RSS, via hark's own `podcast_feed.py`) and `GET /audio/<episode_id>/<token>.<ext>`
+  (locally-cut episodes) — unauthenticated (no cookie login, since a podcast
+  app can't do that) but gated by a per-show random token. `--base-url`/
+  `$HARK_BASE_URL` controls what's embedded in generated links; warns if left
+  at the unreachable `localhost` default.
+- `compose.gpu.yaml`: requests the host's GPU via the `nvidia` Docker runtime;
+  hark's own `gpu` extra passes through to `adscrub[gpu]`.
+
+### Changed
+
+- Dependency, not a merge — corrected mid-session (see below) after the wrong
+  approach was initially built and pushed, then reverted.
+
+### Fixed
+
+- An earlier pass in this same session **fully merged** adscrub's source files
+  into `src/hark/` and pushed it to `main` — the wrong architecture (the
+  intent was always two separate products, with hark depending on adscrub as
+  a library). Reverted via `git revert -m 1` (history-preserving, not a
+  force-push/reset) once caught, then rebuilt correctly as a dependency. Also:
+  this merge/revert/rebuild happened concurrently with another Claude session
+  actively working in this same `~/hark` checkout (uncommitted `claims.py`
+  work) — branch switches were done carefully to avoid disturbing it. See
+  memory `feedback_shared_working_dir` for the general lesson.
+
 ## [0.3.7] - 2026-07-10
 
 ### Fixed

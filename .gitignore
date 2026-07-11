@@ -9,3 +9,5 @@ dist/
 # Local data
 hark.db
 hark.db-*
+auth.db
+data/
