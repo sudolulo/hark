@@ -89,6 +89,27 @@ CLAUDE.md for why, and don't repeat that mistake).
   needs a real packaging decision (git dependency + deploy key, vendoring a
   built wheel into the build context, or a small multi-repo build script).
   See open questions below.
+- **Per-show toggle + feed URL (0.6.0):** the pipeline originally ran
+  unconditionally against every show — no way to exclude a show you don't
+  want transcribed (real compute per episode). `shows.ad_stripping_enabled`
+  (defaults on) gates `chapters`/`transcribe`/`detect-ads`/`cut`; toggled
+  from a button on the show page, which also now displays that show's
+  `/feed/<id>/<token>` URL directly (it always existed — every show gets a
+  `feed_token` — but was never shown anywhere before this). Required adding
+  `adscrub.detect.detect_episode` (a public per-episode function, matching
+  `transcribe_episode`/`cut_episode`'s existing shape) since `detect_pending`/
+  `cut_pending`'s bulk orchestration has no hook for hark to restrict which
+  episodes get processed — hark's CLI now calls the per-episode functions in
+  its own loop instead for `detect-ads`/`cut` (same as it already did for
+  `transcribe`).
+- **Note on where this is configured:** the toggle lives in `hark.db`
+  (alongside `feed_token` — same category of per-show config), not `auth.db`.
+  That means, like every other value in `hark.db`, it's only durable on
+  whichever host is the source of truth for pipeline data — see the "Deploying
+  the app container does NOT deploy its data" note in the deploy runbook. If
+  the deployed instance's `hark.db` gets wholesale-replaced by a fresh sync
+  from the pipeline host, a toggle set only on the deployed site would be
+  lost unless also set on the source side.
 
 ## Cross-show claims comparison (done, 0.5.0)
 

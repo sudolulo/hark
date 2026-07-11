@@ -17,7 +17,11 @@ from pathlib import Path
 # in hark's own schema, since that's tied to hark's own shows/episodes rows, not
 # adscrub's separate database. feed_token gates the unauthenticated /feed and /audio
 # routes (podcast apps can't do the dashboard's cookie login); every show gets one via
-# _backfill_feed_tokens, not just ones added after this feature.
+# _backfill_feed_tokens, not just ones added after this feature. ad_stripping_enabled
+# gates whether the chapters/transcribe/detect-ads/cut pipeline touches a show at all —
+# defaults ON (matches the pipeline's original unconditional behavior for every show
+# that existed before this column did); the show page lets you switch specific shows
+# off to save compute (transcription especially is real cost per episode).
 SCHEMA = """
 PRAGMA foreign_keys = ON;
 
@@ -31,6 +35,7 @@ CREATE TABLE IF NOT EXISTS shows (
     description     TEXT,
     image_url       TEXT,
     feed_token      TEXT,
+    ad_stripping_enabled INTEGER NOT NULL DEFAULT 1,
     last_fetched_at TEXT,
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     updated_at      TEXT
@@ -106,6 +111,8 @@ _MIGRATIONS = (
     ("episodes", "llm_detected_at", "ALTER TABLE episodes ADD COLUMN llm_detected_at TEXT"),
     ("episodes", "cut_path", "ALTER TABLE episodes ADD COLUMN cut_path TEXT"),
     ("shows", "feed_token", "ALTER TABLE shows ADD COLUMN feed_token TEXT"),
+    ("shows", "ad_stripping_enabled",
+     "ALTER TABLE shows ADD COLUMN ad_stripping_enabled INTEGER NOT NULL DEFAULT 1"),
 )
 
 

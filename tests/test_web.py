@@ -313,6 +313,47 @@ def test_home_page_view_all_topics_link(tmp_path):
         srv.shutdown()
 
 
+def test_show_page_shows_feed_url_and_adblock_toggle(server, tmp_path):
+    cookie = login(server)
+    conn = db.connect(tmp_path / "hark.db")
+    token = conn.execute("SELECT feed_token FROM shows WHERE id = 1").fetchone()["feed_token"]
+    conn.close()
+
+    resp, body = request(server, "GET", "/show/1", cookie=cookie)
+    assert resp.status == 200
+    assert f"http://localhost:8710/feed/1/{token}" in body
+    assert "<strong>enabled</strong>" in body  # default
+    assert "Disable ad-stripping" in body
+
+
+def test_adblock_toggle_flips_state_and_redirects(server):
+    cookie = login(server)
+    resp, _ = request(server, "POST", "/show/1/adblock", body={}, cookie=cookie)
+    assert resp.status == 303
+    assert resp.getheader("Location") == "/show/1"
+
+    resp, body = request(server, "GET", "/show/1", cookie=cookie)
+    assert "<strong>disabled</strong>" in body
+    assert "Enable ad-stripping" in body
+
+    # toggling again flips it back
+    request(server, "POST", "/show/1/adblock", body={}, cookie=cookie)
+    resp, body = request(server, "GET", "/show/1", cookie=cookie)
+    assert "<strong>enabled</strong>" in body
+
+
+def test_adblock_toggle_404_for_missing_show(server):
+    cookie = login(server)
+    resp, _ = request(server, "POST", "/show/999/adblock", body={}, cookie=cookie)
+    assert resp.status == 404
+
+
+def test_adblock_toggle_requires_login(server):
+    resp, _ = request(server, "POST", "/show/1/adblock", body={})
+    assert resp.status == 303
+    assert resp.getheader("Location") == "/login"
+
+
 def test_episode_page_404_for_missing_episode(server):
     cookie = login(server)
     resp, _ = request(server, "GET", "/episode/999", cookie=cookie)

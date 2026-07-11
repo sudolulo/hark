@@ -138,6 +138,22 @@ def test_chapters_with_nothing_to_scan_fails(tmp_path, capsys):
     assert "no episodes" in capsys.readouterr().err
 
 
+def test_chapters_skips_disabled_shows(tmp_path, capsys):
+    path = tmp_path / "t.db"
+    conn = db.connect(path)
+    conn.execute("INSERT INTO shows (query, ad_stripping_enabled) VALUES ('Show A', 0)")
+    conn.execute(
+        "INSERT INTO episodes (show_id, guid, title, chapters_url) VALUES"
+        " (1, 'g1', 'ep', 'http://a/chapters.json')"
+    )
+    conn.commit()
+    conn.close()
+
+    rc = cli.main(["--db", str(path), "chapters"])
+    assert rc == 1
+    assert "no episodes" in capsys.readouterr().err
+
+
 def test_transcribe_with_nothing_pending_fails(tmp_path, capsys):
     rc = cli.main(["--db", str(tmp_path / "t.db"), "transcribe"])
     assert rc == 1
@@ -179,6 +195,25 @@ def test_transcribe_success_path_calls_adscrub_directly(tmp_path, capsys, monkey
     out = capsys.readouterr().out
     assert "ok    Ep One -> x.json" in out
     assert "transcribed 1 episode(s) (0 failed, 0 still pending)" in out
+
+
+def test_transcribe_skips_disabled_shows(tmp_path, capsys):
+    path = tmp_path / "t.db"
+    conn = db.connect(path)
+    conn.execute("INSERT INTO shows (query, ad_stripping_enabled) VALUES ('Show A', 1)")
+    conn.execute("INSERT INTO shows (query, ad_stripping_enabled) VALUES ('Show B', 0)")
+    conn.execute(
+        "INSERT INTO episodes (show_id, guid, title, audio_url) VALUES (1, 'g1', 'Enabled Ep', 'http://a/1.mp3')"
+    )
+    conn.execute(
+        "INSERT INTO episodes (show_id, guid, title, audio_url) VALUES (2, 'g2', 'Disabled Ep', 'http://a/2.mp3')"
+    )
+    conn.commit()
+    conn.close()
+
+    rc = cli.main(["--db", str(path), "transcribe", "--dry-run"])
+    assert rc == 0
+    assert "pending episodes: 1" in capsys.readouterr().out  # only the enabled show's episode
 
 
 def test_detect_ads_with_nothing_pending_fails(tmp_path, capsys):
@@ -240,6 +275,42 @@ def test_detect_ads_success_path_calls_adscrub_directly(tmp_path, capsys, monkey
     out = capsys.readouterr().out
     assert "ok    Ep One: 1 ad span(s) from transcript" in out
     assert "detected across 1 episode(s) (0 failed, 0 still pending)" in out
+
+
+def test_detect_ads_skips_disabled_shows(tmp_path, capsys):
+    path = tmp_path / "t.db"
+    transcript_path = tmp_path / "t.json"
+    transcript_path.write_text(json.dumps([{"start": 0.0, "end": 1.0, "text": "hi"}]))
+    conn = db.connect(path)
+    conn.execute("INSERT INTO shows (query, ad_stripping_enabled) VALUES ('Show A', 0)")
+    conn.execute(
+        "INSERT INTO episodes (show_id, guid, title, transcript_path) VALUES (1, 'g1', 'ep', ?)",
+        (str(transcript_path),),
+    )
+    conn.commit()
+    conn.close()
+
+    rc = cli.main(["--db", str(path), "detect-ads", "--dry-run"])
+    assert rc == 0
+    assert "pending episodes: 0" in capsys.readouterr().out
+
+
+def test_cut_skips_disabled_shows(tmp_path, capsys):
+    path = tmp_path / "t.db"
+    conn = db.connect(path)
+    conn.execute("INSERT INTO shows (query, ad_stripping_enabled) VALUES ('Show A', 0)")
+    conn.execute(
+        "INSERT INTO episodes (show_id, guid, title, audio_url) VALUES (1, 'g1', 'ep', 'http://a/1.mp3')"
+    )
+    conn.execute(
+        "INSERT INTO ad_segments (episode_id, start_second, end_second, source) VALUES (1, 0, 5, 'chapter')"
+    )
+    conn.commit()
+    conn.close()
+
+    rc = cli.main(["--db", str(path), "cut", "--dry-run"])
+    assert rc == 0
+    assert "pending episodes: 0" in capsys.readouterr().out
 
 
 def test_cut_with_nothing_pending_fails(tmp_path, capsys):

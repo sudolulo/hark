@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-11
+
+### Added
+
+- Per-show ad-stripping toggle (`shows.ad_stripping_enabled`, defaults on —
+  matches the pipeline's previous unconditional behavior for every existing
+  show). `hark chapters`/`transcribe`/`detect-ads`/`cut` now skip episodes
+  belonging to disabled shows. Toggled from a button on each show's page.
+- The show page now displays that show's ad-stripped feed URL
+  (`/feed/<id>/<token>`) directly, so it can be copied into AntennaPod —
+  previously it existed (every show gets a `feed_token`) but was never
+  surfaced anywhere in the UI.
+
+### Changed
+
+- `cmd_detect_ads`/`cmd_cut` in cli.py now call adscrub's per-episode
+  `detect_episode`/`cut_episode` directly in a hark-side loop instead of the
+  bulk `detect_pending`/`cut_pending` orchestrators, so the per-show enabled
+  filter actually takes effect (those bulk functions run their own internal
+  pending-episode query with no way to restrict it to a specific episode
+  set). Required adding `adscrub.detect.detect_episode` (see adscrub's own
+  CHANGELOG) — `cut_episode` already existed.
+
 ## [0.5.0] - 2026-07-11
 
 ### Added

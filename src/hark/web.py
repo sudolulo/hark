@@ -269,6 +269,35 @@ class App:
         conn.row_factory = sqlite3.Row
         return conn
 
+    def toggle_ad_stripping(self, show_id: int) -> bool | None:
+        """Flip a show's ad_stripping_enabled flag. Returns the new state, or
+        None if the show doesn't exist.
+
+        Deliberately the only write path from web.py into hark.db (every
+        other mutation here lives in auth.db instead — see module docstring:
+        data snapshots pushed from the pipeline replace hark.db wholesale).
+        A toggle set here will be lost on the next such re-sync unless the
+        source-side hark.db (wherever the pipeline actually runs) is updated
+        to match — same caveat as any other hark.db value set outside the
+        pipeline host.
+        """
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                "SELECT ad_stripping_enabled FROM shows WHERE id = ?", (show_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            new_state = 0 if row["ad_stripping_enabled"] else 1
+            conn.execute(
+                "UPDATE shows SET ad_stripping_enabled = ? WHERE id = ?", (new_state, show_id)
+            )
+            conn.commit()
+            return bool(new_state)
+        finally:
+            conn.close()
+
     def cookie_attrs(self, token: str, max_age: int) -> str:
         secure = "; Secure" if self.cookie_secure else ""
         return f"{COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age={max_age}"
@@ -501,7 +530,11 @@ class App:
         conn = self.db()
         try:
             show = conn.execute(
-                "SELECT id, COALESCE(title, query) AS name FROM shows WHERE id = ?", (show_id,)
+                """
+                SELECT id, COALESCE(title, query) AS name, feed_token, ad_stripping_enabled
+                FROM shows WHERE id = ?
+                """,
+                (show_id,),
             ).fetchone()
             if show is None:
                 return None
@@ -548,9 +581,24 @@ class App:
             for r in episodes
         )
         pager = pagination_html(f"/show/{show_id}", {}, page_num, total_episodes, "episodes")
+        feed_url = f"{self.base_url}/feed/{show['id']}/{show['feed_token']}"
+        enabled = bool(show["ad_stripping_enabled"])
+        toggle_label = "Disable ad-stripping" if enabled else "Enable ad-stripping"
+        adblock_section = (
+            '<div class="status">'
+            f'<p>Ad-stripped feed URL — subscribe to this in AntennaPod instead of the '
+            f'original: <code>{esc(feed_url)}</code></p>'
+            f'<p>Ad-stripping pipeline for this show: '
+            f'<strong>{"enabled" if enabled else "disabled"}</strong> — episodes only get '
+            f'transcribed/scanned/cut while enabled (existing cut episodes stay cut either way).</p>'
+            f'<form method="post" action="/show/{show_id}/adblock">'
+            f'<button class="ghost">{toggle_label}</button></form>'
+            "</div>"
+        )
         body = (
             f"<h1>{esc(show['name'])}</h1>"
             f"<h2>{total_episodes} episode(s), {topic_count} topic(s) covered</h2>"
+            f"{adblock_section}"
             f"<table><tr><th>episode</th><th>date</th><th>topics</th></tr>{rows_html}</table>{pager}"
         )
         return page(show["name"], body, user["username"])
@@ -1026,6 +1074,14 @@ class Handler(BaseHTTPRequestHandler):
                     return self.respond(400, app.view_account(user, err="Passwords do not match."))
                 app.auth.set_password(user["id"], pw)
                 return self.redirect("/login", {"Set-Cookie": app.cookie_attrs("", 0)})
+            if route.startswith("/show/") and route.endswith("/adblock"):
+                try:
+                    show_id = int(route.removeprefix("/show/").removesuffix("/adblock"))
+                except ValueError:
+                    return self.not_found(user)
+                if app.toggle_ad_stripping(show_id) is None:
+                    return self.not_found(user)
+                return self.redirect(f"/show/{show_id}")
         except sqlite3.OperationalError:
             return self.db_unavailable(user)
         return self.not_found(user)

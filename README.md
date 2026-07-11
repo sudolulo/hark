@@ -12,17 +12,20 @@ separate, standalone product — as a library: `hark chapters`/`transcribe`/
 `episodes`/`ad_segments` schema was deliberately shaped to match adscrub's, so
 adscrub's schema-coupled functions work unchanged against hark's database.
 Nothing here is a copy of adscrub's code — see CLAUDE.md and docs/PLAN.md for
-the integration design and why it's a dependency, not a merge.
+the integration design and why it's a dependency, not a merge. Ad-stripping is
+per-show (on by default) — toggle it from that show's page, which also shows
+the feed URL to subscribe to in AntennaPod once you're ready.
 
 Once a topic has transcripts from 2+ shows (from the ad-stripping pipeline's
 transcription step), hark can also compare what each show actually claimed —
 shared facts vs. claims unique to one show's telling — shown on every
 episode's own page.
 
-See `docs/PLAN.md` for milestones. Current state (0.5.0): feed resolution,
+See `docs/PLAN.md` for milestones. Current state (0.6.0): feed resolution,
 episode ingest, LLM topic extraction with Wikidata canonicalization, the
-cross-show topic index, a full web UI, adscrub-backed ad-stripping, and
-cross-show claims comparison — deployed live. M2 (discovery) is next for the
+cross-show topic index, a full web UI, adscrub-backed ad-stripping (with a
+per-show on/off toggle and feed URL, both from the show page), and cross-show
+claims comparison — deployed live. M2 (discovery) is next for the
 topic-index side.
 
 ## Usage

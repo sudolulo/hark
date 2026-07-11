@@ -38,6 +38,16 @@ def make_client() -> httpx.Client:
     )
 
 
+def _enabled_episodes(conn, episodes, limit: int | None = None) -> list:
+    """Filter a pending-episode list down to shows with ad_stripping_enabled,
+    then apply `limit` — done here rather than at the SQL level inside
+    adscrub's own pending_episodes() so hark's per-show toggle doesn't need
+    any adscrub code change beyond exposing per-episode functions."""
+    enabled = {r["id"] for r in conn.execute("SELECT id FROM shows WHERE ad_stripping_enabled = 1")}
+    filtered = [e for e in episodes if e["show_id"] in enabled]
+    return filtered[:limit] if limit else filtered
+
+
 def make_reporter() -> tuple[Callable[[pipeline.ExtractResult], None], dict[str, int]]:
     """Shared per-episode progress printer for `extract` and `load`."""
     counts = {"ok": 0, "failed": 0, "skipped": 0}
@@ -95,9 +105,10 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 
 def cmd_chapters(args: argparse.Namespace) -> int:
     conn = db.connect(args.db)
-    episodes = ad_chapters.pending_episodes(conn)
+    episodes = _enabled_episodes(conn, ad_chapters.pending_episodes(conn))
     if not episodes:
-        print("no episodes with an unscanned chapters_url", file=sys.stderr)
+        print("no episodes with an unscanned chapters_url (from an ad-stripping-enabled show)",
+              file=sys.stderr)
         return 1
     found = 0
     with make_client() as client:
@@ -115,14 +126,15 @@ def cmd_chapters(args: argparse.Namespace) -> int:
 
 def cmd_transcribe(args: argparse.Namespace) -> int:
     conn = db.connect(args.db)
-    pending = ad_transcribe.pending_episodes(conn, args.limit)
+    pending = _enabled_episodes(conn, ad_transcribe.pending_episodes(conn), args.limit)
     if args.dry_run:
-        total_pending = len(ad_transcribe.pending_episodes(conn))
+        total_pending = len(_enabled_episodes(conn, ad_transcribe.pending_episodes(conn)))
         print(f"pending episodes: {total_pending}"
               + (f" (would process {len(pending)} this run)" if args.limit else ""))
         return 0
     if not pending:
-        print("no episodes pending transcription", file=sys.stderr)
+        print("no episodes pending transcription (from an ad-stripping-enabled show)",
+              file=sys.stderr)
         return 1
 
     errors = 0
@@ -135,21 +147,22 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                 print(f"  FAIL  {ep['title']}: {exc}")
                 continue
             print(f"  ok    {ep['title']} -> {path}")
-    remaining = len(ad_transcribe.pending_episodes(conn))
+    remaining = len(_enabled_episodes(conn, ad_transcribe.pending_episodes(conn)))
     print(f"transcribed {len(pending) - errors} episode(s) ({errors} failed, {remaining} still pending)")
     return 1 if errors else 0
 
 
 def cmd_detect_ads(args: argparse.Namespace) -> int:
     conn = db.connect(args.db)
-    pending = ad_detect.pending_episodes(conn, args.limit)
+    pending = _enabled_episodes(conn, ad_detect.pending_episodes(conn), args.limit)
     if args.dry_run:
-        total_pending = len(ad_detect.pending_episodes(conn))
+        total_pending = len(_enabled_episodes(conn, ad_detect.pending_episodes(conn)))
         print(f"pending episodes: {total_pending}"
               + (f" (would process {len(pending)} this run)" if args.limit else ""))
         return 0
     if not pending:
-        print("no episodes pending ad-span detection", file=sys.stderr)
+        print("no episodes pending ad-span detection (from an ad-stripping-enabled show)",
+              file=sys.stderr)
         return 1
 
     import anthropic  # deferred: other commands must work without a key
@@ -164,42 +177,51 @@ def cmd_detect_ads(args: argparse.Namespace) -> int:
 
     detector = ad_detect.ClaudeAdDetector(client, model=args.model)
 
-    def report(r: ad_detect.DetectResult) -> None:
-        if r.error:
-            print(f"  FAIL  {r.title}: {r.error}")
-        else:
-            print(f"  ok    {r.title}: {r.found} ad span(s) from transcript")
-
-    results = ad_detect.detect_pending(conn, detector, limit=args.limit, on_result=report)
-    errors = sum(1 for r in results if r.error)
-    remaining = len(ad_detect.pending_episodes(conn))
-    print(f"detected across {len(results) - errors} episode(s) ({errors} failed, {remaining} still pending)")
+    # Uses detect_episode directly (not the bulk detect_pending) so the
+    # per-show enabled filter above actually takes effect — detect_pending
+    # does its own pending_episodes() query internally with no way to
+    # restrict it to a specific episode set.
+    errors = 0
+    for ep in pending:
+        try:
+            found = ad_detect.detect_episode(conn, ep, detector)
+        except Exception as exc:  # noqa: BLE001 — per-episode isolation, matches detect_pending
+            conn.rollback()
+            errors += 1
+            print(f"  FAIL  {ep['title']}: {exc}")
+            continue
+        print(f"  ok    {ep['title']}: {found} ad span(s) from transcript")
+    remaining = len(_enabled_episodes(conn, ad_detect.pending_episodes(conn)))
+    print(f"detected across {len(pending) - errors} episode(s) ({errors} failed, {remaining} still pending)")
     return 1 if errors else 0
 
 
 def cmd_cut(args: argparse.Namespace) -> int:
     conn = db.connect(args.db)
-    pending = ad_cut.pending_episodes(conn, args.limit)
+    pending = _enabled_episodes(conn, ad_cut.pending_episodes(conn), args.limit)
     if args.dry_run:
-        total_pending = len(ad_cut.pending_episodes(conn))
+        total_pending = len(_enabled_episodes(conn, ad_cut.pending_episodes(conn)))
         print(f"pending episodes: {total_pending}"
               + (f" (would process {len(pending)} this run)" if args.limit else ""))
         return 0
     if not pending:
-        print("no episodes pending cutting", file=sys.stderr)
+        print("no episodes pending cutting (from an ad-stripping-enabled show)", file=sys.stderr)
         return 1
 
-    def report(r: ad_cut.CutResult) -> None:
-        if r.error:
-            print(f"  FAIL  {r.title}: {r.error}")
-        else:
-            print(f"  ok    {r.title}: removed {r.ad_seconds:.1f}s of ads")
-
+    # Uses cut_episode directly (not the bulk cut_pending) — same reason as
+    # cmd_detect_ads above.
+    errors = 0
     with make_client() as client:
-        results = ad_cut.cut_pending(conn, client, limit=args.limit, on_result=report)
-    errors = sum(1 for r in results if r.error)
-    remaining = len(ad_cut.pending_episodes(conn))
-    print(f"cut {len(results) - errors} episode(s) ({errors} failed, {remaining} still pending)")
+        for ep in pending:
+            try:
+                _path, ad_seconds = ad_cut.cut_episode(conn, ep, client)
+            except Exception as exc:  # noqa: BLE001 — per-episode isolation, matches cut_pending
+                errors += 1
+                print(f"  FAIL  {ep['title']}: {exc}")
+                continue
+            print(f"  ok    {ep['title']}: removed {ad_seconds:.1f}s of ads")
+    remaining = len(_enabled_episodes(conn, ad_cut.pending_episodes(conn)))
+    print(f"cut {len(pending) - errors} episode(s) ({errors} failed, {remaining} still pending)")
     return 1 if errors else 0
 
 
