@@ -90,6 +90,39 @@ CLAUDE.md for why, and don't repeat that mistake).
   built wheel into the build context, or a small multi-repo build script).
   See open questions below.
 
+## Cross-show claims comparison (done, 0.5.0)
+
+Not in the original milestone list either — the natural follow-up to "who
+covered X" once transcripts exist: what did each show actually *say*, and
+where do their tellings agree or diverge? Lives in `claims.py`, built
+additively in a separate session while `web.py`/`cli.py` were mid-merge from
+the adscrub port, wired in fully once that merge landed.
+
+- **Comparison, not a raw diff:** a literal text diff between independently
+  scripted episodes is close to useless. Instead the model gets all of a
+  topic's transcribed episodes in one call and returns which claims are
+  shared across shows vs. unique to one show's telling — same structured-
+  outputs idiom as `extract.py`/`detect.py`.
+- **Own table, not a db.py schema change:** `topic_comparisons`, created via
+  its own `ensure_schema()` (same idiom as `web.py`'s `Auth` for `auth.db`) —
+  avoided touching the shared schema while it was in flux.
+- **Two ways to run it**, same split as topic extraction: `hark compare`
+  (live, `ClaudeComparator`, needs `$ANTHROPIC_API_KEY`) or
+  `hark load-comparisons <file>` (pre-computed JSONL — used the first time,
+  session-as-comparator, no API key).
+- **`/episode/<id>`** (new route) shows, per topic the episode covers: shared
+  claims, claims unique to each show (the episode's own show labeled
+  "(this episode)"), or a specific reason nothing's there yet (not
+  transcribed / only one show has covered it so far / 2+ shows transcribed
+  but not compared yet). Linked from every episode-title cell across the
+  site (show/topic/search/home) — a page with no inbound links doesn't get
+  used, per the earlier UI-audit lesson about discoverability.
+- **Read-only-connection-safe:** `get_comparison()` deliberately skips
+  `ensure_schema()` so it works against `web.py`'s read-only `App.db()`
+  connection even before `topic_comparisons` exists (SQLite's `CREATE TABLE
+  IF NOT EXISTS` still needs write access to *create* it, but is a no-op —
+  and safe on a read-only connection — once it already exists).
+
 ## M2 — discovery
 
 - Embedding similarity over episode topics → related shows, notable back-catalog episodes.

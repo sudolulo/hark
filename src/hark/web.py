@@ -42,7 +42,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import __version__, podcast_feed
+from . import __version__, claims, podcast_feed
 from .extract import GENRES as GENRES_FILTER
 
 PW_ITERS = 120_000
@@ -214,6 +214,9 @@ button.ghost { background:transparent; border:1px solid var(--line); color:var(-
 .status.active { border-left-color:var(--acc); }
 .status p { margin:0.2rem 0; }
 .pending { color:var(--acc); }
+ul.claims { margin:0.2rem 0 1rem 1.2rem; padding:0; }
+ul.claims li { margin-bottom:0.3rem; }
+code { background:var(--panel); border:1px solid var(--line); padding:0 0.3rem; font-size:0.9rem; }
 """
 
 PAGE = """<!doctype html>
@@ -327,7 +330,8 @@ class App:
         )
         recent_html = "".join(
             f"<tr><td class='dim'>{relative_time(parse_iso(r['extracted_at']))}</td>"
-            f"<td><a href='/show/{r['show_id']}'>{esc(r['show'])}</a></td><td>{esc(r['title'])}</td></tr>"
+            f"<td><a href='/show/{r['show_id']}'>{esc(r['show'])}</a></td>"
+            f"<td><a href='/episode/{r['id']}'>{esc(r['title'])}</a></td></tr>"
             for r in recent
         ) or '<tr><td class="dim" colspan="3">Nothing indexed yet.</td></tr>'
         body = (
@@ -377,8 +381,8 @@ class App:
                 "SELECT genre FROM topic_genres WHERE topic_id = ? ORDER BY genre", (topic_id,))]
             episodes = conn.execute(
                 """
-                SELECT s.id AS show_id, COALESCE(s.title, s.query) AS show, e.title,
-                       e.pubdate, e.audio_url, et.confidence
+                SELECT e.id AS id, s.id AS show_id, COALESCE(s.title, s.query) AS show,
+                       e.title, e.pubdate, e.audio_url, et.confidence
                 FROM episode_topics et
                 JOIN episodes e ON e.id = et.episode_id
                 JOIN shows s ON s.id = e.show_id
@@ -455,7 +459,7 @@ class App:
             if episodes:
                 eps = "".join(
                     f"<tr><td><a href='/show/{r['show_id']}'>{esc(r['show'])}</a></td>"
-                    f"<td>{esc(r['title'])}</td>"
+                    f"<td><a href='/episode/{r['id']}'>{esc(r['title'])}</a></td>"
                     f"<td class='dim'>{esc((r['pubdate'] or '')[:10])}</td></tr>"
                     for r in episodes
                 )
@@ -550,6 +554,85 @@ class App:
             f"<table><tr><th>episode</th><th>date</th><th>topics</th></tr>{rows_html}</table>{pager}"
         )
         return page(show["name"], body, user["username"])
+
+    def view_episode(self, user, episode_id: int) -> str | None:
+        conn = self.db()
+        try:
+            episode = conn.execute(
+                """
+                SELECT e.id, e.title, e.pubdate, e.audio_url, e.transcript_path,
+                       e.extracted_at, s.id AS show_id, COALESCE(s.title, s.query) AS show
+                FROM episodes e JOIN shows s ON s.id = e.show_id
+                WHERE e.id = ?
+                """,
+                (episode_id,),
+            ).fetchone()
+            if episode is None:
+                return None
+            topics = conn.execute(
+                """
+                SELECT t.id, t.label, et.confidence
+                FROM episode_topics et JOIN topics t ON t.id = et.topic_id
+                WHERE et.episode_id = ? ORDER BY t.label
+                """,
+                (episode_id,),
+            ).fetchall()
+            topic_sections = []
+            for t in topics:
+                comparison = claims.get_comparison(conn, t["id"])
+                shows_transcribed = conn.execute(
+                    """
+                    SELECT COUNT(DISTINCT e2.show_id) FROM episode_topics et2
+                    JOIN episodes e2 ON e2.id = et2.episode_id
+                    WHERE et2.topic_id = ? AND e2.transcript_path IS NOT NULL
+                    """,
+                    (t["id"],),
+                ).fetchone()[0]
+                topic_sections.append((t, comparison, shows_transcribed))
+        finally:
+            conn.close()
+
+        pills = " ".join(
+            f'<a class="pill" href="/topic/{t["id"]}">{esc(t["label"])}</a>' for t, _, _ in topic_sections
+        )
+        url = episode["audio_url"] or ""
+        play = ""
+        if urllib.parse.urlsplit(url).scheme in ("http", "https"):
+            play = f' <a class="qid" href="{esc(url)}" rel="noreferrer">▶ play</a>'
+        body = (
+            f"<h1>{esc(episode['title'])}</h1>"
+            f"<h2><a href='/show/{episode['show_id']}'>{esc(episode['show'])}</a>"
+            f" &middot; {esc((episode['pubdate'] or '')[:10])}{play}</h2>"
+            + (f"<p>{pills}</p>" if pills else "")
+        )
+        if not topic_sections:
+            note = "not yet indexed" if not episode["extracted_at"] else "no subject identified"
+            body += f'<p class="dim">{note}</p>'
+        for topic, comparison, shows_transcribed in topic_sections:
+            body += f"<h2>{esc(topic['label'])} — what each show said</h2>"
+            if comparison is not None:
+                shared_html = "".join(f"<li>{esc(c)}</li>" for c in comparison.shared)
+                body += (
+                    "<p>Claims shared across shows:</p>"
+                    f"<ul class='claims'>{shared_html}</ul>" if comparison.shared
+                    else '<p class="dim">No claims judged shared across shows.</p>'
+                )
+                for show, own_claims in comparison.unique_by_show.items():
+                    if not own_claims:
+                        continue
+                    label = f"{esc(show)} (this episode)" if show == episode["show"] else esc(show)
+                    items = "".join(f"<li>{esc(c)}</li>" for c in own_claims)
+                    body += f"<p>Unique to {label}:</p><ul class='claims'>{items}</ul>"
+                if not comparison.unique_by_show:
+                    body += '<p class="dim">No claims judged unique to a single show.</p>'
+            elif episode["transcript_path"] is None:
+                body += '<p class="dim">This episode hasn’t been transcribed yet.</p>'
+            elif shows_transcribed >= 2:
+                body += ('<p class="dim">Transcribed by 2+ shows but not compared yet '
+                         '(<code>hark compare</code>).</p>')
+            else:
+                body += '<p class="dim">Only this show has covered this topic so far.</p>'
+        return page(episode["title"], body, user["username"])
 
     def view_account(self, user, msg: str = "", err: str = "") -> str:
         note = f'<p class="err">{esc(err)}</p>' if err else (f"<p>{esc(msg)}</p>" if msg else "")
@@ -667,7 +750,7 @@ def conf(value) -> str:
 
 
 def episode_cell(row) -> str:
-    title = esc(row["title"])
+    title = f'<a href="/episode/{row["id"]}">{esc(row["title"])}</a>'
     url = row["audio_url"] or ""
     # Enclosure URLs come from third-party feeds; only link plain http(s) so a
     # hostile feed can't smuggle a javascript:/data: scheme into an href.
@@ -895,6 +978,15 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError:
                     return self.not_found(user)
                 body = app.view_show(user, show_id, params)
+                if body is None:
+                    return self.not_found(user)
+                return self.respond(200, body)
+            if route.startswith("/episode/"):
+                try:
+                    episode_id = int(route.rsplit("/", 1)[1])
+                except ValueError:
+                    return self.not_found(user)
+                body = app.view_episode(user, episode_id)
                 if body is None:
                     return self.not_found(user)
                 return self.respond(200, body)

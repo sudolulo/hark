@@ -10,7 +10,7 @@ import urllib.parse
 
 import pytest
 
-from hark import db, web
+from hark import claims, db, web
 
 
 @pytest.fixture(autouse=True)
@@ -66,7 +66,7 @@ def login(srv, password="letmein"):
 
 
 def test_everything_gated_except_allowlist(server):
-    for path in ("/", "/topics", "/topic/1", "/search", "/shows", "/show/1", "/account"):
+    for path in ("/", "/topics", "/topic/1", "/search", "/shows", "/show/1", "/episode/1", "/account"):
         resp, _ = request(server, "GET", path)
         assert resp.status == 303, path
         assert resp.getheader("Location") == "/login"
@@ -309,6 +309,128 @@ def test_home_page_view_all_topics_link(tmp_path):
         resp, body = request(srv, "GET", "/", cookie=cookie)
         assert resp.status == 200
         assert 'href="/topics">view all 16 topics' in body
+    finally:
+        srv.shutdown()
+
+
+def test_episode_page_404_for_missing_episode(server):
+    cookie = login(server)
+    resp, _ = request(server, "GET", "/episode/999", cookie=cookie)
+    assert resp.status == 404
+
+
+def test_episode_page_notes_by_comparison_state(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('a', 'Show A', 'http://a')")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('b', 'Show B', 'http://b')")
+    conn.execute("INSERT INTO topics (label) VALUES ('No Transcript Yet')")
+    conn.execute("INSERT INTO topics (label) VALUES ('One Show Only')")
+    conn.execute("INSERT INTO topics (label) VALUES ('Two Shows, Not Compared')")
+    conn.executemany(
+        "INSERT INTO episodes (show_id, guid, title, transcript_path) VALUES (?, ?, ?, ?)",
+        [
+            (1, "g1", "Ep No Transcript", None),
+            (1, "g2", "Ep One Show", "/tmp/t2.json"),
+            (1, "g3", "Ep Two Shows A", "/tmp/t3a.json"),
+            (2, "g4", "Ep Two Shows B", "/tmp/t3b.json"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO episode_topics (episode_id, topic_id, source) VALUES (?, ?, 't')",
+        [(1, 1), (2, 2), (3, 3), (4, 3)],
+    )
+    conn.commit()
+    conn.close()
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
+        cookie = resp.getheader("Set-Cookie").split(";")[0]
+
+        resp, body = request(srv, "GET", "/episode/1", cookie=cookie)
+        assert resp.status == 200
+        assert "hasn’t been transcribed yet" in body
+
+        resp, body = request(srv, "GET", "/episode/2", cookie=cookie)
+        assert resp.status == 200
+        assert "Only this show has covered this topic so far" in body
+
+        resp, body = request(srv, "GET", "/episode/3", cookie=cookie)
+        assert resp.status == 200
+        assert "not compared yet" in body
+        assert "hark compare" in body
+    finally:
+        srv.shutdown()
+
+
+def test_episode_page_renders_stored_comparison(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('a', 'Show A', 'http://a')")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('b', 'Show B', 'http://b')")
+    conn.execute("INSERT INTO topics (label) VALUES ('Somerton Man')")
+    conn.execute(
+        "INSERT INTO episodes (show_id, guid, title, transcript_path) VALUES (1, 'g1', 'A tells it', '/tmp/a.json')"
+    )
+    conn.execute(
+        "INSERT INTO episodes (show_id, guid, title, transcript_path) VALUES (2, 'g2', 'B tells it', '/tmp/b.json')"
+    )
+    conn.executemany(
+        "INSERT INTO episode_topics (episode_id, topic_id, source) VALUES (?, 1, 't')", [(1,), (2,)]
+    )
+    conn.commit()
+    claims.load_comparisons(conn, [{
+        "topic_id": 1,
+        "shared": ["the body was never identified"],
+        "unique_by_show": {"Show A": ["mentions the Rubaiyat code"], "Show B": []},
+    }])
+    conn.close()
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
+        cookie = resp.getheader("Set-Cookie").split(";")[0]
+
+        resp, body = request(srv, "GET", "/episode/1", cookie=cookie)
+        assert resp.status == 200
+        assert "the body was never identified" in body
+        assert "mentions the Rubaiyat code" in body
+        assert "Show A (this episode)" in body
+        # Show B had no unique claims (empty list) so it shouldn't render a heading
+        assert "Unique to Show B" not in body
+
+        # from the other show's episode, the "(this episode)" tag follows *that* episode
+        resp, body = request(srv, "GET", "/episode/2", cookie=cookie)
+        assert "Show A (this episode)" not in body
+        assert "Unique to Show A:" in body
+    finally:
+        srv.shutdown()
+
+
+def test_episode_links_reachable_from_topic_and_show_pages(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('q', 'Show A', 'http://x')")
+    conn.execute(
+        "INSERT INTO episodes (show_id, guid, title, extracted_at) VALUES"
+        " (1, 'g1', 'Case 1', '2026-01-01T00:00:00Z')"
+    )
+    conn.execute("INSERT INTO topics (label) VALUES ('Some Topic')")
+    conn.execute("INSERT INTO episode_topics (episode_id, topic_id, source) VALUES (1, 1, 't')")
+    conn.commit()
+    conn.close()
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
+        cookie = resp.getheader("Set-Cookie").split(";")[0]
+        for path in ("/show/1", "/topic/1", "/"):
+            resp, body = request(srv, "GET", path, cookie=cookie)
+            assert "/episode/1" in body, path
     finally:
         srv.shutdown()
 

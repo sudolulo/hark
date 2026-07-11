@@ -14,10 +14,16 @@ adscrub's schema-coupled functions work unchanged against hark's database.
 Nothing here is a copy of adscrub's code — see CLAUDE.md and docs/PLAN.md for
 the integration design and why it's a dependency, not a merge.
 
-See `docs/PLAN.md` for milestones. Current state (0.4.0): feed resolution,
+Once a topic has transcripts from 2+ shows (from the ad-stripping pipeline's
+transcription step), hark can also compare what each show actually claimed —
+shared facts vs. claims unique to one show's telling — shown on every
+episode's own page.
+
+See `docs/PLAN.md` for milestones. Current state (0.5.0): feed resolution,
 episode ingest, LLM topic extraction with Wikidata canonicalization, the
-cross-show topic index, a full web UI, and adscrub-backed ad-stripping —
-deployed live. M2 (discovery) is next for the topic-index side.
+cross-show topic index, a full web UI, adscrub-backed ad-stripping, and
+cross-show claims comparison — deployed live. M2 (discovery) is next for the
+topic-index side.
 
 ## Usage
 
@@ -37,6 +43,10 @@ uv run hark chapters           # scan chapter markers for ad spans (free — no 
 uv run hark transcribe         # Whisper the rest
 uv run hark detect-ads         # LLM ad-span classification (needs $ANTHROPIC_API_KEY)
 uv run hark cut                # ffmpeg out the ad spans
+
+# cross-show claims comparison — once a topic has 2+ shows' transcripts
+uv run hark compare                    # live, needs $ANTHROPIC_API_KEY
+uv run hark load-comparisons out.jsonl # pre-computed (batch runs, no API key needed)
 ```
 
 The database defaults to `./hark.db`; override with `--db` or `$HARK_DB`.

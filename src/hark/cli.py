@@ -1,5 +1,5 @@
 """hark command line: resolve, ingest, extract, chapters, transcribe, detect-ads,
-cut, stats, topics, who, web.
+cut, compare, load-comparisons, stats, topics, who, web.
 
 chapters/transcribe/detect-ads/cut call straight into the `adscrub` package
 (a separate product, depended on as a library — see pyproject.toml) rather
@@ -24,7 +24,7 @@ from adscrub import cut as ad_cut
 from adscrub import detect as ad_detect
 from adscrub import transcribe as ad_transcribe
 
-from . import __version__, db, extract, ingest, pipeline, resolve, wikidata
+from . import __version__, claims, db, extract, ingest, pipeline, resolve, wikidata
 
 DEFAULT_DB = os.environ.get("HARK_DB", "hark.db")
 DEFAULT_FEEDS = "feeds.txt"
@@ -200,6 +200,69 @@ def cmd_cut(args: argparse.Namespace) -> int:
     errors = sum(1 for r in results if r.error)
     remaining = len(ad_cut.pending_episodes(conn))
     print(f"cut {len(results) - errors} episode(s) ({errors} failed, {remaining} still pending)")
+    return 1 if errors else 0
+
+
+def cmd_compare(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db)
+    pending = claims.pending_topics(conn, args.limit)
+    if args.dry_run:
+        total_pending = len(claims.pending_topics(conn))
+        print(f"pending topics: {total_pending}"
+              + (f" (would process {len(pending)} this run)" if args.limit else ""))
+        return 0
+    if not pending:
+        print("no topics pending comparison (need 2+ shows' transcripts on the same topic)",
+              file=sys.stderr)
+        return 1
+
+    import anthropic  # deferred: other commands must work without a key
+
+    try:
+        client = anthropic.Anthropic()
+    except anthropic.AnthropicError as exc:
+        print(f"anthropic client: {exc}", file=sys.stderr)
+        print("hint: export ANTHROPIC_API_KEY first (it lives in rbw, not in a file)",
+              file=sys.stderr)
+        return 1
+
+    comparator = claims.ClaudeComparator(client, model=args.model)
+
+    def report(r: claims.CompareResult) -> None:
+        if r.error:
+            print(f"  FAIL  {r.label}: {r.error}")
+        else:
+            print(f"  ok    {r.label}: {r.shared_count} shared claim(s)")
+
+    results = claims.compare_pending(conn, comparator, limit=args.limit, on_result=report)
+    errors = sum(1 for r in results if r.error)
+    remaining = len(claims.pending_topics(conn))
+    print(f"compared {len(results) - errors} topic(s) ({errors} failed, {remaining} still pending)")
+    return 1 if errors else 0
+
+
+def cmd_load_comparisons(args: argparse.Namespace) -> int:
+    import json
+
+    conn = db.connect(args.db)
+    try:
+        with open(args.file, encoding="utf-8") as fh:
+            records = [json.loads(line) for line in fh if line.strip()]
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"cannot read {args.file}: {exc}", file=sys.stderr)
+        return 1
+    errors = 0
+
+    def report(r: claims.LoadResult) -> None:
+        nonlocal errors
+        if r.error:
+            errors += 1
+            print(f"  FAIL  {r.label or r.topic_id}: {r.error}")
+        else:
+            print(f"  ok    {r.label}: {r.shared_count} shared claim(s)")
+
+    results = claims.load_comparisons(conn, records, model=args.source, on_result=report)
+    print(f"loaded {len(results) - errors} comparison(s) ({errors} failed)")
     return 1 if errors else 0
 
 
@@ -445,6 +508,27 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--source", default="batch",
                    help="value stored in episode_topics.source (default: batch)")
     p.set_defaults(func=cmd_load)
+
+    p = sub.add_parser(
+        "compare", help="compare cross-show transcripts for topics covered by 2+ shows"
+    )
+    p.add_argument("--limit", type=int, help="max topics to process this run")
+    p.add_argument("--model", default=os.environ.get("HARK_CLAIMS_MODEL", claims.DEFAULT_MODEL),
+                   help=f"Claude model id (default: $HARK_CLAIMS_MODEL or {claims.DEFAULT_MODEL})")
+    p.add_argument("--dry-run", action="store_true",
+                   help="only report how many topics are pending")
+    p.set_defaults(func=cmd_compare)
+
+    p = sub.add_parser(
+        "load-comparisons",
+        help="load pre-computed claims comparisons JSONL (batch runs, session output)",
+    )
+    p.add_argument(
+        "file", help="JSONL: {topic_id, shared: [str], unique_by_show: {show: [str]}}"
+    )
+    p.add_argument("--source", default="session",
+                   help="value stored in topic_comparisons.model (default: session)")
+    p.set_defaults(func=cmd_load_comparisons)
 
     p = sub.add_parser("stats", help="print database counts per show")
     p.set_defaults(func=cmd_stats)

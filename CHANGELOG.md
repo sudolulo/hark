@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-11
+
+### Added
+
+- Cross-show claims comparison, wired end to end: `hark compare` (live,
+  Claude structured outputs via `claims.ClaudeComparator`) and
+  `hark load-comparisons <file>` (pre-computed JSONL — same session-as-worker
+  idiom as `hark load` for topic extraction). Every episode now has its own
+  `/episode/<id>` page, linked from show/topic/search/home listings, showing
+  — for each topic it covers — claims judged shared across shows vs. unique
+  to one show's telling, or a specific reason none exists yet (not
+  transcribed / only one show has covered it / transcribed by 2+ shows but
+  not compared yet).
+- `claims.py` (built additively in a previous session while `web.py`/`cli.py`
+  were mid-merge from the adscrub port) is now fully wired in, now that
+  merge has landed.
+
+### Fixed
+
+- `src/hark/__init__.py`'s `__version__` was still `"0.3.7"` even though
+  `pyproject.toml` had already moved to `0.4.0` for the ad-stripping merge —
+  the same stuck-constant bug class already caught and fixed in adscrub.
+  `hark --version`, the CLI's outbound `User-Agent` header, and the web
+  server's HTTP `Server` response header were all silently wrong; now track
+  pyproject.toml.
+
 ## [0.4.0] - 2026-07-11
 
 ### Added
