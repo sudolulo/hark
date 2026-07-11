@@ -21,12 +21,12 @@ transcription step), hark can also compare what each show actually claimed —
 shared facts vs. claims unique to one show's telling — shown on every
 episode's own page.
 
-See `docs/PLAN.md` for milestones. Current state (0.6.0): feed resolution,
+See `docs/PLAN.md` for milestones. Current state (0.7.0): feed resolution,
 episode ingest, LLM topic extraction with Wikidata canonicalization, the
 cross-show topic index, a full web UI, adscrub-backed ad-stripping (with a
-per-show on/off toggle and feed URL, both from the show page), and cross-show
-claims comparison — deployed live. M2 (discovery) is next for the
-topic-index side.
+per-show on/off toggle and feed URL, both from the show page), cross-show
+claims comparison, and M2 discovery's first cut (related shows by topic
+co-occurrence, on every show page) — deployed live.
 
 ## Usage
 

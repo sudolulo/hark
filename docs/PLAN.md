@@ -149,8 +149,21 @@ the adscrub port, wired in fully once that merge landed.
 
 ## M2 — discovery
 
-- Embedding similarity over episode topics → related shows, notable back-catalog episodes.
+- **Related shows (done, first cut, 0.7.0):** each show page lists other shows ranked by
+  shared topic count (`web.related_shows()`) — a topic-co-occurrence stand-in for the
+  originally planned embedding similarity, using data M1 extraction already produces
+  rather than standing up a separate embedding model/API key. 171 topics already have 2+
+  show coverage across the full 2199-episode corpus, enough for the ranking to be
+  meaningful (e.g. Casefile True Crime ↔ The Casual Criminalist: 63 shared topics).
+  Revisit with real embeddings if co-occurrence ever proves too coarse (e.g. it can't
+  distinguish "both cover serial killers" from "both cover the *same* serial killer" the
+  way claims comparison's per-topic transcript reading can).
+- Notable back-catalog episodes: not started. Deliberately left separate from M4's planned
+  interestingness scoring — a "notable" surfacing here would just be cross-show coverage
+  count again, which is already visible via the topic index; a real distinct signal
+  probably wants to wait for M4's actual metrics.
 - Candidate-show pipeline: cheap signals first, deeper analysis only for shows that pass.
+  Not started.
 
 ## M3 — AntennaPod loop
 

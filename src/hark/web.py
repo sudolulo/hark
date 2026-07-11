@@ -574,6 +574,7 @@ class App:
                 """,
                 (show_id,),
             ).fetchone()[0]
+            related = related_shows(conn, show_id)
         finally:
             conn.close()
         topics_by_episode: dict[int, list] = {}
@@ -600,10 +601,19 @@ class App:
             f'<button class="ghost">{toggle_label}</button></form>'
             "</div>"
         )
+        related_html = ""
+        if related:
+            pills = " ".join(
+                f'<a class="pill" href="/show/{r["id"]}">{esc(r["name"])} '
+                f'({plural(r["shared"], "shared topic")})</a>'
+                for r in related
+            )
+            related_html = f"<h2>Related shows</h2><p>{pills}</p>"
         body = (
             f"<h1>{esc(show['name'])}</h1>"
             f"<h2>{plural(total_episodes, 'episode')}, {plural(topic_count, 'topic')} covered</h2>"
             f"{adblock_section}"
+            f"{related_html}"
             f"<table><tr><th>episode</th><th>date</th><th>topics</th></tr>{rows_html}</table>{pager}"
         )
         return page(show["name"], body, user["username"])
@@ -738,6 +748,32 @@ def topics_count(genre: str = "", q: str = "") -> tuple[str, tuple]:
     unlike topics_query, which joins to compute per-topic episode/show counts."""
     where, params = _topics_filter(genre, q)
     return f"SELECT COUNT(*) FROM topics t{where}", tuple(params)
+
+
+def related_shows(conn: sqlite3.Connection, show_id: int, limit: int = 5) -> list[sqlite3.Row]:
+    """Other shows ranked by how many topics they share with this one.
+
+    M2's discovery milestone called for embedding similarity; this is a
+    co-occurrence stand-in using data already on hand (topics + genres from
+    M1 extraction) instead of standing up an embedding model/API key just
+    for this. Good enough to be useful now; revisit if it's ever limiting.
+    """
+    return conn.execute(
+        """
+        SELECT s2.id, COALESCE(s2.title, s2.query) AS name,
+               COUNT(DISTINCT et1.topic_id) AS shared
+        FROM episode_topics et1
+        JOIN episodes e1 ON e1.id = et1.episode_id
+        JOIN episode_topics et2 ON et2.topic_id = et1.topic_id
+        JOIN episodes e2 ON e2.id = et2.episode_id AND e2.show_id != e1.show_id
+        JOIN shows s2 ON s2.id = e2.show_id
+        WHERE e1.show_id = ?
+        GROUP BY s2.id
+        ORDER BY shared DESC, name
+        LIMIT ?
+        """,
+        (show_id, limit),
+    ).fetchall()
 
 
 PAGE_SIZE = 50

@@ -212,6 +212,83 @@ def test_show_page_distinguishes_unindexed_from_topicless_episodes(tmp_path):
         srv.shutdown()
 
 
+def test_related_shows_ranks_by_shared_topic_count(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('a', 'Show A', 'http://a')")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('b', 'Show B', 'http://b')")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('c', 'Show C', 'http://c')")
+    conn.executemany(
+        "INSERT INTO topics (label) VALUES (?)", [("T1",), ("T2",), ("T3",)]
+    )
+    # Show A episode covering T1, T2, T3
+    conn.execute("INSERT INTO episodes (show_id, guid, title) VALUES (1, 'ga', 'Ep A')")
+    conn.executemany(
+        "INSERT INTO episode_topics (episode_id, topic_id, source) VALUES (1, ?, 't')",
+        [(1,), (2,), (3,)],
+    )
+    # Show B covers T1, T2 (2 shared with A) -> should rank above Show C
+    conn.execute("INSERT INTO episodes (show_id, guid, title) VALUES (2, 'gb', 'Ep B')")
+    conn.executemany(
+        "INSERT INTO episode_topics (episode_id, topic_id, source) VALUES (2, ?, 't')",
+        [(1,), (2,)],
+    )
+    # Show C covers only T1 (1 shared with A)
+    conn.execute("INSERT INTO episodes (show_id, guid, title) VALUES (3, 'gc', 'Ep C')")
+    conn.execute("INSERT INTO episode_topics (episode_id, topic_id, source) VALUES (3, 1, 't')")
+    conn.commit()
+
+    related = web.related_shows(conn, show_id=1)
+    assert [(r["name"], r["shared"]) for r in related] == [("Show B", 2), ("Show C", 1)]
+    conn.close()
+
+
+def test_show_page_shows_related_shows_section(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('a', 'Show A', 'http://a')")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('b', 'Show B', 'http://b')")
+    conn.execute("INSERT INTO topics (label) VALUES ('Shared Topic')")
+    conn.execute("INSERT INTO episodes (show_id, guid, title) VALUES (1, 'ga', 'Ep A')")
+    conn.execute("INSERT INTO episodes (show_id, guid, title) VALUES (2, 'gb', 'Ep B')")
+    conn.executemany(
+        "INSERT INTO episode_topics (episode_id, topic_id, source) VALUES (?, 1, 't')",
+        [(1,), (2,)],
+    )
+    conn.commit()
+    conn.close()
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
+        cookie = resp.getheader("Set-Cookie").split(";")[0]
+        resp, body = request(srv, "GET", "/show/1", cookie=cookie)
+        assert resp.status == 200
+        assert "Related shows" in body
+        assert 'href="/show/2">Show B (1 shared topic)</a>' in body
+    finally:
+        srv.shutdown()
+
+
+def test_show_with_no_overlap_omits_related_shows_section(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('a', 'Show A', 'http://a')")
+    conn.commit()
+    conn.close()
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
+        cookie = resp.getheader("Set-Cookie").split(";")[0]
+        resp, body = request(srv, "GET", "/show/1", cookie=cookie)
+        assert resp.status == 200
+        assert "Related shows" not in body
+    finally:
+        srv.shutdown()
+
+
 def test_show_page_paginates_episodes(tmp_path):
     conn = db.connect(tmp_path / "hark.db")
     conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('q', 'Big Show', 'http://x')")

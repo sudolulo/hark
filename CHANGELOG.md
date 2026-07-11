@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-11
+
+### Added
+
+- M2 discovery, first cut: each show page now lists related shows, ranked by
+  how many topics they share (`web.related_shows()`). The original M2 spec
+  called for embedding similarity; this uses the topic-coverage data already
+  produced by M1 extraction instead, so it needed no new model or API key —
+  171 topics already have 2+ show coverage across the full corpus. Revisit
+  with real embeddings later if this co-occurrence signal proves limiting.
+
 ## [0.6.2] - 2026-07-11
 
 ### Fixed
