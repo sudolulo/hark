@@ -1,24 +1,13 @@
 [project]
 name = "hark"
-version = "0.4.0"
-description = "Cross-podcast topic index, discovery service, and ad-stripping podcast proxy"
+version = "0.3.7"
+description = "Cross-podcast topic index and discovery service"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "anthropic>=0.116.0",
     "feedparser>=6.0.11",
     "httpx>=0.28",
-    "feedgen>=1.0.0",
-    "faster-whisper>=1.0",
-]
-
-# GPU runtime libs (cuBLAS/cuDNN) for faster-whisper's CUDA path. Large and
-# CUDA-specific, so kept out of the base install; `uv sync --extra gpu` on a
-# deploy target with real GPU passthrough (see CLAUDE.md).
-[project.optional-dependencies]
-gpu = [
-    "nvidia-cublas-cu12",
-    "nvidia-cudnn-cu12",
 ]
 
 [project.scripts]

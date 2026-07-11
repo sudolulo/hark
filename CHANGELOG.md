@@ -7,34 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.4.0] - 2026-07-11
-
-### Added
-
-- Ad-stripping pipeline merged in from the standalone `adscrub` repo: `hark chapters`
-  (free chapter-marker scan), `hark transcribe` (faster-whisper, GPU auto-detected),
-  `hark detect-ads` (Claude structured outputs, model points at transcript segment
-  indices rather than raw timestamps), `hark cut` (ffmpeg, overlapping ad spans from
-  any source merged before cutting). Schema: `episodes` gains
-  `chapters_url`/`chapters_scanned_at`/`transcript_path`/`llm_detected_at`/`cut_path`;
-  `shows` gains `feed_token`; new `ad_segments` table. All additive/backfilled — a
-  pre-merge database upgrades in place.
-- `hark web` now also serves `GET /feed/<show_id>/<token>` (regenerated clean RSS)
-  and `GET /audio/<episode_id>/<token>.<ext>` (locally-cut episodes) — unauthenticated
-  (no cookie login, since a podcast app can't do that) but gated by a per-show
-  random token embedded in the URL, not wide open. `--base-url`/`$HARK_BASE_URL`
-  controls what's embedded in generated links; warns if left at the unreachable
-  `localhost` default.
-- `compose.gpu.yaml`: requests the host's GPU via the `nvidia` Docker runtime,
-  builds with the optional `gpu` extra (cuBLAS/cuDNN) for faster-whisper's CUDA path.
-
-### Changed
-
-- Merged rather than kept standalone once two things became true: hark was going
-  to use Whisper anyway (M4 no longer defers it), and ad-stripping needed to cover
-  every subscription, not just the genre-curated shows the topic index tracks —
-  see docs/PLAN.md's "Ad-stripping merge" section for the full reasoning.
-
 ## [0.3.7] - 2026-07-10
 
 ### Fixed

@@ -1,21 +1,11 @@
-"""Web frontend: the cross-show topic index behind a login wall, plus the
-ad-stripped podcast feed/audio routes (unauthenticated, token-gated).
+"""Web frontend: the cross-show topic index behind a login wall.
 
-Security model follows the influence-registry spec: the dashboard is gated
+Security model follows the influence-registry spec: the whole site is gated
 by server-side sessions carried in an HttpOnly cookie; only /login, /logout
 and /healthz are reachable unauthenticated; fail-closed — with no admin
 password and no HARK_ADMIN_TOKEN the site cannot be entered at all.
 Passwords are stretched (iterated salted SHA-256) and compared in constant
 time; changing the password revokes every session.
-
-/feed/<show_id>/<token> and /audio/<episode_id>/<token>.<ext> are also
-unauthenticated, but for a different reason: a podcast app can't do the
-dashboard's cookie login. They're gated instead by a per-show random token
-(shows.feed_token, compared with secrets.compare_digest) embedded in the URL
-— same idea as the tokened private-feed URLs most self-hosted podcast tools
-use, not a second login system. Ported from the standalone adscrub repo (see
-docs/PLAN.md) — merged in because the ad-stripping pipeline now covers every
-subscription, not just the genre-curated shows the topic index cares about.
 
 Auth state lives in its own SQLite file (auth.db), NOT in hark.db — data
 snapshots pushed from the pipeline replace hark.db wholesale and must never
@@ -41,7 +31,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import __version__, podcast_feed
+from . import __version__
 from .extract import GENRES as GENRES_FILTER
 
 PW_ITERS = 120_000
@@ -251,14 +241,10 @@ def page(title: str, body: str, user: str | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 class App:
-    def __init__(
-        self, db_path: str | Path, auth: Auth, cookie_secure: bool = False,
-        base_url: str = "http://localhost:8710",
-    ):
+    def __init__(self, db_path: str | Path, auth: Auth, cookie_secure: bool = False):
         self.db_path = str(db_path)
         self.auth = auth
         self.cookie_secure = cookie_secure
-        self.base_url = base_url.rstrip("/")
 
     def db(self) -> sqlite3.Connection:
         conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
@@ -734,10 +720,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def respond(self, status: int, body: str, content_type="text/html; charset=utf-8",
                 extra_headers: dict | None = None):
-        self.respond_bytes(status, body.encode(), content_type, extra_headers)
-
-    def respond_bytes(self, status: int, data: bytes, content_type: str,
-                       extra_headers: dict | None = None):
+        data = body.encode()
         self.send_response(status)
         self._security_headers()
         self.send_header("Content-Type", content_type)
@@ -786,66 +769,6 @@ class Handler(BaseHTTPRequestHandler):
             user["username"],
         ))
 
-    # -- ad-stripped podcast feed/audio (unauthenticated, token-gated) --------
-
-    def _plain_404(self) -> None:
-        self.respond_bytes(404, b"not found", "text/plain; charset=utf-8")
-
-    def _serve_feed(self, route: str) -> None:
-        # route == "/feed/<show_id>/<token>"
-        parts = route.split("/")
-        if len(parts) != 4:
-            return self._plain_404()
-        try:
-            show_id = int(parts[2])
-        except ValueError:
-            return self._plain_404()
-        token = parts[3]
-        conn = self.app.db()
-        try:
-            show = conn.execute("SELECT * FROM shows WHERE id = ?", (show_id,)).fetchone()
-            if show is None or not show["feed_token"] or not secrets.compare_digest(
-                show["feed_token"], token
-            ):
-                return self._plain_404()
-            body = podcast_feed.build_feed(conn, show, self.app.base_url)
-        finally:
-            conn.close()
-        return self.respond_bytes(200, body, "application/rss+xml; charset=utf-8")
-
-    def _serve_audio(self, route: str) -> None:
-        # route == "/audio/<episode_id>/<token>.<ext>"
-        parts = route.split("/", 3)
-        if len(parts) != 4:
-            return self._plain_404()
-        try:
-            episode_id = int(parts[2])
-        except ValueError:
-            return self._plain_404()
-        token = parts[3].split(".", 1)[0]
-        conn = self.app.db()
-        try:
-            row = conn.execute(
-                """
-                SELECT e.cut_path, s.feed_token FROM episodes e
-                JOIN shows s ON s.id = e.show_id
-                WHERE e.id = ?
-                """,
-                (episode_id,),
-            ).fetchone()
-        finally:
-            conn.close()
-        if row is None or not row["feed_token"] or not secrets.compare_digest(
-            row["feed_token"], token
-        ):
-            return self._plain_404()
-        # cut_path is set by cut.py, never user-supplied — no traversal surface
-        # to guard against here, unlike a URL-derived filename would need.
-        cut_path = Path(row["cut_path"]) if row["cut_path"] else None
-        if cut_path is None or not cut_path.is_file():
-            return self._plain_404()
-        return self.respond_bytes(200, cut_path.read_bytes(), "audio/mpeg")
-
     # -- routing -------------------------------------------------------------
 
     def do_GET(self):
@@ -860,10 +783,6 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(200, STYLE, "text/css; charset=utf-8")
         if route == "/login":
             return self.respond(200, page("login", LOGIN_PAGE.format(err="")))
-        if route.startswith("/feed/"):
-            return self._serve_feed(route)
-        if route.startswith("/audio/"):
-            return self._serve_audio(route)
 
         user = app.auth.session_user(self.cookie_token())
         if user is None:
@@ -938,10 +857,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def make_server(db_path: str | Path, auth_path: str | Path, bind: str = "0.0.0.0:8710",
-                admin_token: str | None = None, cookie_secure: bool = False,
-                base_url: str = "http://localhost:8710") -> ThreadingHTTPServer:
+                admin_token: str | None = None, cookie_secure: bool = False) -> ThreadingHTTPServer:
     auth = Auth(auth_path, admin_token=admin_token)
-    app = App(db_path, auth, cookie_secure=cookie_secure, base_url=base_url)
+    app = App(db_path, auth, cookie_secure=cookie_secure)
     host, _, port = bind.rpartition(":")
     try:
         port_num = int(port)
@@ -952,13 +870,8 @@ def make_server(db_path: str | Path, auth_path: str | Path, bind: str = "0.0.0.0
 
 
 def serve(db_path: str | Path, auth_path: str | Path, bind: str, admin_token: str | None,
-          cookie_secure: bool, base_url: str = "http://localhost:8710") -> None:
-    if "localhost" in base_url or "127.0.0.1" in base_url:
-        print(f"warning: --base-url is {base_url!r} — a podcast player running "
-              f"anywhere but this exact machine won't be able to reach the "
-              f"feed/audio links this serves. Set --base-url/$HARK_BASE_URL to "
-              f"this host's actual reachable address.")
-    server = make_server(db_path, auth_path, bind, admin_token, cookie_secure, base_url)
+          cookie_secure: bool) -> None:
+    server = make_server(db_path, auth_path, bind, admin_token, cookie_secure)
     print(f"hark web on http://{bind} (db={db_path}, auth={auth_path})")
     if not admin_token:
         print("note: no HARK_ADMIN_TOKEN set — login is impossible until a "

@@ -16,8 +16,7 @@ import httpx
 from .db import utcnow
 
 # Fields compared to decide whether an existing episode row needs an update.
-_EPISODE_FIELDS = ("title", "description", "pubdate", "duration_seconds", "audio_url",
-                   "chapters_url")
+_EPISODE_FIELDS = ("title", "description", "pubdate", "duration_seconds", "audio_url")
 
 
 @dataclass
@@ -28,7 +27,6 @@ class ParsedEpisode:
     pubdate: str | None
     duration_seconds: int | None
     audio_url: str | None
-    chapters_url: str | None
 
 
 @dataclass
@@ -83,20 +81,6 @@ def _pubdate(entry) -> str | None:
     return None
 
 
-def _chapters_url(entry) -> str | None:
-    """Podcasting 2.0 <podcast:chapters url="..."/> if the feed declares it.
-
-    feedparser exposes elements from namespaces it doesn't recognize under a
-    key built from the document's own prefix — feeds using the conventional
-    "podcast" prefix land in entry["podcast_chapters"]["url"] (confirmed
-    against feedparser 6.x). Ported from the standalone adscrub repo.
-    """
-    chapters = entry.get("podcast_chapters")
-    if isinstance(chapters, dict):
-        return chapters.get("url") or chapters.get("href")
-    return None
-
-
 def parse_feed(content: bytes | str) -> ParsedFeed:
     parsed = feedparser.parse(content)
     episodes = []
@@ -113,7 +97,6 @@ def parse_feed(content: bytes | str) -> ParsedFeed:
                 pubdate=_pubdate(entry),
                 duration_seconds=parse_duration(entry.get("itunes_duration")),
                 audio_url=audio_url,
-                chapters_url=_chapters_url(entry),
             )
         )
     feed = parsed.feed
@@ -144,12 +127,11 @@ def upsert_episodes(
             conn.execute(
                 """
                 INSERT INTO episodes
-                    (show_id, guid, title, description, pubdate, duration_seconds,
-                     audio_url, chapters_url)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (show_id, guid, title, description, pubdate, duration_seconds, audio_url)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (show_id, ep.guid, ep.title, ep.description, ep.pubdate,
-                 ep.duration_seconds, ep.audio_url, ep.chapters_url),
+                 ep.duration_seconds, ep.audio_url),
             )
             inserted += 1
         elif any(row[field] != getattr(ep, field) for field in _EPISODE_FIELDS):
@@ -157,11 +139,11 @@ def upsert_episodes(
                 """
                 UPDATE episodes
                 SET title = ?, description = ?, pubdate = ?, duration_seconds = ?,
-                    audio_url = ?, chapters_url = ?, updated_at = ?
+                    audio_url = ?, updated_at = ?
                 WHERE id = ?
                 """,
                 (ep.title, ep.description, ep.pubdate, ep.duration_seconds,
-                 ep.audio_url, ep.chapters_url, utcnow(), row["id"]),
+                 ep.audio_url, utcnow(), row["id"]),
             )
             updated += 1
     return inserted, updated
