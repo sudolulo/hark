@@ -158,6 +158,15 @@ the adscrub port, wired in fully once that merge landed.
   Revisit with real embeddings if co-occurrence ever proves too coarse (e.g. it can't
   distinguish "both cover serial killers" from "both cover the *same* serial killer" the
   way claims comparison's per-topic transcript reading can).
+- **Related topics (done, first cut, 0.8.0):** same idiom one level down — each topic
+  page lists other topics that co-occur in the same episodes (`web.related_topics()`),
+  ranked by shared episode count. Caught a real data bug in the process: topic 236's
+  label was "Fred Wes" — not a hark extraction error, but a typo in Wikidata's own
+  entity label for the correct QID, mirrored faithfully into hark's own `topics.label`.
+  Corrected locally; the case for this pattern (a name showing up truncated/misspelled
+  purely because the *upstream* Wikidata label is wrong) is worth remembering if it
+  recurs — check the actual Wikidata entity before assuming hark's extraction is at
+  fault.
 - Notable back-catalog episodes: not started. Deliberately left separate from M4's planned
   interestingness scoring — a "notable" surfacing here would just be cross-show coverage
   count again, which is already visible via the topic index; a real distinct signal

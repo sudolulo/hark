@@ -212,6 +212,81 @@ def test_show_page_distinguishes_unindexed_from_topicless_episodes(tmp_path):
         srv.shutdown()
 
 
+def test_related_topics_ranks_by_co_occurring_episode_count(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('a', 'Show A', 'http://a')")
+    conn.executemany(
+        "INSERT INTO topics (label) VALUES (?)", [("Fred West",), ("Rosemary West",), ("Nilsen",)]
+    )
+    # Two episodes mention both Fred West and Rosemary West
+    conn.execute("INSERT INTO episodes (show_id, guid, title) VALUES (1, 'g1', 'Ep 1')")
+    conn.execute("INSERT INTO episodes (show_id, guid, title) VALUES (1, 'g2', 'Ep 2')")
+    conn.executemany(
+        "INSERT INTO episode_topics (episode_id, topic_id, source) VALUES (?, ?, 't')",
+        [(1, 1), (1, 2), (2, 1), (2, 2)],
+    )
+    # One episode mentions Fred West and Nilsen
+    conn.execute("INSERT INTO episodes (show_id, guid, title) VALUES (1, 'g3', 'Ep 3')")
+    conn.executemany(
+        "INSERT INTO episode_topics (episode_id, topic_id, source) VALUES (?, ?, 't')",
+        [(3, 1), (3, 3)],
+    )
+    conn.commit()
+
+    related = web.related_topics(conn, topic_id=1)
+    assert [(r["label"], r["episodes"]) for r in related] == [("Rosemary West", 2), ("Nilsen", 1)]
+    conn.close()
+
+
+def test_topic_page_shows_related_topics_section(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('a', 'Show A', 'http://a')")
+    conn.execute("INSERT INTO topics (label) VALUES ('Fred West')")
+    conn.execute("INSERT INTO topics (label) VALUES ('Rosemary West')")
+    conn.execute("INSERT INTO episodes (show_id, guid, title) VALUES (1, 'g1', 'Ep 1')")
+    conn.executemany(
+        "INSERT INTO episode_topics (episode_id, topic_id, source) VALUES (1, ?, 't')",
+        [(1,), (2,)],
+    )
+    conn.commit()
+    conn.close()
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
+        cookie = resp.getheader("Set-Cookie").split(";")[0]
+        resp, body = request(srv, "GET", "/topic/1", cookie=cookie)
+        assert resp.status == 200
+        assert "Related topics" in body
+        assert 'href="/topic/2">Rosemary West (1 episode)</a>' in body
+    finally:
+        srv.shutdown()
+
+
+def test_topic_with_no_co_occurrence_omits_related_topics_section(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('a', 'Show A', 'http://a')")
+    conn.execute("INSERT INTO topics (label) VALUES ('Solo Topic')")
+    conn.execute("INSERT INTO episodes (show_id, guid, title) VALUES (1, 'g1', 'Ep 1')")
+    conn.execute("INSERT INTO episode_topics (episode_id, topic_id, source) VALUES (1, 1, 't')")
+    conn.commit()
+    conn.close()
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
+        cookie = resp.getheader("Set-Cookie").split(";")[0]
+        resp, body = request(srv, "GET", "/topic/1", cookie=cookie)
+        assert resp.status == 200
+        assert "Related topics" not in body
+    finally:
+        srv.shutdown()
+
+
 def test_related_shows_ranks_by_shared_topic_count(tmp_path):
     conn = db.connect(tmp_path / "hark.db")
     conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('a', 'Show A', 'http://a')")

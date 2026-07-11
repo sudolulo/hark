@@ -424,6 +424,7 @@ class App:
                 """,
                 (topic_id,),
             ).fetchall()
+            related = related_topics(conn, topic_id)
         finally:
             conn.close()
         qid = ""
@@ -439,10 +440,19 @@ class App:
             f"<td class='num dim'>{conf(r['confidence'])}</td></tr>"
             for r in episodes
         )
+        related_html = ""
+        if related:
+            related_pills = " ".join(
+                f'<a class="pill" href="/topic/{r["id"]}">{esc(r["label"])} '
+                f'({plural(r["episodes"], "episode")})</a>'
+                for r in related
+            )
+            related_html = f"<h2>Related topics</h2><p>{related_pills}</p>"
         body = (
             f"<h1>{esc(topic['label'])}{qid}</h1><p>{pills}</p>"
             f"<h2>covered by {plural(len(shows), 'show')}, {plural(len(episodes), 'episode')}</h2>"
             f"<p>{show_pills}</p>"
+            f"{related_html}"
             f'<table><tr><th>show</th><th>episode</th><th>date</th>'
             f'<th title="extractor\'s confidence this episode is really about this topic">conf</th></tr>'
             f"{rows_html}</table>"
@@ -748,6 +758,27 @@ def topics_count(genre: str = "", q: str = "") -> tuple[str, tuple]:
     unlike topics_query, which joins to compute per-topic episode/show counts."""
     where, params = _topics_filter(genre, q)
     return f"SELECT COUNT(*) FROM topics t{where}", tuple(params)
+
+
+def related_topics(conn: sqlite3.Connection, topic_id: int, limit: int = 8) -> list[sqlite3.Row]:
+    """Other topics ranked by how many episodes mention both — e.g. Fred West
+    and Rosemary West co-occur across the same 3-part case file. Same
+    co-occurrence idiom as related_shows, one level down (topic-to-topic
+    instead of show-to-show)."""
+    return conn.execute(
+        """
+        SELECT t2.id, t2.label, COUNT(DISTINCT et1.episode_id) AS episodes
+        FROM episode_topics et1
+        JOIN episode_topics et2
+            ON et2.episode_id = et1.episode_id AND et2.topic_id != et1.topic_id
+        JOIN topics t2 ON t2.id = et2.topic_id
+        WHERE et1.topic_id = ?
+        GROUP BY t2.id
+        ORDER BY episodes DESC, t2.label
+        LIMIT ?
+        """,
+        (topic_id, limit),
+    ).fetchall()
 
 
 def related_shows(conn: sqlite3.Connection, show_id: int, limit: int = 5) -> list[sqlite3.Row]:

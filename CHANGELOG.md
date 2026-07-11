@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-11
+
+### Added
+
+- Related topics on each topic page (`web.related_topics()`), ranked by how
+  many episodes mention both — e.g. Fred West's page now surfaces Rosemary
+  West (their cases are inseparable). Same topic-co-occurrence idiom as
+  0.7.0's related shows, one level down.
+
+### Fixed
+
+- Topic 236's label was "Fred Wes" (missing the final "t") — not hark's own
+  extraction this time, but a faithfully-mirrored typo in Wikidata's own
+  entity label for Q577052 (confirmed: correct person, right dates, just a
+  bad label upstream). Corrected the local label to "Fred West"; the QID
+  itself was already right.
+
 ## [0.7.0] - 2026-07-11
 
 ### Added
