@@ -30,11 +30,17 @@ def _parse_pubdate(value: str | None) -> datetime | None:
     return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
 
+def feed_url(show: sqlite3.Row, base_url: str) -> str:
+    """The token-gated URL a podcast player subscribes to instead of the
+    original feed — shared with web.py's show page, which displays this
+    same URL for the operator to copy into AntennaPod."""
+    return f"{base_url}/feed/{show['id']}/{show['feed_token']}"
+
+
 def build_feed(conn: sqlite3.Connection, show: sqlite3.Row, base_url: str) -> bytes:
     fg = FeedGenerator()
     fg.title(show["title"] or show["query"])
-    fg.link(href=show["feed_url"] or f"{base_url}/feed/{show['id']}/{show['feed_token']}",
-            rel="self")
+    fg.link(href=show["feed_url"] or feed_url(show, base_url), rel="self")
     fg.description(show["description"] or show["title"] or show["query"])
     if show["image_url"]:
         fg.image(show["image_url"])

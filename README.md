@@ -21,7 +21,7 @@ transcription step), hark can also compare what each show actually claimed —
 shared facts vs. claims unique to one show's telling — shown on every
 episode's own page.
 
-See `docs/PLAN.md` for milestones. Current state (0.8.0): feed resolution,
+See `docs/PLAN.md` for milestones. Current state (0.9.0): feed resolution,
 episode ingest, LLM topic extraction with Wikidata canonicalization, the
 cross-show topic index, a full web UI, adscrub-backed ad-stripping (with a
 per-show on/off toggle and feed URL, both from the show page), cross-show
@@ -44,6 +44,7 @@ uv run hark who "dyatlov"      # who covered X (label substring or Wikidata QID)
 # ad-stripping pipeline (backed by the adscrub library) — every show, not just feeds.txt's
 uv run hark chapters           # scan chapter markers for ad spans (free — no transcription)
 uv run hark transcribe         # Whisper the rest
+uv run hark transcribe --cross-show-only  # priority subset: episodes on topics 2+ shows cover
 uv run hark detect-ads         # LLM ad-span classification (needs $ANTHROPIC_API_KEY)
 uv run hark cut                # ffmpeg out the ad spans
 

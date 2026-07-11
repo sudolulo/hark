@@ -156,7 +156,7 @@ def pending_topics(conn: sqlite3.Connection, limit: int | None = None) -> list[d
     rows = conn.execute(
         """
         SELECT et.topic_id, e.id AS episode_id, e.transcript_path,
-               COALESCE(s.title, s.query) AS show
+               s.id AS show_id, COALESCE(s.title, s.query) AS show
         FROM episode_topics et
         JOIN episodes e ON e.id = et.episode_id
         JOIN shows s ON s.id = e.show_id
@@ -175,7 +175,9 @@ def pending_topics(conn: sqlite3.Connection, limit: int | None = None) -> list[d
 
     pending = []
     for topic_id, episodes in by_topic.items():
-        if len({e["show"] for e in episodes}) < 2:
+        # Distinct shows, not distinct display names — two shows can share a
+        # title (only shows.query is UNIQUE), and this must not conflate them.
+        if len({e["show_id"] for e in episodes}) < 2:
             continue
         episode_ids = sorted(e["episode_id"] for e in episodes)
         if existing.get(topic_id) == episode_ids:
@@ -186,12 +188,72 @@ def pending_topics(conn: sqlite3.Connection, limit: int | None = None) -> list[d
     return pending
 
 
+def episodes_needing_transcription(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Episodes covering a cross-show topic (2+ distinct shows) that still
+    need a transcript — the priority subset for claims comparison, distinct
+    from adscrub's own transcribe.pending_episodes(), which covers every
+    episode with audio regardless of topic (needed for its own broader
+    ad-stripping purpose). Used by `hark transcribe --cross-show-only`."""
+    return conn.execute(
+        """
+        SELECT DISTINCT e.*
+        FROM episode_topics et
+        JOIN episodes e ON e.id = et.episode_id
+        WHERE et.topic_id IN (
+            SELECT et2.topic_id
+            FROM episode_topics et2
+            JOIN episodes e2 ON e2.id = et2.episode_id
+            GROUP BY et2.topic_id
+            HAVING COUNT(DISTINCT e2.show_id) > 1
+        )
+        AND e.audio_url IS NOT NULL
+        AND e.transcript_path IS NULL
+        ORDER BY e.id
+        """
+    ).fetchall()
+
+
 @dataclass
 class CompareResult:
+    """Outcome of comparing (or loading a precomputed comparison for) one
+    topic — shared by both compare_pending() and load_comparisons(), which
+    otherwise had two field-for-field identical dataclasses."""
     topic_id: int
     label: str = ""
     shared_count: int = 0
     error: str | None = None
+
+
+def _store_comparison(
+    conn: sqlite3.Connection, topic_id: int, episode_ids: list[int],
+    shared: list[str], unique_by_show: dict[str, list[str]], model: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO topic_comparisons
+            (topic_id, episode_ids, shared, unique_by_show, model)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (topic_id) DO UPDATE SET
+            episode_ids = excluded.episode_ids, shared = excluded.shared,
+            unique_by_show = excluded.unique_by_show, model = excluded.model,
+            generated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+        """,
+        (topic_id, json.dumps(episode_ids), json.dumps(shared), json.dumps(unique_by_show), model),
+    )
+    conn.commit()
+
+
+def _group_transcripts_by_show(episodes: list[sqlite3.Row]) -> dict[str, str]:
+    """Combine transcripts by show_id, not display name — a topic can have
+    2+ episodes from the same show (e.g. a multi-part case), and two shows
+    can share a display name (only shows.query is UNIQUE, not shows.title).
+    Concatenates same-show transcripts rather than dropping all but one."""
+    by_show_id: dict[int, list[str]] = {}
+    show_names: dict[int, str] = {}
+    for e in episodes:
+        by_show_id.setdefault(e["show_id"], []).append(transcript_text(e["transcript_path"]))
+        show_names[e["show_id"]] = e["show"]
+    return {show_names[sid]: "\n\n".join(texts) for sid, texts in by_show_id.items()}
 
 
 def compare_pending(
@@ -212,30 +274,13 @@ def compare_pending(
         ).fetchone()["label"]
         result = CompareResult(topic_id=topic_id, label=label)
         try:
-            episodes = {
-                e["show"]: transcript_text(e["transcript_path"]) for e in item["episodes"]
-            }
+            episodes = _group_transcripts_by_show(item["episodes"])
             comparison = comparator.compare(episodes)
             episode_ids = sorted(e["episode_id"] for e in item["episodes"])
-            conn.execute(
-                """
-                INSERT INTO topic_comparisons
-                    (topic_id, episode_ids, shared, unique_by_show, model)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT (topic_id) DO UPDATE SET
-                    episode_ids = excluded.episode_ids, shared = excluded.shared,
-                    unique_by_show = excluded.unique_by_show, model = excluded.model,
-                    generated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-                """,
-                (
-                    topic_id,
-                    json.dumps(episode_ids),
-                    json.dumps(comparison.shared),
-                    json.dumps(comparison.unique_by_show),
-                    getattr(comparator, "model", "unknown"),
-                ),
+            _store_comparison(
+                conn, topic_id, episode_ids, comparison.shared, comparison.unique_by_show,
+                getattr(comparator, "model", "unknown"),
             )
-            conn.commit()
             result.shared_count = len(comparison.shared)
             consecutive_errors = 0
         except Exception as exc:  # noqa: BLE001 — per-topic isolation, abort on streaks
@@ -250,68 +295,55 @@ def compare_pending(
     return results
 
 
-@dataclass
-class LoadResult:
-    topic_id: int
-    label: str = ""
-    shared_count: int = 0
-    error: str | None = None
-
-
 def load_comparisons(
     conn: sqlite3.Connection,
     records: list[dict],
     model: str = "session",
-    on_result: Callable[[LoadResult], None] | None = None,
-) -> list[LoadResult]:
+    on_result: Callable[[CompareResult], None] | None = None,
+) -> list[CompareResult]:
     """Load pre-computed comparisons — same idiom as pipeline.load_extractions
     for topic extraction: this Claude session acts as the comparator directly
     (no ANTHROPIC_API_KEY needed) and its output is loaded here instead of
     going through ClaudeComparator. Each record:
     {"topic_id": int, "shared": [str], "unique_by_show": {show: [str]}}.
+
+    Per-record isolation, matching load_extractions: a malformed record is
+    reported as a failed CompareResult and the batch continues, rather than
+    raising and aborting every record after it.
     """
     ensure_schema(conn)
-    results: list[LoadResult] = []
+    results: list[CompareResult] = []
     for rec in records:
-        topic_id = rec["topic_id"]
-        topic = conn.execute("SELECT label FROM topics WHERE id = ?", (topic_id,)).fetchone()
-        result = LoadResult(topic_id=topic_id, label=topic["label"] if topic else "")
+        topic_id = rec.get("topic_id")
+        topic = conn.execute(
+            "SELECT label FROM topics WHERE id = ?", (topic_id,)
+        ).fetchone() if topic_id is not None else None
+        result = CompareResult(topic_id=topic_id if topic_id is not None else -1,
+                               label=topic["label"] if topic else "")
         if topic is None:
-            result.error = "no such topic"
+            result.error = f"no such topic {topic_id!r}"
             results.append(result)
             if on_result:
                 on_result(result)
             continue
-        episode_ids = sorted(
-            r["id"] for r in conn.execute(
-                """
-                SELECT DISTINCT e.id FROM episode_topics et
-                JOIN episodes e ON e.id = et.episode_id
-                WHERE et.topic_id = ? AND e.transcript_path IS NOT NULL
-                """,
-                (topic_id,),
+        try:
+            episode_ids = sorted(
+                r["id"] for r in conn.execute(
+                    """
+                    SELECT DISTINCT e.id FROM episode_topics et
+                    JOIN episodes e ON e.id = et.episode_id
+                    WHERE et.topic_id = ? AND e.transcript_path IS NOT NULL
+                    """,
+                    (topic_id,),
+                )
             )
-        )
-        conn.execute(
-            """
-            INSERT INTO topic_comparisons
-                (topic_id, episode_ids, shared, unique_by_show, model)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT (topic_id) DO UPDATE SET
-                episode_ids = excluded.episode_ids, shared = excluded.shared,
-                unique_by_show = excluded.unique_by_show, model = excluded.model,
-                generated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-            """,
-            (
-                topic_id,
-                json.dumps(episode_ids),
-                json.dumps(rec["shared"]),
-                json.dumps(rec["unique_by_show"]),
-                model,
-            ),
-        )
-        conn.commit()
-        result.shared_count = len(rec["shared"])
+            shared = rec["shared"]
+            unique_by_show = rec["unique_by_show"]
+            _store_comparison(conn, topic_id, episode_ids, shared, unique_by_show, model)
+            result.shared_count = len(shared)
+        except Exception as exc:  # noqa: BLE001 — per-record isolation, keep the batch going
+            conn.rollback()
+            result.error = str(exc)
         results.append(result)
         if on_result:
             on_result(result)

@@ -245,8 +245,10 @@ def esc(value) -> str:
     return html.escape(str(value if value is not None else ""))
 
 
-def plural(n: int, word: str) -> str:
-    return f"{n} {word}" if n == 1 else f"{n} {word}s"
+def plural(n: int, word: str, plural_word: str | None = None) -> str:
+    """`plural_word` overrides the naive `word + "s"` for irregular nouns
+    (e.g. plural(n, "match", "matches"))."""
+    return f"{n} {word}" if n == 1 else f"{n} {plural_word or word + 's'}"
 
 
 def page(title: str, body: str, user: str | None = None) -> str:
@@ -285,19 +287,22 @@ class App:
         to match — same caveat as any other hark.db value set outside the
         pipeline host.
         """
+        # A single atomic UPDATE (flip computed in SQL, not read-then-write in
+        # Python) so two concurrent toggles can't both read the same starting
+        # state and collapse into one net change instead of canceling out.
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
-            row = conn.execute(
-                "SELECT ad_stripping_enabled FROM shows WHERE id = ?", (show_id,)
-            ).fetchone()
-            if row is None:
-                return None
-            new_state = 0 if row["ad_stripping_enabled"] else 1
-            conn.execute(
-                "UPDATE shows SET ad_stripping_enabled = ? WHERE id = ?", (new_state, show_id)
+            cur = conn.execute(
+                "UPDATE shows SET ad_stripping_enabled = 1 - ad_stripping_enabled WHERE id = ?",
+                (show_id,),
             )
+            if cur.rowcount == 0:
+                return None
             conn.commit()
+            new_state = conn.execute(
+                "SELECT ad_stripping_enabled FROM shows WHERE id = ?", (show_id,)
+            ).fetchone()["ad_stripping_enabled"]
             return bool(new_state)
         finally:
             conn.close()
@@ -511,8 +516,7 @@ class App:
                 eps_table = f'<p class="dim">No episode titles match “{q}”.</p>'
             note = (f'<p class="dim">showing the 50 most recent of {episode_total} — '
                     f"narrow your search to see the rest.</p>") if episode_total > 50 else ""
-            match_word = "match" if episode_total == 1 else "matches"
-            body += f"<h2>{episode_total} episode title {match_word}</h2>{eps_table}{note}"
+            body += f"<h2>{plural(episode_total, 'episode title match', 'episode title matches')}</h2>{eps_table}{note}"
         return page("search", body, user["username"])
 
     def view_shows(self, user) -> str:
@@ -597,7 +601,7 @@ class App:
             for r in episodes
         )
         pager = pagination_html(f"/show/{show_id}", {}, page_num, total_episodes, "episodes")
-        feed_url = f"{self.base_url}/feed/{show['id']}/{show['feed_token']}"
+        feed_url = podcast_feed.feed_url(show, self.base_url)
         enabled = bool(show["ad_stripping_enabled"])
         toggle_label = "Disable ad-stripping" if enabled else "Enable ad-stripping"
         adblock_section = (
@@ -644,7 +648,7 @@ class App:
                 return None
             topics = conn.execute(
                 """
-                SELECT t.id, t.label, et.confidence
+                SELECT t.id AS topic_id, t.label, et.confidence
                 FROM episode_topics et JOIN topics t ON t.id = et.topic_id
                 WHERE et.episode_id = ? ORDER BY t.label
                 """,
@@ -652,22 +656,24 @@ class App:
             ).fetchall()
             topic_sections = []
             for t in topics:
-                comparison = claims.get_comparison(conn, t["id"])
+                comparison = claims.get_comparison(conn, t["topic_id"])
                 shows_transcribed = conn.execute(
                     """
                     SELECT COUNT(DISTINCT e2.show_id) FROM episode_topics et2
                     JOIN episodes e2 ON e2.id = et2.episode_id
                     WHERE et2.topic_id = ? AND e2.transcript_path IS NOT NULL
                     """,
-                    (t["id"],),
+                    (t["topic_id"],),
                 ).fetchone()[0]
                 topic_sections.append((t, comparison, shows_transcribed))
         finally:
             conn.close()
 
-        pills = " ".join(
-            f'<a class="pill" href="/topic/{t["id"]}">{esc(t["label"])}</a>' for t, _, _ in topic_sections
-        )
+        # True: this page has its own richer empty-state messaging below
+        # (distinguishing "not yet indexed" from "no subject identified"),
+        # so topic_pills' own extracted_at-aware empty message is unwanted
+        # here — force it to just return "" when there are no topics.
+        pills = topic_pills(topics, True)
         url = episode["audio_url"] or ""
         play = ""
         if urllib.parse.urlsplit(url).scheme in ("http", "https"):
