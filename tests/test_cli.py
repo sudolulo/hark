@@ -173,6 +173,40 @@ def test_transcribe_dry_run_reports_pending(tmp_path, capsys):
     assert "pending episodes: 1" in capsys.readouterr().out
 
 
+def test_transcribe_cross_show_only_scopes_to_cross_show_topics(tmp_path, capsys):
+    path = tmp_path / "t.db"
+    conn = db.connect(path)
+    conn.execute("INSERT INTO shows (query) VALUES ('Show A')")
+    conn.execute("INSERT INTO shows (query) VALUES ('Show B')")
+    conn.execute("INSERT INTO topics (id, label) VALUES (1, 'Cross-show Topic')")
+    conn.execute("INSERT INTO topics (id, label) VALUES (2, 'Single-show Topic')")
+    # Episode 1 (Show A) and episode 2 (Show B) both cover topic 1 -> cross-show.
+    conn.execute(
+        "INSERT INTO episodes (show_id, guid, title, audio_url) VALUES (1, 'g1', 'Ep 1', 'http://a/1.mp3')"
+    )
+    conn.execute(
+        "INSERT INTO episodes (show_id, guid, title, audio_url) VALUES (2, 'g2', 'Ep 2', 'http://a/2.mp3')"
+    )
+    # Episode 3 (Show A) covers topic 2 alone -> not cross-show.
+    conn.execute(
+        "INSERT INTO episodes (show_id, guid, title, audio_url) VALUES (1, 'g3', 'Ep 3', 'http://a/3.mp3')"
+    )
+    conn.executemany(
+        "INSERT INTO episode_topics (episode_id, topic_id, source) VALUES (?, ?, 't')",
+        [(1, 1), (2, 1), (3, 2)],
+    )
+    conn.commit()
+    conn.close()
+
+    rc = cli.main(["--db", str(path), "transcribe", "--dry-run"])
+    assert rc == 0
+    assert "pending episodes: 3" in capsys.readouterr().out  # unscoped: all 3
+
+    rc = cli.main(["--db", str(path), "transcribe", "--dry-run", "--cross-show-only"])
+    assert rc == 0
+    assert "pending episodes: 2" in capsys.readouterr().out  # scoped: only episodes 1+2
+
+
 def test_transcribe_success_path_calls_adscrub_directly(tmp_path, capsys, monkeypatch):
     path = tmp_path / "t.db"
     conn = db.connect(path)
@@ -275,6 +309,36 @@ def test_detect_ads_success_path_calls_adscrub_directly(tmp_path, capsys, monkey
     out = capsys.readouterr().out
     assert "ok    Ep One: 1 ad span(s) from transcript" in out
     assert "detected across 1 episode(s) (0 failed, 0 still pending)" in out
+
+
+def test_detect_ads_aborts_after_consecutive_failures(tmp_path, capsys, monkeypatch):
+    path = tmp_path / "t.db"
+    conn = db.connect(path)
+    conn.execute("INSERT INTO shows (query) VALUES ('Show A')")
+    # 7 episodes all pointing at a transcript file that doesn't exist, so
+    # every detect_episode() call fails before the detector is ever invoked.
+    for i in range(7):
+        conn.execute(
+            "INSERT INTO episodes (show_id, guid, title, transcript_path) VALUES"
+            " (1, ?, ?, ?)",
+            (f"g{i}", f"Ep {i}", str(tmp_path / f"missing_{i}.json")),
+        )
+    conn.commit()
+    conn.close()
+
+    class FakeAnthropic:
+        def __init__(self):
+            self.messages = None
+
+    import anthropic
+    monkeypatch.setattr(anthropic, "Anthropic", FakeAnthropic)
+
+    rc = cli.main(["--db", str(path), "detect-ads"])
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert captured.out.count("FAIL") == 5  # aborted after 5 consecutive failures, not all 7
+    assert "aborting after 5 consecutive failures" in captured.err
+    assert "detected across 0 episode(s) (5 failed, 7 still pending)" in captured.out
 
 
 def test_detect_ads_skips_disabled_shows(tmp_path, capsys):

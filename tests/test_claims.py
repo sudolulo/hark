@@ -154,6 +154,68 @@ def test_compare_pending_stores_and_roundtrips(conn, tmp_path):
     assert stored.unique_by_show == {"Show A": ["a detail"]}
 
 
+def test_compare_pending_combines_multiple_episodes_from_the_same_show(conn, tmp_path):
+    # Two episodes from "Show A" (e.g. a 2-part case) plus one from "Show B" —
+    # both Show A transcripts must reach the comparator, not just one.
+    conn.execute("INSERT INTO topics (id, label) VALUES (1, 'Two-Parter')")
+    conn.execute("INSERT INTO shows (query, title) VALUES ('Show A', 'Show A')")
+    conn.execute("INSERT INTO shows (query, title) VALUES ('Show B', 'Show B')")
+    conn.commit()
+    for guid, show_id, text in [("a1", 1, "part one text"), ("a2", 1, "part two text"),
+                                 ("b1", 2, "other show text")]:
+        path = write_transcript(tmp_path, f"{guid}.json", text)
+        conn.execute(
+            "INSERT INTO episodes (show_id, guid, title, transcript_path) VALUES (?, ?, ?, ?)",
+            (show_id, guid, guid, path),
+        )
+        episode_id = conn.execute("SELECT id FROM episodes WHERE guid = ?", (guid,)).fetchone()[0]
+        conn.execute(
+            "INSERT INTO episode_topics (episode_id, topic_id, source) VALUES (?, 1, 't')",
+            (episode_id,),
+        )
+    conn.commit()
+
+    parsed = claims._ComparisonPayload(shared=[], unique_by_show={})
+    comparator = claims.ClaudeComparator(StubClient(parsed))
+    claims.compare_pending(conn, comparator)
+
+    call = comparator.client.messages.calls[0]
+    body = call["messages"][0]["content"]
+    # Both Show A transcripts must be present, not just the last one seen.
+    assert "part one text" in body
+    assert "part two text" in body
+    assert "other show text" in body
+    # episode_ids records all three — refreshing the comparison later must
+    # actually be possible, not silently skipped as "already compared".
+    stored = conn.execute("SELECT episode_ids FROM topic_comparisons WHERE topic_id = 1").fetchone()
+    assert len(json.loads(stored["episode_ids"])) == 3
+
+
+def test_pending_topics_counts_distinct_shows_not_display_names(conn, tmp_path):
+    # Two shows sharing a display name must still count as 2 distinct shows —
+    # only shows.query is UNIQUE, not shows.title.
+    conn.execute("INSERT INTO topics (id, label) VALUES (1, 'Shared Title Case')")
+    conn.execute("INSERT INTO shows (query, title) VALUES ('query-a', 'Same Name')")
+    conn.execute("INSERT INTO shows (query, title) VALUES ('query-b', 'Same Name')")
+    conn.commit()
+    for guid, show_id in [("e1", 1), ("e2", 2)]:
+        path = write_transcript(tmp_path, f"{guid}.json", "text")
+        conn.execute(
+            "INSERT INTO episodes (show_id, guid, title, transcript_path) VALUES (?, ?, ?, ?)",
+            (show_id, guid, guid, path),
+        )
+        episode_id = conn.execute("SELECT id FROM episodes WHERE guid = ?", (guid,)).fetchone()[0]
+        conn.execute(
+            "INSERT INTO episode_topics (episode_id, topic_id, source) VALUES (?, 1, 't')",
+            (episode_id,),
+        )
+    conn.commit()
+
+    pending = claims.pending_topics(conn)
+    assert len(pending) == 1
+    assert pending[0]["topic_id"] == 1
+
+
 def test_get_comparison_missing_returns_none(conn):
     claims.ensure_schema(conn)
     assert claims.get_comparison(conn, topic_id=999) is None
@@ -187,9 +249,23 @@ def test_load_comparisons_unknown_topic_errors_without_aborting(conn, tmp_path):
         {"topic_id": 999, "shared": [], "unique_by_show": {}},
         {"topic_id": 1, "shared": ["x"], "unique_by_show": {}},
     ])
-    assert results[0].error == "no such topic"
+    assert results[0].error == "no such topic 999"
     assert results[1].error is None
     assert claims.get_comparison(conn, topic_id=1).shared == ["x"]
+
+
+def test_load_comparisons_isolates_malformed_record(conn, tmp_path):
+    seed_topic(conn, tmp_path, {"Show A": "a", "Show B": "b"}, topic_id=1, label="Topic One")
+    seed_topic(conn, tmp_path, {"Show A": "a", "Show B": "b"}, topic_id=2, label="Topic Two")
+    results = claims.load_comparisons(conn, [
+        {"topic_id": 1},  # missing "shared"/"unique_by_show" — must not abort the batch
+        {"topic_id": 2, "shared": ["y"], "unique_by_show": {}},
+    ])
+    assert len(results) == 2
+    assert results[0].error is not None
+    assert results[1].error is None
+    assert claims.get_comparison(conn, topic_id=1) is None  # never stored
+    assert claims.get_comparison(conn, topic_id=2).shared == ["y"]  # unaffected
 
 
 def test_load_comparisons_custom_source(conn, tmp_path):

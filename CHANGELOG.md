@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-11
+
+Post-0.8.0 audit pass (10-angle review of everything since 0.4.0) — found and
+fixed 5 real correctness bugs plus a hot-path performance gap, all with new
+regression tests. See the audit findings below for detail; this entry covers
+what changed, not the review methodology itself.
+
+### Fixed
+
+- **`compare_pending()`/`pending_topics()` (claims.py) keyed episodes by show
+  *display name* instead of `show_id`.** A topic with 2+ episodes from the
+  same show (a multi-part case) or two shows sharing a display name (only
+  `shows.query` is UNIQUE, not `shows.title`) silently dropped one
+  transcript from the LLM comparison, while `episode_ids` still recorded
+  both — so the loss was permanent and untraceable, never retried. Fixed by
+  grouping by `show_id` and concatenating same-show transcripts
+  (`_group_transcripts_by_show()`) instead of overwriting.
+- **`load_comparisons()` had no per-record error isolation**, contradicting
+  its own docstring ("same idiom as `pipeline.load_extractions`") and its
+  sibling `compare_pending()`. A malformed JSONL record (e.g. missing
+  `"shared"`) raised uncaught and aborted the whole batch instead of being
+  reported as one failed record. Now wrapped in the same per-record
+  try/except/rollback pattern as `compare_pending`/`load_extractions`.
+- **`cmd_detect_ads` lost the consecutive-failure circuit breaker**
+  (`max_consecutive_errors=5`) that adscrub's bulk `detect_pending()` had,
+  when it was rewritten to call `detect_episode()` per-episode directly so
+  the per-show `ad_stripping_enabled` filter could apply. A revoked/invalid
+  `ANTHROPIC_API_KEY` would previously abort after 5 failures; the
+  rewritten loop just burned through the entire pending list instead.
+  Restored the same abort behavior directly in cli.py.
+- **`cmd_chapters`/`cmd_transcribe`/`cmd_detect_ads`/`cmd_cut`'s FAIL/ok
+  print lines dropped the `title or ""` null-guard** that adscrub's
+  original result construction had — a `NULL` episode title printed the
+  literal string `"None"`.
+- **`App.toggle_ad_stripping()` had an unguarded read-modify-write race** —
+  two concurrent toggle requests could both read the same starting state
+  and collapse into one net change instead of canceling out. Fixed with a
+  single atomic `UPDATE shows SET ad_stripping_enabled = 1 -
+  ad_stripping_enabled` instead of read-then-write in Python.
+- `episode_topics` had no index on `topic_id` (only the `episode_id`-leading
+  primary key), so 0.7.0/0.8.0's related-shows/related-topics features and
+  `view_topic`'s episode list all full-scanned the table on every page
+  view. Added `idx_episode_topics_topic`.
+- `web.py`'s pluralization for search's "episode title match(es)" hand-rolled
+  the exact singular/plural branch the `plural()` helper (added earlier in
+  the same diff that introduced this) exists to avoid — extended `plural()`
+  to accept an irregular plural form and used it here instead.
+
+### Changed
+
+- `CompareResult`/`LoadResult` (claims.py) were field-for-field identical
+  dataclasses; consolidated into one `CompareResult` used by both
+  `compare_pending()` and `load_comparisons()`.
+- The `INSERT ... ON CONFLICT` write to `topic_comparisons` was duplicated
+  verbatim in both `compare_pending()` and `load_comparisons()`; factored
+  into a shared `_store_comparison()`.
+- `view_episode`'s topic-pill rendering reimplemented `topic_pills()` inline;
+  now calls it directly.
+- The ad-stripped feed URL was built identically in both `web.py`'s
+  `view_show()` and `podcast_feed.build_feed()`; factored into
+  `podcast_feed.feed_url()`, used by both.
+- `hark transcribe` gained `--cross-show-only`: restricts to episodes
+  covering a topic 2+ shows have also covered — the actual priority subset
+  claims comparison needs, instead of adscrub's full-corpus default scope
+  (every episode with audio). Needed to run the transcription pipeline as a
+  proper hark feature (via `episodes_needing_transcription()`) rather than
+  an ad-hoc throwaway script.
+
 ## [0.8.0] - 2026-07-11
 
 ### Added

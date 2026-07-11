@@ -6,8 +6,12 @@ chapters/transcribe/detect-ads/cut call straight into the `adscrub` package
 than through any hark-side reimplementation: hark's episodes/ad_segments
 schema was deliberately shaped to match adscrub's own, so adscrub's
 schema-coupled functions (pending_episodes, scan_episode, transcribe_episode,
-detect_pending, cut_pending, ...) work unchanged against hark's `conn`. Only
-the CLI wiring here is hark's own code.
+...) work unchanged against hark's `conn`. detect-ads/cut are a partial
+exception: they call adscrub's per-episode detect_episode/cut_episode
+directly in a hand-rolled loop here (not the bulk detect_pending/cut_pending
+orchestrators) so hark's own per-show ad_stripping_enabled filter can apply —
+see _enabled_show_ids()/_filter_enabled() and cmd_detect_ads/cmd_cut below.
+Otherwise the CLI wiring here is hark's own code.
 """
 
 from __future__ import annotations
@@ -38,13 +42,18 @@ def make_client() -> httpx.Client:
     )
 
 
-def _enabled_episodes(conn, episodes, limit: int | None = None) -> list:
+def _enabled_show_ids(conn) -> set[int]:
+    return {r["id"] for r in conn.execute("SELECT id FROM shows WHERE ad_stripping_enabled = 1")}
+
+
+def _filter_enabled(episodes, enabled_ids: set[int], limit: int | None = None) -> list:
     """Filter a pending-episode list down to shows with ad_stripping_enabled,
     then apply `limit` — done here rather than at the SQL level inside
     adscrub's own pending_episodes() so hark's per-show toggle doesn't need
-    any adscrub code change beyond exposing per-episode functions."""
-    enabled = {r["id"] for r in conn.execute("SELECT id FROM shows WHERE ad_stripping_enabled = 1")}
-    filtered = [e for e in episodes if e["show_id"] in enabled]
+    any adscrub code change beyond exposing per-episode functions. Callers
+    compute `enabled_ids` once per command (via _enabled_show_ids) rather
+    than re-querying it on every one of a command's 2-3 call sites."""
+    filtered = [e for e in episodes if e["show_id"] in enabled_ids]
     return filtered[:limit] if limit else filtered
 
 
@@ -105,7 +114,8 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 
 def cmd_chapters(args: argparse.Namespace) -> int:
     conn = db.connect(args.db)
-    episodes = _enabled_episodes(conn, ad_chapters.pending_episodes(conn))
+    enabled = _enabled_show_ids(conn)
+    episodes = _filter_enabled(ad_chapters.pending_episodes(conn), enabled)
     if not episodes:
         print("no episodes with an unscanned chapters_url (from an ad-stripping-enabled show)",
               file=sys.stderr)
@@ -116,19 +126,22 @@ def cmd_chapters(args: argparse.Namespace) -> int:
             try:
                 n = ad_chapters.scan_episode(conn, client, ep)
             except httpx.HTTPError as exc:
-                print(f"  FAIL  {ep['title']}: {exc}")
+                print(f"  FAIL  {ep['title'] or ''}: {exc}")
                 continue
             found += n
-            print(f"  ok    {ep['title']}: {n} ad span(s) from chapters")
+            print(f"  ok    {ep['title'] or ''}: {n} ad span(s) from chapters")
     print(f"found {found} chapter-sourced ad span(s) across {len(episodes)} episode(s)")
     return 0
 
 
 def cmd_transcribe(args: argparse.Namespace) -> int:
     conn = db.connect(args.db)
-    pending = _enabled_episodes(conn, ad_transcribe.pending_episodes(conn), args.limit)
+    enabled = _enabled_show_ids(conn)
+    source = claims.episodes_needing_transcription(conn) if args.cross_show_only \
+        else ad_transcribe.pending_episodes(conn)
+    pending = _filter_enabled(source, enabled, args.limit)
     if args.dry_run:
-        total_pending = len(_enabled_episodes(conn, ad_transcribe.pending_episodes(conn)))
+        total_pending = len(_filter_enabled(source, enabled))
         print(f"pending episodes: {total_pending}"
               + (f" (would process {len(pending)} this run)" if args.limit else ""))
         return 0
@@ -144,19 +157,22 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                 path = ad_transcribe.transcribe_episode(conn, ep, client, model_size=args.model)
             except (httpx.HTTPError, OSError) as exc:
                 errors += 1
-                print(f"  FAIL  {ep['title']}: {exc}")
+                print(f"  FAIL  {ep['title'] or ''}: {exc}")
                 continue
-            print(f"  ok    {ep['title']} -> {path}")
-    remaining = len(_enabled_episodes(conn, ad_transcribe.pending_episodes(conn)))
+            print(f"  ok    {ep['title'] or ''} -> {path}")
+    remaining_source = claims.episodes_needing_transcription(conn) if args.cross_show_only \
+        else ad_transcribe.pending_episodes(conn)
+    remaining = len(_filter_enabled(remaining_source, enabled))
     print(f"transcribed {len(pending) - errors} episode(s) ({errors} failed, {remaining} still pending)")
     return 1 if errors else 0
 
 
 def cmd_detect_ads(args: argparse.Namespace) -> int:
     conn = db.connect(args.db)
-    pending = _enabled_episodes(conn, ad_detect.pending_episodes(conn), args.limit)
+    enabled = _enabled_show_ids(conn)
+    pending = _filter_enabled(ad_detect.pending_episodes(conn), enabled, args.limit)
     if args.dry_run:
-        total_pending = len(_enabled_episodes(conn, ad_detect.pending_episodes(conn)))
+        total_pending = len(_filter_enabled(ad_detect.pending_episodes(conn), enabled))
         print(f"pending episodes: {total_pending}"
               + (f" (would process {len(pending)} this run)" if args.limit else ""))
         return 0
@@ -180,27 +196,41 @@ def cmd_detect_ads(args: argparse.Namespace) -> int:
     # Uses detect_episode directly (not the bulk detect_pending) so the
     # per-show enabled filter above actually takes effect — detect_pending
     # does its own pending_episodes() query internally with no way to
-    # restrict it to a specific episode set.
-    errors = 0
+    # restrict it to a specific episode set. The consecutive-failure abort
+    # below is copied from detect_pending's own logic (adscrub/detect.py) to
+    # preserve that behavior, since bypassing detect_pending drops it otherwise.
+    ok = errors = 0
+    consecutive_errors = 0
+    max_consecutive_errors = 5
     for ep in pending:
         try:
             found = ad_detect.detect_episode(conn, ep, detector)
         except Exception as exc:  # noqa: BLE001 — per-episode isolation, matches detect_pending
             conn.rollback()
             errors += 1
-            print(f"  FAIL  {ep['title']}: {exc}")
+            consecutive_errors += 1
+            print(f"  FAIL  {ep['title'] or ''}: {exc}")
+            if consecutive_errors >= max_consecutive_errors:
+                print(f"  aborting after {consecutive_errors} consecutive failures", file=sys.stderr)
+                break
             continue
-        print(f"  ok    {ep['title']}: {found} ad span(s) from transcript")
-    remaining = len(_enabled_episodes(conn, ad_detect.pending_episodes(conn)))
-    print(f"detected across {len(pending) - errors} episode(s) ({errors} failed, {remaining} still pending)")
+        ok += 1
+        consecutive_errors = 0
+        print(f"  ok    {ep['title'] or ''}: {found} ad span(s) from transcript")
+    # ok + errors, not len(pending) - errors: an early abort leaves part of
+    # `pending` never attempted at all, which the old subtraction would have
+    # miscounted as "succeeded".
+    remaining = len(_filter_enabled(ad_detect.pending_episodes(conn), enabled))
+    print(f"detected across {ok} episode(s) ({errors} failed, {remaining} still pending)")
     return 1 if errors else 0
 
 
 def cmd_cut(args: argparse.Namespace) -> int:
     conn = db.connect(args.db)
-    pending = _enabled_episodes(conn, ad_cut.pending_episodes(conn), args.limit)
+    enabled = _enabled_show_ids(conn)
+    pending = _filter_enabled(ad_cut.pending_episodes(conn), enabled, args.limit)
     if args.dry_run:
-        total_pending = len(_enabled_episodes(conn, ad_cut.pending_episodes(conn)))
+        total_pending = len(_filter_enabled(ad_cut.pending_episodes(conn), enabled))
         print(f"pending episodes: {total_pending}"
               + (f" (would process {len(pending)} this run)" if args.limit else ""))
         return 0
@@ -209,7 +239,8 @@ def cmd_cut(args: argparse.Namespace) -> int:
         return 1
 
     # Uses cut_episode directly (not the bulk cut_pending) — same reason as
-    # cmd_detect_ads above.
+    # cmd_detect_ads above. cut_pending never had a consecutive-failure abort
+    # to begin with, so no equivalent is needed here.
     errors = 0
     with make_client() as client:
         for ep in pending:
@@ -217,10 +248,10 @@ def cmd_cut(args: argparse.Namespace) -> int:
                 _path, ad_seconds = ad_cut.cut_episode(conn, ep, client)
             except Exception as exc:  # noqa: BLE001 — per-episode isolation, matches cut_pending
                 errors += 1
-                print(f"  FAIL  {ep['title']}: {exc}")
+                print(f"  FAIL  {ep['title'] or ''}: {exc}")
                 continue
-            print(f"  ok    {ep['title']}: removed {ad_seconds:.1f}s of ads")
-    remaining = len(_enabled_episodes(conn, ad_cut.pending_episodes(conn)))
+            print(f"  ok    {ep['title'] or ''}: removed {ad_seconds:.1f}s of ads")
+    remaining = len(_filter_enabled(ad_cut.pending_episodes(conn), enabled))
     print(f"cut {len(pending) - errors} episode(s) ({errors} failed, {remaining} still pending)")
     return 1 if errors else 0
 
@@ -499,6 +530,10 @@ def main(argv: list[str] | None = None) -> int:
                         f"{ad_transcribe.DEFAULT_MODEL})")
     p.add_argument("--dry-run", action="store_true",
                    help="only report how many episodes are pending")
+    p.add_argument("--cross-show-only", action="store_true",
+                   help="only episodes covering a topic 2+ shows have also covered — "
+                        "the priority subset claims comparison actually needs, instead "
+                        "of every episode with audio (adscrub's default scope)")
     p.set_defaults(func=cmd_transcribe)
 
     p = sub.add_parser("detect-ads", help="classify ad spans from transcripts with a Claude model")

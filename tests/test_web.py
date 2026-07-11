@@ -494,6 +494,38 @@ def test_adblock_toggle_flips_state_and_redirects(server):
     assert "<strong>enabled</strong>" in body
 
 
+def test_adblock_toggle_is_atomic_under_concurrent_requests(server):
+    # Regression test for a read-modify-write race: the old code read the
+    # current state in Python, flipped it, then wrote it back — two
+    # concurrent toggles could both read the same starting value and
+    # collapse into one net change instead of canceling out. The fix
+    # computes the flip in a single SQL UPDATE. 20 concurrent toggles from
+    # an even starting state (enabled) must land back on enabled — any lost
+    # update would make this flaky/wrong.
+    import threading
+
+    cookie = login(server)
+    errors = []
+
+    def toggle():
+        try:
+            resp, _ = request(server, "POST", "/show/1/adblock", body={}, cookie=cookie)
+            if resp.status != 303:
+                errors.append(resp.status)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=toggle) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors
+    resp, body = request(server, "GET", "/show/1", cookie=cookie)
+    assert "<strong>enabled</strong>" in body  # 20 (even) toggles from enabled -> enabled
+
+
 def test_adblock_toggle_404_for_missing_show(server):
     cookie = login(server)
     resp, _ = request(server, "POST", "/show/999/adblock", body={}, cookie=cookie)

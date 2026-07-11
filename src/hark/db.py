@@ -98,6 +98,11 @@ CREATE TABLE IF NOT EXISTS ad_segments (
 
 CREATE INDEX IF NOT EXISTS idx_episodes_show_pubdate ON episodes (show_id, pubdate);
 CREATE INDEX IF NOT EXISTS idx_ad_segments_episode ON ad_segments (episode_id);
+-- episode_topics' PK is (episode_id, topic_id) — episode_id-leading, so it
+-- doesn't help topic_id-first lookups. web.py's related_shows/related_topics
+-- (topic co-occurrence) and view_topic's episode listing all filter/join on
+-- topic_id on every page view; without this they're full table scans.
+CREATE INDEX IF NOT EXISTS idx_episode_topics_topic ON episode_topics (topic_id);
 """
 
 
