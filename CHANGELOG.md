@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-07-11
+
+### Fixed
+
+- Proper pluralization ("1 episode" / "2 episodes") across the UI, replacing
+  the placeholder "episode(s)"/"show(s)"/"topic(s)" text everywhere it
+  appeared (home page status banner, topic/show/search pages).
+- Topic 730's label was a mis-extracted book citation ("Jerome Jacobson
+  (ed.). Studies in the archaeology of India and Pakistan...") that had also
+  been canonicalized to the wrong Wikidata entity — a same-name collision
+  with an unrelated archaeology book editor, not the actual McDonald's
+  Monopoly fraud perpetrator these two episodes cover. Relabeled to
+  "McDonald's Monopoly fraud" and pointed at Q16997479 (the closest real
+  entity available; no dedicated fraud-specific Wikidata item exists).
+  Data-only fix (topics table), not yet re-synced to the deployed instance.
+
 ## [0.6.1] - 2026-07-11
 
 ### Fixed

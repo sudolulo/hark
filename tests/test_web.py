@@ -145,7 +145,7 @@ def test_index_status_shows_pending_episodes(tmp_path):
         resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
         cookie = resp.getheader("Set-Cookie").split(";")[0]
         resp, body = request(srv, "GET", "/", cookie=cookie)
-        assert "1 episode(s) not yet indexed" in body
+        assert "1 episode not yet indexed" in body
         assert "Indexing in progress" not in body  # last activity is months old, not active
     finally:
         srv.shutdown()
@@ -232,7 +232,7 @@ def test_show_page_paginates_episodes(tmp_path):
 
         resp, body = request(srv, "GET", "/show/1", cookie=cookie)
         assert resp.status == 200
-        assert "60 episode(s)" in body  # total is the real count, not the page size
+        assert "60 episodes" in body  # total is the real count, not the page size
         assert body.count("<tr><td>") == web.PAGE_SIZE  # only one page's worth rendered
         assert "page 1 of 2" in body
 
@@ -352,6 +352,12 @@ def test_adblock_toggle_requires_login(server):
     resp, _ = request(server, "POST", "/show/1/adblock", body={})
     assert resp.status == 303
     assert resp.getheader("Location") == "/login"
+
+
+def test_plural():
+    assert web.plural(0, "episode") == "0 episodes"
+    assert web.plural(1, "episode") == "1 episode"
+    assert web.plural(2, "episode") == "2 episodes"
 
 
 def test_episode_page_404_for_missing_episode(server):

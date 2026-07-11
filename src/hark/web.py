@@ -245,6 +245,10 @@ def esc(value) -> str:
     return html.escape(str(value if value is not None else ""))
 
 
+def plural(n: int, word: str) -> str:
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+
 def page(title: str, body: str, user: str | None = None) -> str:
     header = HEADER.format(user=esc(user)) if user else ""
     return PAGE.format(title=esc(title), header=header, body=body)
@@ -437,7 +441,7 @@ class App:
         )
         body = (
             f"<h1>{esc(topic['label'])}{qid}</h1><p>{pills}</p>"
-            f"<h2>covered by {len(shows)} show(s), {len(episodes)} episode(s)</h2>"
+            f"<h2>covered by {plural(len(shows), 'show')}, {plural(len(episodes), 'episode')}</h2>"
             f"<p>{show_pills}</p>"
             f'<table><tr><th>show</th><th>episode</th><th>date</th>'
             f'<th title="extractor\'s confidence this episode is really about this topic">conf</th></tr>'
@@ -483,7 +487,7 @@ class App:
         if q:
             topics_pager = pagination_html("/search", {"q": q}, page_num, topic_total, "topics")
             no_match = f"No topics match “{q}”."
-            body += (f"<h2>{topic_total} topic(s)</h2>"
+            body += (f"<h2>{plural(topic_total, 'topic')}</h2>"
                      + topic_table(topics, empty=no_match) + topics_pager)
             if episodes:
                 eps = "".join(
@@ -497,7 +501,8 @@ class App:
                 eps_table = f'<p class="dim">No episode titles match “{q}”.</p>'
             note = (f'<p class="dim">showing the 50 most recent of {episode_total} — '
                     f"narrow your search to see the rest.</p>") if episode_total > 50 else ""
-            body += f"<h2>{episode_total} episode title match(es)</h2>{eps_table}{note}"
+            match_word = "match" if episode_total == 1 else "matches"
+            body += f"<h2>{episode_total} episode title {match_word}</h2>{eps_table}{note}"
         return page("search", body, user["username"])
 
     def view_shows(self, user) -> str:
@@ -597,7 +602,7 @@ class App:
         )
         body = (
             f"<h1>{esc(show['name'])}</h1>"
-            f"<h2>{total_episodes} episode(s), {topic_count} topic(s) covered</h2>"
+            f"<h2>{plural(total_episodes, 'episode')}, {plural(topic_count, 'topic')} covered</h2>"
             f"{adblock_section}"
             f"<table><tr><th>episode</th><th>date</th><th>topics</th></tr>{rows_html}</table>{pager}"
         )
@@ -779,14 +784,16 @@ def index_status_html(pending_episodes: int, pending_canon: int, last_extracted_
         active = last_dt is not None and utcnow() - last_dt < ACTIVE_WINDOW
         if active:
             lines.append(
-                f"<p>Indexing in progress — {pending_episodes} episode(s) queued, "
+                f"<p>Indexing in progress — {plural(pending_episodes, 'episode')} queued, "
                 f"last processed {relative_time(last_dt)}.</p>"
             )
         else:
             when = f", last activity {relative_time(last_dt)}" if last_dt else ""
-            lines.append(f"<p>{pending_episodes} episode(s) not yet indexed{when}.</p>")
+            lines.append(f"<p>{plural(pending_episodes, 'episode')} not yet indexed{when}.</p>")
     if pending_canon:
-        lines.append(f"<p class=\"dim\">{pending_canon} topic(s) awaiting Wikidata canonicalization.</p>")
+        lines.append(
+            f"<p class=\"dim\">{plural(pending_canon, 'topic')} awaiting Wikidata canonicalization.</p>"
+        )
     if not lines:
         return ""
     cls = "status active" if active else "status"
