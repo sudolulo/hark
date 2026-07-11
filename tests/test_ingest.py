@@ -47,7 +47,9 @@ def test_parse_feed(fixtures):
     assert ep1.pubdate == "2025-01-01T06:00:00Z"
     assert ep1.duration_seconds == 3723
     assert ep1.audio_url == "https://example.com/audio/ep1.mp3"
+    assert ep1.chapters_url == "https://example.com/ep1-chapters.json"
     assert ep2.duration_seconds == 2700
+    assert ep2.chapters_url is None
     # no <guid> → enclosure URL stands in
     assert ep3.guid == "https://example.com/audio/ep3.mp3"
     assert ep3.duration_seconds == 1800
@@ -80,6 +82,8 @@ def test_ingest_inserts_then_noop(conn, fixtures):
     assert (first.inserted, first.updated, first.total) == (3, 0, 3)
     assert (second.inserted, second.updated, second.total) == (0, 0, 3)
     assert conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0] == 3
+    row = conn.execute("SELECT chapters_url FROM episodes WHERE guid = 'ep-001'").fetchone()
+    assert row["chapters_url"] == "https://example.com/ep1-chapters.json"
 
 
 def test_ingest_updates_changed_episodes(conn, fixtures):

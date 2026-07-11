@@ -1,4 +1,14 @@
-"""hark command line: resolve, ingest, extract, stats, topics, who."""
+"""hark command line: resolve, ingest, extract, chapters, transcribe, detect-ads,
+cut, stats, topics, who, web.
+
+chapters/transcribe/detect-ads/cut call straight into the `adscrub` package
+(a separate product, depended on as a library — see pyproject.toml) rather
+than through any hark-side reimplementation: hark's episodes/ad_segments
+schema was deliberately shaped to match adscrub's own, so adscrub's
+schema-coupled functions (pending_episodes, scan_episode, transcribe_episode,
+detect_pending, cut_pending, ...) work unchanged against hark's `conn`. Only
+the CLI wiring here is hark's own code.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +18,11 @@ import sys
 from typing import Callable
 
 import httpx
+
+from adscrub import chapters as ad_chapters
+from adscrub import cut as ad_cut
+from adscrub import detect as ad_detect
+from adscrub import transcribe as ad_transcribe
 
 from . import __version__, db, extract, ingest, pipeline, resolve, wikidata
 
@@ -75,6 +90,116 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             print(f"  FAIL  {r.query}: {r.error}")
         else:
             print(f"  ok    {r.query}: +{r.inserted} new, {r.updated} updated ({r.total} in feed)")
+    return 1 if errors else 0
+
+
+def cmd_chapters(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db)
+    episodes = ad_chapters.pending_episodes(conn)
+    if not episodes:
+        print("no episodes with an unscanned chapters_url", file=sys.stderr)
+        return 1
+    found = 0
+    with make_client() as client:
+        for ep in episodes:
+            try:
+                n = ad_chapters.scan_episode(conn, client, ep)
+            except httpx.HTTPError as exc:
+                print(f"  FAIL  {ep['title']}: {exc}")
+                continue
+            found += n
+            print(f"  ok    {ep['title']}: {n} ad span(s) from chapters")
+    print(f"found {found} chapter-sourced ad span(s) across {len(episodes)} episode(s)")
+    return 0
+
+
+def cmd_transcribe(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db)
+    pending = ad_transcribe.pending_episodes(conn, args.limit)
+    if args.dry_run:
+        total_pending = len(ad_transcribe.pending_episodes(conn))
+        print(f"pending episodes: {total_pending}"
+              + (f" (would process {len(pending)} this run)" if args.limit else ""))
+        return 0
+    if not pending:
+        print("no episodes pending transcription", file=sys.stderr)
+        return 1
+
+    errors = 0
+    with make_client() as client:
+        for ep in pending:
+            try:
+                path = ad_transcribe.transcribe_episode(conn, ep, client, model_size=args.model)
+            except (httpx.HTTPError, OSError) as exc:
+                errors += 1
+                print(f"  FAIL  {ep['title']}: {exc}")
+                continue
+            print(f"  ok    {ep['title']} -> {path}")
+    remaining = len(ad_transcribe.pending_episodes(conn))
+    print(f"transcribed {len(pending) - errors} episode(s) ({errors} failed, {remaining} still pending)")
+    return 1 if errors else 0
+
+
+def cmd_detect_ads(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db)
+    pending = ad_detect.pending_episodes(conn, args.limit)
+    if args.dry_run:
+        total_pending = len(ad_detect.pending_episodes(conn))
+        print(f"pending episodes: {total_pending}"
+              + (f" (would process {len(pending)} this run)" if args.limit else ""))
+        return 0
+    if not pending:
+        print("no episodes pending ad-span detection", file=sys.stderr)
+        return 1
+
+    import anthropic  # deferred: other commands must work without a key
+
+    try:
+        client = anthropic.Anthropic()
+    except anthropic.AnthropicError as exc:
+        print(f"anthropic client: {exc}", file=sys.stderr)
+        print("hint: export ANTHROPIC_API_KEY first (it lives in rbw, not in a file)",
+              file=sys.stderr)
+        return 1
+
+    detector = ad_detect.ClaudeAdDetector(client, model=args.model)
+
+    def report(r: ad_detect.DetectResult) -> None:
+        if r.error:
+            print(f"  FAIL  {r.title}: {r.error}")
+        else:
+            print(f"  ok    {r.title}: {r.found} ad span(s) from transcript")
+
+    results = ad_detect.detect_pending(conn, detector, limit=args.limit, on_result=report)
+    errors = sum(1 for r in results if r.error)
+    remaining = len(ad_detect.pending_episodes(conn))
+    print(f"detected across {len(results) - errors} episode(s) ({errors} failed, {remaining} still pending)")
+    return 1 if errors else 0
+
+
+def cmd_cut(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db)
+    pending = ad_cut.pending_episodes(conn, args.limit)
+    if args.dry_run:
+        total_pending = len(ad_cut.pending_episodes(conn))
+        print(f"pending episodes: {total_pending}"
+              + (f" (would process {len(pending)} this run)" if args.limit else ""))
+        return 0
+    if not pending:
+        print("no episodes pending cutting", file=sys.stderr)
+        return 1
+
+    def report(r: ad_cut.CutResult) -> None:
+        if r.error:
+            print(f"  FAIL  {r.title}: {r.error}")
+        else:
+            print(f"  ok    {r.title}: removed {r.ad_seconds:.1f}s of ads")
+
+    with make_client() as client:
+        results = ad_cut.cut_pending(conn, client, limit=args.limit, on_result=report)
+    errors = sum(1 for r in results if r.error)
+    remaining = len(ad_cut.pending_episodes(conn))
+    print(f"cut {len(results) - errors} episode(s) ({errors} failed, {remaining} still pending)")
     return 1 if errors else 0
 
 
@@ -224,6 +349,7 @@ def cmd_web(args: argparse.Namespace) -> int:
         bind=args.bind,
         admin_token=os.environ.get("HARK_ADMIN_TOKEN"),
         cookie_secure=os.environ.get("HARK_COOKIE_SECURE", "0") == "1",
+        base_url=args.base_url,
     )
     return 0
 
@@ -236,9 +362,12 @@ def cmd_stats(args: argparse.Namespace) -> int:
     episodes = conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
     topics = conn.execute("SELECT COUNT(*) FROM topics").fetchone()[0]
     links = conn.execute("SELECT COUNT(*) FROM episode_topics").fetchone()[0]
+    segments = conn.execute("SELECT COUNT(*) FROM ad_segments").fetchone()[0]
+    cut_count = conn.execute("SELECT COUNT(*) FROM episodes WHERE cut_path IS NOT NULL").fetchone()[0]
     print(f"shows:    {shows['n']} ({shows['resolved']} resolved)")
     print(f"episodes: {episodes}")
     print(f"topics:   {topics} ({links} episode links)")
+    print(f"ad_segments: {segments} ({cut_count} episodes cut)")
     rows = conn.execute(
         """
         SELECT COALESCE(s.title, s.query) AS name, COUNT(e.id) AS n,
@@ -273,6 +402,34 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("ingest", help="fetch resolved feeds and upsert episodes")
     p.set_defaults(func=cmd_ingest)
 
+    p = sub.add_parser("chapters", help="scan episodes' existing chapter markers for ad spans")
+    p.set_defaults(func=cmd_chapters)
+
+    p = sub.add_parser(
+        "transcribe", help="transcribe episodes with no chapter-sourced ad spans"
+    )
+    p.add_argument("--limit", type=int, help="max episodes to process this run")
+    p.add_argument("--model", default=os.environ.get("HARK_WHISPER_MODEL", ad_transcribe.DEFAULT_MODEL),
+                   help=f"faster-whisper model size (default: $HARK_WHISPER_MODEL or "
+                        f"{ad_transcribe.DEFAULT_MODEL})")
+    p.add_argument("--dry-run", action="store_true",
+                   help="only report how many episodes are pending")
+    p.set_defaults(func=cmd_transcribe)
+
+    p = sub.add_parser("detect-ads", help="classify ad spans from transcripts with a Claude model")
+    p.add_argument("--limit", type=int, help="max episodes to process this run")
+    p.add_argument("--model", default=os.environ.get("HARK_AD_MODEL", ad_detect.DEFAULT_MODEL),
+                   help=f"Claude model id (default: $HARK_AD_MODEL or {ad_detect.DEFAULT_MODEL})")
+    p.add_argument("--dry-run", action="store_true",
+                   help="only report how many episodes are pending")
+    p.set_defaults(func=cmd_detect_ads)
+
+    p = sub.add_parser("cut", help="cut ad spans out of episode audio with ffmpeg")
+    p.add_argument("--limit", type=int, help="max episodes to process this run")
+    p.add_argument("--dry-run", action="store_true",
+                   help="only report how many episodes are pending")
+    p.set_defaults(func=cmd_cut)
+
     p = sub.add_parser("extract", help="extract episode topics with a Claude model")
     p.add_argument("--limit", type=int, help="max episodes to process this run")
     p.add_argument("--model", default=DEFAULT_MODEL,
@@ -295,12 +452,19 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("canon", help="retry Wikidata canonicalization for unmatched topics")
     p.set_defaults(func=cmd_canon)
 
-    p = sub.add_parser("web", help="serve the web frontend (login-walled)")
+    p = sub.add_parser(
+        "web", help="serve the dashboard (login-walled) + feed/audio routes (token-gated)"
+    )
     p.add_argument("--bind", default=os.environ.get("HARK_BIND", "0.0.0.0:8710"),
                    help="host:port (default: $HARK_BIND or 0.0.0.0:8710)")
     p.add_argument("--auth-db", default=os.environ.get("HARK_AUTH_DB", "auth.db"),
                    help="auth database path, kept separate from hark.db "
                         "(default: $HARK_AUTH_DB or auth.db)")
+    p.add_argument("--base-url", default=os.environ.get("HARK_BASE_URL", "http://localhost:8710"),
+                   help="externally-reachable URL this server is served at — embedded "
+                        "in generated feeds' audio links, so it must resolve from "
+                        "wherever the podcast player runs, not just from this host "
+                        "(default: $HARK_BASE_URL or http://localhost:8710)")
     p.set_defaults(func=cmd_web)
 
     p = sub.add_parser("topics", help="list topics by cross-show coverage")
