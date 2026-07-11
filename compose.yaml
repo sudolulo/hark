@@ -1,10 +1,16 @@
-# Web UI + one-shot pipeline commands.
-#   docker compose up -d                       # serve web UI :8710
+# Dashboard + feed/audio routes + one-shot pipeline commands.
+#   docker compose up -d                       # serve :8710
 #   docker compose run --rm hark ingest        # poll feeds once
 #   docker compose run --rm hark canon         # retry Wikidata matches
+#   docker compose run --rm hark chapters      # chapter-sourced ad spans
+#   docker compose run --rm hark transcribe    # Whisper — CPU by default, see compose.gpu.yaml
+#   docker compose run --rm hark detect-ads    # LLM ad-span classification
+#   docker compose run --rm hark cut           # ffmpeg out the ad spans
 #
 # HARK_ADMIN_TOKEN bootstraps the admin login on a fresh auth db; set a real
 # password at /account afterwards (the token stops working once one exists).
+# HARK_BASE_URL must be set to wherever the podcast player can actually reach
+# this container (not localhost) — it's embedded in generated feeds' links.
 services:
   hark:
     build: .
@@ -14,6 +20,7 @@ services:
     environment:
       HARK_ADMIN_TOKEN: ${HARK_ADMIN_TOKEN:-}
       HARK_COOKIE_SECURE: ${HARK_COOKIE_SECURE:-0}
+      HARK_BASE_URL: ${HARK_BASE_URL:-http://localhost:8710}
     volumes:
       - ./data:/app/data
     restart: unless-stopped

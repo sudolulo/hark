@@ -1,0 +1,9 @@
+{
+  "chapters": [
+    {"startTime": 0, "title": "Intro"},
+    {"startTime": 45, "title": "Sponsor Break", "endTime": 105},
+    {"startTime": 105, "title": "Main segment"},
+    {"startTime": 3600, "title": "Ad: back to it later", "endTime": 3660},
+    {"startTime": 3660, "title": "Outro"}
+  ]
+}
