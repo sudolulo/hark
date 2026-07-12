@@ -28,6 +28,28 @@ per-show on/off toggle and feed URL, both from the show page), cross-show
 claims comparison, and M2 discovery's first cut (related shows and related
 topics, both by co-occurrence) — deployed live.
 
+## Demo
+
+The dashboard: coverage stats, genre breakdown, and the most-covered topics
+across shows.
+
+![hark dashboard](docs/screenshots/dashboard.png)
+
+A topic page — every episode across every show that covers it:
+
+![Somerton Man topic page](docs/screenshots/topic.png)
+
+The actual point of this project: once 2+ shows have transcripts for the same
+topic, hark diffs what they each said — shared facts vs. claims unique to one
+show's telling — right on the episode page.
+
+![claims comparison on an episode page](docs/screenshots/episode-claims.png)
+
+A show page: ad-stripped feed URL to subscribe to in AntennaPod, the per-show
+on/off toggle, and related shows by topic overlap.
+
+![show page](docs/screenshots/show.png)
+
 ## Usage
 
 ```
