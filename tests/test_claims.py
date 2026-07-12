@@ -1,4 +1,5 @@
 import json
+import sqlite3
 
 import pytest
 
@@ -122,6 +123,30 @@ def test_pending_topics_skips_already_compared_same_set(conn, tmp_path):
     seed_topic(conn, tmp_path, {"Show A": "a", "Show B": "b"})
     claims.compare_pending(conn, claims.NullComparator())
     assert claims.pending_topics(conn) == []
+
+
+def test_count_pending_topics_matches_pending_topics_length(conn, tmp_path):
+    seed_topic(conn, tmp_path, {"Show A": "a"})
+    assert claims.count_pending_topics(conn) == 0
+
+    seed_topic(conn, tmp_path, {"Show B": "b"}, topic_id=1)
+    assert claims.count_pending_topics(conn) == len(claims.pending_topics(conn)) == 1
+
+    claims.compare_pending(conn, claims.NullComparator())
+    assert claims.count_pending_topics(conn) == 0
+
+
+def test_count_pending_topics_is_read_only_connection_safe(conn, tmp_path):
+    # hark.web's dashboard only ever holds a read-only connection, and on a
+    # fresh db topic_comparisons hasn't been created by any write-capable
+    # connection yet — count_pending_topics must not need to create it
+    # (unlike pending_topics(), which calls ensure_schema()).
+    seed_topic(conn, tmp_path, {"Show A": "a", "Show B": "b"})
+    conn.close()
+    ro = sqlite3.connect(f"file:{tmp_path / 'test.db'}?mode=ro", uri=True)
+    ro.row_factory = sqlite3.Row
+    assert claims.count_pending_topics(ro) == 1
+    ro.close()
 
 
 def test_pending_topics_refreshes_when_new_episode_added(conn, tmp_path):

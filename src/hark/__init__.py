@@ -1,3 +1,3 @@
 """hark — cross-podcast topic index and discovery service."""
 
-__version__ = "0.9.4"
+__version__ = "0.9.5"

@@ -336,6 +336,24 @@ class App:
                 """
             ).fetchone()[0]
             rows = conn.execute(*topics_query(limit=15)).fetchall()
+            transcribe_pending = conn.execute(
+                """
+                SELECT COUNT(*) FROM episodes
+                WHERE transcript_path IS NULL AND audio_url IS NOT NULL
+                  AND id NOT IN (SELECT episode_id FROM ad_segments WHERE source = 'chapter')
+                """
+            ).fetchone()[0]
+            detect_pending = conn.execute(
+                "SELECT COUNT(*) FROM episodes WHERE transcript_path IS NOT NULL AND llm_detected_at IS NULL"
+            ).fetchone()[0]
+            cut_pending = conn.execute(
+                """
+                SELECT COUNT(*) FROM episodes
+                WHERE cut_path IS NULL AND EXISTS
+                    (SELECT 1 FROM ad_segments WHERE episode_id = episodes.id)
+                """
+            ).fetchone()[0]
+            compare_pending = claims.count_pending_topics(conn)
             genre_counts = conn.execute(
                 """
                 SELECT genre, COUNT(DISTINCT topic_id) AS n
@@ -361,6 +379,9 @@ class App:
         <div class="card"><div class="big">{shows}</div>shows</div>
         </div>"""
         status = index_status_html(episodes - extracted, topics - canonicalized, last_extracted_at)
+        pipeline_status = pipeline_status_html(
+            transcribe_pending, detect_pending, cut_pending, compare_pending
+        )
         pills = " ".join(
             f'<a class="pill" href="/topics?genre={esc(r["genre"])}">{esc(r["genre"])} ({r["n"]})</a>'
             for r in genre_counts
@@ -372,7 +393,7 @@ class App:
             for r in recent
         ) or '<tr><td class="dim" colspan="3">Nothing indexed yet.</td></tr>'
         body = (
-            "<h1>Who covered it?</h1>" + status +
+            "<h1>Who covered it?</h1>" + status + pipeline_status +
             '<form class="search" action="/search" method="get">'
             '<input type="text" name="q" placeholder="Dyatlov, Somerton, Titanic&hellip;" autofocus>'
             "<button>Search</button></form>" + cards +
@@ -419,7 +440,7 @@ class App:
             episodes = conn.execute(
                 """
                 SELECT e.id AS id, s.id AS show_id, COALESCE(s.title, s.query) AS show,
-                       e.title, e.pubdate, e.audio_url, et.confidence
+                       e.title, e.pubdate, e.audio_url, e.transcript_path, et.confidence
                 FROM episode_topics et
                 JOIN episodes e ON e.id = et.episode_id
                 JOIN shows s ON s.id = e.show_id
@@ -429,6 +450,7 @@ class App:
                 (topic_id,),
             ).fetchall()
             related = related_topics(conn, topic_id)
+            comparison = claims.get_comparison(conn, topic_id)
         finally:
             conn.close()
         qid = ""
@@ -452,10 +474,23 @@ class App:
                 for r in related
             )
             related_html = f"<h2>Related topics</h2><p>{related_pills}</p>"
+        shows_transcribed = {r["show_id"] for r in episodes if r["transcript_path"] is not None}
+        compare_note = ""
+        if comparison is not None:
+            compare_note = (
+                '<p class="dim">Cross-show claims comparison available — see each '
+                "episode's page for shared vs. unique claims.</p>"
+            )
+        elif len(shows_transcribed) >= 2:
+            compare_note = (
+                '<p class="pending">Transcribed by 2+ shows but not compared yet '
+                "(<code>hark compare</code>).</p>"
+            )
         body = (
             f"<h1>{esc(topic['label'])}{qid}</h1><p>{pills}</p>"
             f"<h2>covered by {plural(len(shows), 'show')}, {plural(len(episodes), 'episode')}</h2>"
             f"<p>{show_pills}</p>"
+            f"{compare_note}"
             f"{related_html}"
             f'<table><tr><th>show</th><th>episode</th><th>date</th>'
             f'<th title="extractor\'s confidence this episode is really about this topic">conf</th></tr>'
@@ -587,6 +622,15 @@ class App:
                 """,
                 (show_id,),
             ).fetchone()[0]
+            ad_stripping_progress = conn.execute(
+                """
+                SELECT COALESCE(SUM(transcript_path IS NOT NULL), 0) AS transcribed,
+                       COALESCE(SUM(llm_detected_at IS NOT NULL), 0) AS detected,
+                       COALESCE(SUM(cut_path IS NOT NULL), 0) AS cut
+                FROM episodes WHERE show_id = ?
+                """,
+                (show_id,),
+            ).fetchone()
             related = related_shows(conn, show_id)
         finally:
             conn.close()
@@ -610,6 +654,9 @@ class App:
             f'<p>Ad-stripping pipeline for this show: '
             f'<strong>{"enabled" if enabled else "disabled"}</strong> — episodes only get '
             f'transcribed/scanned/cut while enabled (existing cut episodes stay cut either way).</p>'
+            f'<p class="dim">{ad_stripping_progress["transcribed"]}/{total_episodes} transcribed, '
+            f'{ad_stripping_progress["detected"]}/{total_episodes} ad-scanned, '
+            f'{ad_stripping_progress["cut"]}/{total_episodes} cut.</p>'
             f'<form method="post" action="/show/{show_id}/adblock">'
             f'<button class="ghost">{toggle_label}</button></form>'
             "</div>"
@@ -870,6 +917,29 @@ def index_status_html(pending_episodes: int, pending_canon: int, last_extracted_
         return ""
     cls = "status active" if active else "status"
     return f'<div class="{cls}">{"".join(lines)}</div>'
+
+
+def pipeline_status_html(transcribe_pending: int, detect_pending: int,
+                          cut_pending: int, compare_pending: int) -> str:
+    """Home page banner for the ad-stripping + claims-comparison pipeline —
+    same idea as index_status_html for extraction. Before this, checking
+    what the deployed transcribe/compare loop actually has left to do meant
+    querying hark.db directly instead of just looking at the dashboard."""
+    if not (transcribe_pending or detect_pending or cut_pending or compare_pending):
+        return ""
+    lines = []
+    if transcribe_pending:
+        lines.append(f"<p>{plural(transcribe_pending, 'episode')} awaiting transcription.</p>")
+    if detect_pending:
+        lines.append(f"<p>{plural(detect_pending, 'episode')} awaiting ad-span detection.</p>")
+    if cut_pending:
+        lines.append(f"<p>{plural(cut_pending, 'episode')} awaiting ad cutting.</p>")
+    if compare_pending:
+        lines.append(
+            f'<p class="pending">{plural(compare_pending, "topic")} ready for cross-show '
+            f'claims comparison (<code>hark compare</code>).</p>'
+        )
+    return f'<div class="status">{"".join(lines)}</div>'
 
 
 def conf(value) -> str:

@@ -188,6 +188,44 @@ def pending_topics(conn: sqlite3.Connection, limit: int | None = None) -> list[d
     return pending
 
 
+def count_pending_topics(conn: sqlite3.Connection) -> int:
+    """Same "2+ shows transcribed, no/stale comparison" logic as
+    pending_topics(), but read-only-safe (no ensure_schema() call) for
+    hark.web's dashboard, which only ever holds a read-only connection.
+    A topic_comparisons table that doesn't exist yet means literally zero
+    comparisons have ever been stored — same as an empty `existing` dict —
+    so unlike pending_topics() this never needs to create it."""
+    rows = conn.execute(
+        """
+        SELECT et.topic_id, e.id AS episode_id, e.show_id
+        FROM episode_topics et
+        JOIN episodes e ON e.id = et.episode_id
+        WHERE e.transcript_path IS NOT NULL
+        """
+    ).fetchall()
+    by_topic: dict[int, list[sqlite3.Row]] = {}
+    for r in rows:
+        by_topic.setdefault(r["topic_id"], []).append(r)
+
+    try:
+        existing = {
+            r["topic_id"]: json.loads(r["episode_ids"])
+            for r in conn.execute("SELECT topic_id, episode_ids FROM topic_comparisons")
+        }
+    except sqlite3.OperationalError:
+        existing = {}
+
+    count = 0
+    for topic_id, episodes in by_topic.items():
+        if len({e["show_id"] for e in episodes}) < 2:
+            continue
+        episode_ids = sorted(e["episode_id"] for e in episodes)
+        if existing.get(topic_id) == episode_ids:
+            continue
+        count += 1
+    return count
+
+
 def episodes_needing_transcription(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     """Episodes covering a cross-show topic (2+ distinct shows) that still
     need a transcript — the priority subset for claims comparison, distinct

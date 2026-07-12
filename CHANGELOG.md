@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-07-12
+
+### Added
+
+- **Ad-stripping and claims-comparison pipeline progress is now visible in
+  the UI**, not just via `hark.db` queries or CLI `--dry-run` flags:
+  - Home page: a status banner reporting episodes awaiting transcription,
+    ad-span detection, and cutting, plus topics ready for cross-show claims
+    comparison (mirrors the existing extraction-status banner).
+  - Show page: per-show "X/Y transcribed, X/Y ad-scanned, X/Y cut" progress
+    next to the ad-stripping toggle.
+  - Topic page: a note when a topic has transcripts from 2+ shows but no
+    comparison yet, or when one is already available.
+- `claims.count_pending_topics()`: a read-only-connection-safe count of
+  topics pending comparison, for the above. `pending_topics()` itself calls
+  `ensure_schema()` (a write, for `topic_comparisons`) and can't be called
+  from `hark.web`'s read-only connection on a fresh database where that
+  table hasn't been created by any write yet.
+
 ## [0.9.4] - 2026-07-12
 
 ### Fixed

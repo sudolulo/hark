@@ -174,6 +174,159 @@ def test_index_status_shows_active_when_recently_processed(tmp_path):
         srv.shutdown()
 
 
+def test_pipeline_status_shows_ad_stripping_and_comparison_backlog(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('q', 'Show A', 'http://x')")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('r', 'Show B', 'http://y')")
+    conn.execute(
+        "INSERT INTO episodes (show_id, guid, title, audio_url) VALUES (1, 'g1', 'Untranscribed', 'http://a/1.mp3')"
+    )
+    conn.execute(
+        "INSERT INTO episodes (show_id, guid, title, transcript_path) VALUES (1, 'g2', 'Undetected', '/t/2.json')"
+    )
+    # Two shows' episodes on the same topic, both transcribed -> pending comparison.
+    conn.execute(
+        "INSERT INTO episodes (show_id, guid, title, transcript_path) VALUES (1, 'g3', 'Cmp A', '/t/3.json')"
+    )
+    conn.execute(
+        "INSERT INTO episodes (show_id, guid, title, transcript_path) VALUES (2, 'g4', 'Cmp B', '/t/4.json')"
+    )
+    conn.execute("INSERT INTO topics (label) VALUES ('Shared Case')")
+    conn.executemany(
+        "INSERT INTO episode_topics (episode_id, topic_id, source) VALUES (?, 1, 't')", [(3,), (4,)]
+    )
+    conn.commit()
+    conn.close()
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
+        cookie = resp.getheader("Set-Cookie").split(";")[0]
+        resp, body = request(srv, "GET", "/", cookie=cookie)
+        assert resp.status == 200
+        assert "1 episode awaiting transcription" in body
+        assert "3 episodes awaiting ad-span detection" in body  # Undetected, Cmp A, Cmp B
+        assert "1 topic ready for cross-show claims comparison" in body
+    finally:
+        srv.shutdown()
+
+
+def test_pipeline_status_absent_when_nothing_pending(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('q', 'Show A', 'http://x')")
+    # No audio_url (nothing to transcribe), no transcript (nothing to
+    # detect), no ad_segments (nothing to cut), only 1 show (never eligible
+    # for comparison) — the pipeline has genuinely nothing to report.
+    conn.execute("INSERT INTO episodes (show_id, guid, title) VALUES (1, 'g1', 'Untouched')")
+    conn.commit()
+    conn.close()
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
+        cookie = resp.getheader("Set-Cookie").split(";")[0]
+        resp, body = request(srv, "GET", "/", cookie=cookie)
+        assert "awaiting transcription" not in body
+        assert "awaiting ad-span detection" not in body
+        assert "ready for cross-show claims comparison" not in body
+    finally:
+        srv.shutdown()
+
+
+def test_show_page_shows_ad_stripping_progress(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('q', 'Show A', 'http://x')")
+    conn.execute(
+        "INSERT INTO episodes (show_id, guid, title, transcript_path, llm_detected_at, cut_path)"
+        " VALUES (1, 'g1', 'Done', '/t/1.json', '2026-01-01T00:00:00Z', '/c/1.mp3')"
+    )
+    conn.execute("INSERT INTO episodes (show_id, guid, title) VALUES (1, 'g2', 'Untouched')")
+    conn.commit()
+    conn.close()
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
+        cookie = resp.getheader("Set-Cookie").split(";")[0]
+        resp, body = request(srv, "GET", "/show/1", cookie=cookie)
+        assert resp.status == 200
+        assert "1/2 transcribed, 1/2 ad-scanned, 1/2 cut." in body
+    finally:
+        srv.shutdown()
+
+
+def test_topic_page_shows_comparison_pending_note(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('q', 'Show A', 'http://x')")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('r', 'Show B', 'http://y')")
+    conn.execute(
+        "INSERT INTO episodes (show_id, guid, title, transcript_path) VALUES (1, 'g1', 'Ep A', '/t/1.json')"
+    )
+    conn.execute(
+        "INSERT INTO episodes (show_id, guid, title, transcript_path) VALUES (2, 'g2', 'Ep B', '/t/2.json')"
+    )
+    conn.execute("INSERT INTO topics (label) VALUES ('Shared Case')")
+    conn.executemany(
+        "INSERT INTO episode_topics (episode_id, topic_id, source) VALUES (?, 1, 't')", [(1,), (2,)]
+    )
+    conn.commit()
+    conn.close()
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
+        cookie = resp.getheader("Set-Cookie").split(";")[0]
+        resp, body = request(srv, "GET", "/topic/1", cookie=cookie)
+        assert resp.status == 200
+        assert "not compared yet" in body
+        assert "hark compare" in body
+    finally:
+        srv.shutdown()
+
+
+def test_topic_page_shows_comparison_available_note(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('q', 'Show A', 'http://x')")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('r', 'Show B', 'http://y')")
+    conn.execute(
+        "INSERT INTO episodes (show_id, guid, title, transcript_path) VALUES (1, 'g1', 'Ep A', '/t/1.json')"
+    )
+    conn.execute(
+        "INSERT INTO episodes (show_id, guid, title, transcript_path) VALUES (2, 'g2', 'Ep B', '/t/2.json')"
+    )
+    conn.execute("INSERT INTO topics (label) VALUES ('Shared Case')")
+    conn.executemany(
+        "INSERT INTO episode_topics (episode_id, topic_id, source) VALUES (?, 1, 't')", [(1,), (2,)]
+    )
+    conn.commit()
+    conn.close()
+    claims.load_comparisons(
+        db.connect(tmp_path / "hark.db"),
+        [{"topic_id": 1, "shared": ["fact"], "unique_by_show": {}}],
+    )
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
+        cookie = resp.getheader("Set-Cookie").split(";")[0]
+        resp, body = request(srv, "GET", "/topic/1", cookie=cookie)
+        assert resp.status == 200
+        assert "Cross-show claims comparison available" in body
+        assert "not compared yet" not in body
+    finally:
+        srv.shutdown()
+
+
 def test_show_page_distinguishes_unindexed_from_topicless_episodes(tmp_path):
     conn = db.connect(tmp_path / "hark.db")
     conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('q', 'Show A', 'http://x')")
