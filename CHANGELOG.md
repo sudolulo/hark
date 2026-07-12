@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-07-12
+
+### Fixed
+
+- **0.9.2's `LD_LIBRARY_PATH` fix for the libcublas load failure didn't
+  actually work in production** — it loads correctly under plain `docker
+  run`, but still failed once deployed with `runtime: nvidia` / GPU device
+  reservations attached. Likely cause: the NVIDIA container runtime's own
+  environment injection at container start overrides `LD_LIBRARY_PATH`
+  rather than merging with it. Fixed by also registering the same paths in
+  the system linker cache (`/etc/ld.so.conf.d/` + `ldconfig`), which
+  `dlopen()` consults independent of any environment variable.
+
 ## [0.9.3] - 2026-07-12
 
 ### Added

@@ -60,6 +60,17 @@ ENV PATH="/app/.venv/bin:$PATH" \
 # with "Library libcublas.so.12 is not found" even though the packages are
 # installed. Harmless to set unconditionally on non-GPU builds: the linker
 # just skips a LD_LIBRARY_PATH entry that doesn't exist.
+#
+# LD_LIBRARY_PATH alone proved insufficient in production: the NVIDIA
+# container runtime's own environment injection (triggered by `runtime:
+# nvidia` / device reservations) can clobber it before the app process ever
+# sees it. Registering the same paths in the system linker cache survives
+# that, since dlopen() consults /etc/ld.so.cache independent of any env var.
+RUN if [ "$GPU" = "1" ]; then \
+      echo "/app/.venv/lib/python3.13/site-packages/nvidia/cublas/lib" > /etc/ld.so.conf.d/nvidia-cublas.conf && \
+      echo "/app/.venv/lib/python3.13/site-packages/nvidia/cudnn/lib" > /etc/ld.so.conf.d/nvidia-cudnn.conf && \
+      ldconfig; \
+    fi
 # `hark` is --no-create-home (see below), so huggingface_hub's default cache
 # location (~/.cache/huggingface) resolves to an unwritable /home/hark. Every
 # Whisper model load then fails to persist its revision-check bookkeeping and
