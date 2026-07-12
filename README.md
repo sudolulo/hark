@@ -29,16 +29,18 @@ a scheduled Claude agent instead of a paid API call (`claude-fleet`'s
 `jobs/agents/hark-pipeline.md`); this project has never used `$ANTHROPIC_API_KEY`
 and isn't starting now. See docs/PLAN.md's "Deployed pipeline automation" section.
 
-See `docs/PLAN.md` for milestones. Current state (0.11.0): feed resolution,
+See `docs/PLAN.md` for milestones. Current state (0.12.0): feed resolution,
 episode ingest, LLM topic extraction with Wikidata canonicalization, the
 cross-show topic index, a full web UI, adscrub-backed ad-stripping (with a
 per-show on/off toggle and feed URL, both from the show page), cross-show
 claims comparison, M2 discovery (related shows/topics by co-occurrence,
 candidate-show search, and an interim notable-episodes page), M3's
 AntennaPod loop (Nextcloud gpodder subscription + listen-history sync, OPML
-import fallback), and a per-show topic-index toggle (new shows start
-excluded from extraction until reviewed — most subscriptions aren't
-subject-per-episode genre shows) — deployed live.
+import fallback, and hark speaking the gpodder-sync protocol itself so
+AntennaPod can point directly at it — no app fork needed), and a per-show
+topic-index toggle (new shows start excluded from extraction until
+reviewed — most subscriptions aren't subject-per-episode genre shows) —
+deployed live.
 
 ## Demo
 
@@ -142,6 +144,13 @@ login. Instead each show gets a random `feed_token` (auto-generated,
 wherever the podcast player can actually reach this server — it's embedded in
 every generated audio link, and `web` warns if left at the unreachable
 `localhost` default.
+
+It also answers the gpodder-sync protocol AntennaPod's own "Nextcloud" sync
+setting speaks (`/index.php/apps/gpoddersync/...`, HTTP Basic Auth against the
+same account as the web UI) — point AntennaPod at hark's base URL as if it
+were a Nextcloud instance and subscriptions/listen-history sync directly,
+no Nextcloud (or app fork) required. See `gpodder_server.py` and
+`docs/PLAN.md`'s M3 section for the protocol details.
 
 In Docker: `docker compose up -d` (mounts `./data`, serves :8710); pipeline
 stages run as one-shots, e.g. `docker compose run --rm hark ingest`.

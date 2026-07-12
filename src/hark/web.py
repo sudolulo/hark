@@ -29,6 +29,7 @@ embedded stylesheet served from /static/style.css so the CSP can stay strict
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import hashlib
 import html
@@ -42,13 +43,16 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import __version__, claims, podcast_feed
+from . import __version__, claims, gpodder_server, podcast_feed
 from .extract import GENRES as GENRES_FILTER
 
 PW_ITERS = 120_000
 SESSION_DAYS = 30
 COOKIE = "hark_session"
 MAX_FORM_BYTES = 65536
+# AntennaPod batches episode-action uploads at 30 per request (its own
+# UPLOAD_BULK_SIZE) — plenty of headroom over that for a JSON body.
+MAX_JSON_BODY_BYTES = 1_000_000
 
 AUTH_SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -1277,6 +1281,104 @@ class Handler(BaseHTTPRequestHandler):
             return self._plain_404()
         return self.respond_bytes(200, cut_path.read_bytes(), "audio/mpeg")
 
+    # -- gpodder-sync server (unauthenticated by cookie, Basic-Auth gated) ---
+    # See gpodder_server.py's module docstring: implements the exact API
+    # AntennaPod's own NextcloudSyncService.java calls, so pointing
+    # AntennaPod's existing "Nextcloud" sync setting at hark directly works
+    # with zero app changes. Same credential as the web UI's admin account
+    # (Auth.verify) — a session cookie makes no sense for this client, but
+    # reusing the account avoids a second credential to manage.
+
+    def _basic_auth_ok(self) -> bool:
+        header = self.headers.get("Authorization", "")
+        if not header.startswith("Basic "):
+            return False
+        try:
+            decoded = base64.b64decode(header[6:]).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return False
+        username, _, password = decoded.partition(":")
+        return self.app.auth.verify(username, password) is not None
+
+    def _gpodder_unauthorized(self) -> None:
+        self.respond_bytes(
+            401, b"unauthorized", "text/plain; charset=utf-8",
+            {"WWW-Authenticate": 'Basic realm="hark"'},
+        )
+
+    def _json_body(self, max_bytes: int = MAX_JSON_BODY_BYTES):
+        """Raw JSON request body — self.form() parses url-encoded data, the
+        wrong shape for what AntennaPod's sync client actually POSTs.
+        Returns None on an oversized or malformed body (caller 400s)."""
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        if length > max_bytes:
+            self.close_connection = True
+            return None
+        raw = self.rfile.read(length)
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+
+    def _gpodder_get_subscriptions(self, params: dict) -> None:
+        if not self._basic_auth_ok():
+            return self._gpodder_unauthorized()
+        since = int(params.get("since", ["0"])[0] or 0)
+        conn = self.app.db()
+        try:
+            add, remove, ts = gpodder_server.subscription_changes_since(conn, since)
+        finally:
+            conn.close()
+        self.respond(200, json.dumps({"add": add, "remove": remove, "timestamp": ts}),
+                      "application/json")
+
+    def _gpodder_post_subscription_changes(self) -> None:
+        # Body read (and thus drained from the socket) before the auth
+        # check, always — same reason do_POST's own form-drain comment
+        # gives: leaving it unread on a rejected request risks the next
+        # request on a kept-alive HTTP/1.1 connection misparsing those
+        # leftover bytes as its own request line.
+        body = self._json_body()
+        if not self._basic_auth_ok():
+            return self._gpodder_unauthorized()
+        if not isinstance(body, dict):
+            return self.respond(400, "bad request", "text/plain; charset=utf-8")
+        add = [u for u in body.get("add", []) if isinstance(u, str)]
+        remove = [u for u in body.get("remove", []) if isinstance(u, str)]
+        conn = sqlite3.connect(self.app.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            ts = gpodder_server.record_subscription_changes(conn, add, remove)
+        finally:
+            conn.close()
+        self.respond(200, json.dumps({"timestamp": ts}), "application/json")
+
+    def _gpodder_get_episode_actions(self, params: dict) -> None:
+        if not self._basic_auth_ok():
+            return self._gpodder_unauthorized()
+        since = int(params.get("since", ["0"])[0] or 0)
+        conn = self.app.db()
+        try:
+            actions, ts = gpodder_server.episode_actions_since(conn, since)
+        finally:
+            conn.close()
+        self.respond(200, json.dumps({"actions": actions, "timestamp": ts}), "application/json")
+
+    def _gpodder_post_episode_actions(self) -> None:
+        body = self._json_body()  # drain before auth check — see the sibling method's comment
+        if not self._basic_auth_ok():
+            return self._gpodder_unauthorized()
+        if not isinstance(body, list):
+            return self.respond(400, "bad request", "text/plain; charset=utf-8")
+        actions = [a for a in body if isinstance(a, dict)]
+        conn = sqlite3.connect(self.app.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            gpodder_server.record_episode_actions(conn, actions)
+        finally:
+            conn.close()
+        self.respond(200, json.dumps({"timestamp": int(time.time())}), "application/json")
+
     # -- routing -------------------------------------------------------------
 
     def do_GET(self):
@@ -1295,6 +1397,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_feed(route)
         if route.startswith("/audio/"):
             return self._serve_audio(route)
+        if route == "/index.php/apps/gpoddersync/subscriptions":
+            return self._gpodder_get_subscriptions(params)
+        if route == "/index.php/apps/gpoddersync/episode_action":
+            return self._gpodder_get_episode_actions(params)
 
         user = app.auth.session_user(self.cookie_token())
         if user is None:
@@ -1347,6 +1453,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         app = self.app
         route = self.path.rstrip("/")
+
+        # Dispatched before self.form()'s drain-the-body call below — these
+        # POST a JSON body, not form-encoded data, and need to read it
+        # themselves via _json_body() while the stream is still untouched.
+        if route == "/index.php/apps/gpoddersync/subscription_change/create":
+            return self._gpodder_post_subscription_changes()
+        if route == "/index.php/apps/gpoddersync/episode_action/create":
+            return self._gpodder_post_episode_actions()
+
         form = self.form()  # always drain the body, even on routes that ignore it
 
         if route == "/login":

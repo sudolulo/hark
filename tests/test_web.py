@@ -4,7 +4,9 @@ Password stretching is tuned down via monkeypatching PW_ITERS so the suite
 stays fast; the logic under test is identical.
 """
 
+import base64
 import http.client
+import json
 import threading
 import urllib.parse
 
@@ -43,12 +45,17 @@ def server(tmp_path):
     srv.shutdown()
 
 
-def request(srv, method, path, body=None, cookie=None):
+def request(srv, method, path, body=None, cookie=None, auth=None, json_body=None):
     conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=5)
     headers = {}
     if cookie:
         headers["Cookie"] = cookie
-    if body is not None:
+    if auth:
+        headers["Authorization"] = "Basic " + base64.b64encode(f"{auth[0]}:{auth[1]}".encode()).decode()
+    if json_body is not None:
+        headers["Content-Type"] = "application/json"
+        body = json.dumps(json_body)
+    elif body is not None:
         headers["Content-Type"] = "application/x-www-form-urlencoded"
         body = urllib.parse.urlencode(body)
     conn.request(method, path, body=body, headers=headers)
@@ -1126,3 +1133,88 @@ def test_html_escapes_labels(tmp_path):
         assert "&lt;script&gt;" in body
     finally:
         srv.shutdown()
+
+
+# --- gpodder-sync server (AntennaPod-compatible endpoints) ---
+
+GPODDER_PATHS = [
+    ("GET", "/index.php/apps/gpoddersync/subscriptions"),
+    ("POST", "/index.php/apps/gpoddersync/subscription_change/create"),
+    ("GET", "/index.php/apps/gpoddersync/episode_action"),
+    ("POST", "/index.php/apps/gpoddersync/episode_action/create"),
+]
+
+
+def test_gpodder_endpoints_require_basic_auth(server):
+    for method, path in GPODDER_PATHS:
+        resp, _ = request(server, method, path, json_body={} if method == "POST" else None)
+        assert resp.status == 401, path
+        assert resp.getheader("WWW-Authenticate", "").startswith("Basic")
+
+
+def test_gpodder_endpoints_reject_bad_credentials(server):
+    resp, _ = request(server, "GET", "/index.php/apps/gpoddersync/subscriptions",
+                      auth=("admin", "wrong-password"))
+    assert resp.status == 401
+
+
+def test_gpodder_endpoints_accept_cookie_login_credentials(server):
+    # Same account as the web UI (Auth.verify) — no separate credential to manage.
+    resp, body = request(server, "GET", "/index.php/apps/gpoddersync/subscriptions",
+                         auth=("admin", "letmein"))
+    assert resp.status == 200
+    data = json.loads(body)
+    assert data["add"] == [] and data["remove"] == []
+    assert isinstance(data["timestamp"], int) and data["timestamp"] > 0
+
+
+def test_gpodder_subscription_round_trip(server):
+    auth = ("admin", "letmein")
+    resp, body = request(server, "POST", "/index.php/apps/gpoddersync/subscription_change/create",
+                         auth=auth, json_body={"add": ["https://new.example/feed"], "remove": []})
+    assert resp.status == 200
+    assert "timestamp" in json.loads(body)
+
+    resp, body = request(server, "GET", "/index.php/apps/gpoddersync/subscriptions",
+                         auth=auth, json_body=None)
+    data = json.loads(body)
+    assert data["add"] == ["https://new.example/feed"]
+
+
+def test_gpodder_subscription_change_registers_show_unreviewed(server, tmp_path):
+    auth = ("admin", "letmein")
+    request(server, "POST", "/index.php/apps/gpoddersync/subscription_change/create",
+            auth=auth, json_body={"add": ["https://new.example/feed"], "remove": []})
+    conn = db.connect(tmp_path / "hark.db")
+    row = conn.execute(
+        "SELECT topic_index_enabled FROM shows WHERE feed_url = ?", ("https://new.example/feed",)
+    ).fetchone()
+    assert row["topic_index_enabled"] == 0
+
+
+def test_gpodder_subscription_change_rejects_non_object_body(server):
+    resp, _ = request(server, "POST", "/index.php/apps/gpoddersync/subscription_change/create",
+                      auth=("admin", "letmein"), json_body=["not", "an", "object"])
+    assert resp.status == 400
+
+
+def test_gpodder_episode_action_round_trip(server):
+    auth = ("admin", "letmein")
+    action = {"podcast": "https://a.example/feed", "episode": "https://a.example/ep1.mp3",
+              "action": "play", "guid": "g1", "timestamp": "2026-01-01T00:00:00",
+              "started": 0, "position": 42, "total": 1000}
+    resp, _ = request(server, "POST", "/index.php/apps/gpoddersync/episode_action/create",
+                      auth=auth, json_body=[action])
+    assert resp.status == 200
+
+    resp, body = request(server, "GET", "/index.php/apps/gpoddersync/episode_action?since=0",
+                         auth=auth, json_body=None)
+    assert resp.status == 200
+    data = json.loads(body)
+    assert data["actions"] == [action]
+
+
+def test_gpodder_episode_action_rejects_non_array_body(server):
+    resp, _ = request(server, "POST", "/index.php/apps/gpoddersync/episode_action/create",
+                      auth=("admin", "letmein"), json_body={"not": "an array"})
+    assert resp.status == 400

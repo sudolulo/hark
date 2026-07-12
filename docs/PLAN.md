@@ -210,6 +210,25 @@ the adscrub port, wired in fully once that merge landed.
   "recommended for you" feature exists yet to generate a feed *for*. Revisit once M2's
   discovery signals (or M4's scoring) actually produce a ranked list worth delivering this
   way, rather than building the delivery mechanism first.
+- **hark as a gpodder-sync server, done (0.12.0):** `gpodder_server.py` implements the exact
+  four endpoints AntennaPod's own `NextcloudSyncService.java` calls — confirmed against
+  AntennaPod's actual source (github.com/AntennaPod/AntennaPod) rather than guessed from
+  the server side. Its `login()`/`logout()` are no-ops (no Nextcloud handshake/capabilities
+  probe to fake), so **AntennaPod's existing "Nextcloud" sync setting can point at hark
+  directly, with zero app changes** — this is the "non-invasive" path discussed for a
+  hypothetical AntennaPod fork: the sync half doesn't need a fork at all, just protocol
+  compatibility on hark's side. Auth is HTTP Basic against the same account the web UI
+  uses (`Auth.verify`) — no second credential to manage. A new `subscription_changes`
+  table gives hark its own timestamped add/remove history (`shows` only holds current
+  state), so a repeat sync stays incremental via `since=`. `listen_actions` gained a
+  `started` column (protocol requires it for a valid PLAY action) that the original
+  Nextcloud-*client* path (`cmd_sync_history`) had been silently dropping — both directions
+  now go through one `gpodder_server.record_episode_actions()`.
+  - Still open (a fork, not just protocol compat, would need real Android/Kotlin work —
+    a much heavier commitment than anything else in this project): transparent
+    ad-stripped playback (AntennaPod asking hark for a cut audio URL before falling back
+    to the original) and surfacing hark's discovery/notable-episodes in-app. Not started;
+    revisit only if the sync-server approach alone doesn't get the desired experience.
 
 ## Deployed pipeline automation (2026-07-12)
 

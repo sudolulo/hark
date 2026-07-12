@@ -120,8 +120,11 @@ CREATE INDEX IF NOT EXISTS idx_ad_segments_episode ON ad_segments (episode_id);
 -- topic_id on every page view; without this they're full table scans.
 CREATE INDEX IF NOT EXISTS idx_episode_topics_topic ON episode_topics (topic_id);
 
--- M3: raw AntennaPod listen history, read from Nextcloud's GPodder Sync app
--- (see nextcloud.py). Stored as-is, keyed by feed/episode URL rather than
+-- M3: raw AntennaPod listen history. Populated two ways: read from
+-- Nextcloud's GPodder Sync app (nextcloud.py, hark as *client*) or written
+-- directly by AntennaPod if it's pointed at hark itself (gpodder_server.py,
+-- hark as *server* — see that module's docstring for why no app fork is
+-- needed for this). Stored as-is, keyed by feed/episode URL rather than
 -- hark's own episode_id, since a listen can arrive before hark has ever
 -- ingested that episode (or for a show hark doesn't track at all) —
 -- resolving to episode_id is a query-time join, not a storage-time one.
@@ -132,6 +135,7 @@ CREATE TABLE IF NOT EXISTS listen_actions (
     episode_url  TEXT NOT NULL,
     episode_guid TEXT,
     action       TEXT NOT NULL,
+    started      INTEGER,
     position     INTEGER,
     total        INTEGER,
     occurred_at  TEXT,
@@ -139,6 +143,20 @@ CREATE TABLE IF NOT EXISTS listen_actions (
     UNIQUE (podcast_url, episode_url, action, occurred_at)
 );
 CREATE INDEX IF NOT EXISTS idx_listen_actions_episode_url ON listen_actions (episode_url);
+
+-- gpodder_server.py's own subscription add/remove history (hark as
+-- *server* — AntennaPod POSTs here directly), timestamped so a `since=`
+-- replay (subscription_changes_since) can return only what changed after a
+-- given point, matching the protocol AntennaPod's client expects. Distinct
+-- from `shows` itself, which only holds current state — this is the event
+-- log a repeat sync needs to stay incremental.
+CREATE TABLE IF NOT EXISTS subscription_changes (
+    id          INTEGER PRIMARY KEY,
+    feed_url    TEXT NOT NULL,
+    action      TEXT NOT NULL,
+    occurred_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_subscription_changes_occurred ON subscription_changes (occurred_at);
 
 -- Generic small key/value store for sync cursors — currently just the
 -- GPodder Sync episode_action `since` timestamp (subscriptions are cheap
@@ -164,6 +182,7 @@ _MIGRATIONS = (
      "ALTER TABLE shows ADD COLUMN ad_stripping_enabled INTEGER NOT NULL DEFAULT 1"),
     ("shows", "topic_index_enabled",
      "ALTER TABLE shows ADD COLUMN topic_index_enabled INTEGER NOT NULL DEFAULT 1"),
+    ("listen_actions", "started", "ALTER TABLE listen_actions ADD COLUMN started INTEGER"),
 )
 
 

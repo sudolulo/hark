@@ -31,7 +31,10 @@ from adscrub import cut as ad_cut
 from adscrub import detect as ad_detect
 from adscrub import transcribe as ad_transcribe
 
-from . import __version__, claims, db, discover, extract, ingest, nextcloud, opml, pipeline, resolve, wikidata
+from . import (
+    __version__, claims, db, discover, extract, gpodder_server, ingest,
+    nextcloud, opml, pipeline, resolve, wikidata,
+)
 
 DEFAULT_DB = os.environ.get("HARK_DB", "hark.db")
 DEFAULT_FEEDS = "feeds.txt"
@@ -182,21 +185,10 @@ def cmd_sync_history(args: argparse.Namespace) -> int:
         except httpx.HTTPError as exc:
             print(f"nextcloud: {exc}", file=sys.stderr)
             return 1
-    inserted = 0
-    for a in actions:
-        podcast_url, episode_url = a.get("podcast"), a.get("episode")
-        if not podcast_url or not episode_url:
-            continue  # malformed entry — nothing to key it on
-        cur = conn.execute(
-            """
-            INSERT OR IGNORE INTO listen_actions
-                (podcast_url, episode_url, episode_guid, action, position, total, occurred_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (podcast_url, episode_url, a.get("guid"), a.get("action"),
-             a.get("position"), a.get("total"), a.get("timestamp")),
-        )
-        inserted += cur.rowcount
+    # Same storage path gpodder_server.py uses for actions AntennaPod posts
+    # to hark directly — one place validates/inserts into listen_actions
+    # regardless of which direction the data arrived from.
+    inserted = gpodder_server.record_episode_actions(conn, actions)
     conn.execute(
         """
         INSERT INTO sync_state (key, value) VALUES ('gpodder_episode_action_since', ?)

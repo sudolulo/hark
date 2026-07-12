@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-07-12
+
+### Added
+
+- **hark as a gpodder-sync server** (`gpodder_server.py`): implements the exact API
+  AntennaPod's own sync client calls (`GET`/`POST` on `/index.php/apps/gpoddersync/
+  subscriptions`, `subscription_change/create`, `episode_action`, `episode_action/create`),
+  confirmed against AntennaPod's real source rather than guessed. AntennaPod's Nextcloud
+  sync client does no Nextcloud-specific handshake, so pointing its existing "Nextcloud"
+  sync setting at hark directly works with **zero AntennaPod changes** — no app fork
+  needed for subscription/history sync. HTTP Basic Auth against the same account the web
+  UI already uses.
+- New `subscription_changes` table: a timestamped add/remove event log (`shows` itself
+  only holds current state) so a repeat sync from AntennaPod stays incremental via `since=`.
+
+### Fixed
+
+- `listen_actions` never captured the protocol's `started` field (only `position`/
+  `total`) — AntennaPod's own client requires all three for a play action to round-trip
+  correctly. Added the column (migration for existing databases) and fixed both the
+  Nextcloud-*client* path (`cmd_sync_history`) and the new *server* path to store it;
+  both now go through one shared `gpodder_server.record_episode_actions()` instead of
+  two copies of the same insert logic.
+
 ## [0.11.0] - 2026-07-12
 
 ### Added
