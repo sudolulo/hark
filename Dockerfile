@@ -51,7 +51,15 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ENV PATH="/app/.venv/bin:$PATH" \
     HARK_DB=/app/data/hark.db \
     HARK_AUTH_DB=/app/data/auth.db \
-    HARK_DATA_DIR=/app/data
+    HARK_DATA_DIR=/app/data \
+    HF_HOME=/app/data/.hf-cache
+# `hark` is --no-create-home (see below), so huggingface_hub's default cache
+# location (~/.cache/huggingface) resolves to an unwritable /home/hark. Every
+# Whisper model load then fails to persist its revision-check bookkeeping and
+# re-hits the HF Hub API from scratch — which is what actually exhausted the
+# anonymous rate limit in production, not a missing GPU. Redirecting into
+# /app/data both fixes the write and makes the download persist across
+# container restarts instead of re-fetching every time.
 
 # gosu drops from root to the unprivileged `hark` user after the entrypoint
 # fixes ownership of /app/data — Docker creates bind mounts and anonymous

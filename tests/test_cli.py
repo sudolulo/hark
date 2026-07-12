@@ -250,6 +250,31 @@ def test_transcribe_skips_disabled_shows(tmp_path, capsys):
     assert "pending episodes: 1" in capsys.readouterr().out  # only the enabled show's episode
 
 
+def test_transcribe_aborts_after_consecutive_failures(tmp_path, capsys, monkeypatch):
+    path = tmp_path / "t.db"
+    conn = db.connect(path)
+    conn.execute("INSERT INTO shows (query) VALUES ('Show A')")
+    for i in range(7):
+        conn.execute(
+            "INSERT INTO episodes (show_id, guid, title, audio_url) VALUES (1, ?, ?, ?)",
+            (f"g{i}", f"Ep {i}", f"http://a/{i}.mp3"),
+        )
+    conn.commit()
+    conn.close()
+
+    def failing_transcribe_episode(conn, ep, client, model_size=None):
+        raise OSError("rate limited")
+
+    monkeypatch.setattr(ad_transcribe, "transcribe_episode", failing_transcribe_episode)
+
+    rc = cli.main(["--db", str(path), "transcribe"])
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert captured.out.count("FAIL") == 5  # aborted after 5 consecutive failures, not all 7
+    assert "aborting after 5 consecutive failures" in captured.err
+    assert "transcribed 0 episode(s) (5 failed, 7 still pending)" in captured.out
+
+
 def test_detect_ads_with_nothing_pending_fails(tmp_path, capsys):
     rc = cli.main(["--db", str(tmp_path / "t.db"), "detect-ads"])
     assert rc == 1

@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-07-12
+
+### Fixed
+
+- **The deployed `transcribe` container never actually transcribed anything.**
+  The `hark` user is created `--no-create-home`, so huggingface_hub's default
+  cache location (`~/.cache/huggingface`) resolved to an unwritable
+  `/home/hark`. Every model load failed to persist its revision-check
+  bookkeeping and re-hit the HF Hub API from scratch on every episode,
+  which exhausted the anonymous rate limit within seconds of container
+  start and kept it exhausted — 7+ hours stuck at 0 completed episodes
+  despite the service reporting "running". Fixed by pointing `HF_HOME` at
+  `/app/data/.hf-cache`, which is both writable by `hark` and persists
+  across container restarts.
+- **`hark transcribe` had no consecutive-failure circuit breaker**, unlike
+  `hark detect-ads`. A rate limit or outage burned through the entire
+  pending list every 5-minute cycle, re-triggering the same failure on
+  every episode instead of backing off. Now aborts after 5 consecutive
+  failures, matching `cmd_detect_ads`.
+
 ## [0.9.0] - 2026-07-11
 
 Post-0.8.0 audit pass (10-angle review of everything since 0.4.0) — found and

@@ -150,20 +150,31 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 1
 
-    errors = 0
+    # Consecutive-failure abort mirrors cmd_detect_ads: a transient outage
+    # (rate limit, network) otherwise burns through the entire pending list
+    # every run, guaranteed to fail on every remaining episode.
+    ok = errors = 0
+    consecutive_errors = 0
+    max_consecutive_errors = 5
     with make_client() as client:
         for ep in pending:
             try:
                 path = ad_transcribe.transcribe_episode(conn, ep, client, model_size=args.model)
             except (httpx.HTTPError, OSError) as exc:
                 errors += 1
+                consecutive_errors += 1
                 print(f"  FAIL  {ep['title'] or ''}: {exc}")
+                if consecutive_errors >= max_consecutive_errors:
+                    print(f"  aborting after {consecutive_errors} consecutive failures", file=sys.stderr)
+                    break
                 continue
+            ok += 1
+            consecutive_errors = 0
             print(f"  ok    {ep['title'] or ''} -> {path}")
     remaining_source = claims.episodes_needing_transcription(conn) if args.cross_show_only \
         else ad_transcribe.pending_episodes(conn)
     remaining = len(_filter_enabled(remaining_source, enabled))
-    print(f"transcribed {len(pending) - errors} episode(s) ({errors} failed, {remaining} still pending)")
+    print(f"transcribed {ok} episode(s) ({errors} failed, {remaining} still pending)")
     return 1 if errors else 0
 
 
