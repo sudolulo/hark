@@ -384,6 +384,98 @@ def test_detect_ads_skips_disabled_shows(tmp_path, capsys):
     assert "pending episodes: 0" in capsys.readouterr().out
 
 
+def test_load_ad_detections_stores_and_marks_processed(tmp_path, capsys):
+    path = tmp_path / "t.db"
+    transcript_path = tmp_path / "t.json"
+    transcript_path.write_text(json.dumps(
+        [{"start": 0.0, "end": 5.0, "text": "a"}, {"start": 5.0, "end": 8.0, "text": "ad copy"}]
+    ))
+    batch = tmp_path / "batch.jsonl"
+    batch.write_text(json.dumps(
+        {"episode_id": 1, "ad_spans": [{"start_segment": 1, "end_segment": 1, "reason": "sponsor read"}]}
+    ) + "\n")
+    conn = db.connect(path)
+    conn.execute("INSERT INTO shows (query) VALUES ('Show A')")
+    conn.execute(
+        "INSERT INTO episodes (show_id, guid, title, transcript_path) VALUES (1, 'g1', 'Ep One', ?)",
+        (str(transcript_path),),
+    )
+    conn.commit()
+    conn.close()
+
+    rc = cli.main(["--db", str(path), "load-ad-detections", str(batch)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "ok    Ep One: 1 ad span(s) loaded" in out
+    assert "loaded 1 episode(s) (0 failed)" in out
+
+    conn = db.connect(path)
+    row = conn.execute("SELECT llm_detected_at FROM episodes WHERE id = 1").fetchone()
+    assert row["llm_detected_at"] is not None
+    span = conn.execute(
+        "SELECT start_second, end_second, source, reason FROM ad_segments WHERE episode_id = 1"
+    ).fetchone()
+    assert (span["start_second"], span["end_second"]) == (5.0, 8.0)
+    assert span["source"] == "llm"
+    assert span["reason"] == "sponsor read"
+
+
+def test_load_ad_detections_unknown_episode_isolates_failure(tmp_path, capsys):
+    path = tmp_path / "t.db"
+    batch = tmp_path / "batch.jsonl"
+    batch.write_text(json.dumps({"episode_id": 999, "ad_spans": []}) + "\n")
+    db.connect(path).close()
+
+    rc = cli.main(["--db", str(path), "load-ad-detections", str(batch)])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "FAIL  episode 999: no such episode with a transcript" in out
+    assert "loaded 0 episode(s) (1 failed)" in out
+
+
+def test_load_ad_detections_skips_untranscribed_episode(tmp_path, capsys):
+    path = tmp_path / "t.db"
+    batch = tmp_path / "batch.jsonl"
+    batch.write_text(json.dumps({"episode_id": 1, "ad_spans": []}) + "\n")
+    conn = db.connect(path)
+    conn.execute("INSERT INTO shows (query) VALUES ('Show A')")
+    conn.execute("INSERT INTO episodes (show_id, guid, title) VALUES (1, 'g1', 'Ep One')")
+    conn.commit()
+    conn.close()
+
+    rc = cli.main(["--db", str(path), "load-ad-detections", str(batch)])
+    assert rc == 1
+    assert "no such episode with a transcript" in capsys.readouterr().out
+
+
+def test_load_ad_detections_drops_out_of_range_span(tmp_path, capsys):
+    path = tmp_path / "t.db"
+    transcript_path = tmp_path / "t.json"
+    transcript_path.write_text(json.dumps([{"start": 0.0, "end": 5.0, "text": "a"}]))
+    batch = tmp_path / "batch.jsonl"
+    batch.write_text(json.dumps(
+        {"episode_id": 1, "ad_spans": [{"start_segment": 0, "end_segment": 5, "reason": "bad index"}]}
+    ) + "\n")
+    conn = db.connect(path)
+    conn.execute("INSERT INTO shows (query) VALUES ('Show A')")
+    conn.execute(
+        "INSERT INTO episodes (show_id, guid, title, transcript_path) VALUES (1, 'g1', 'Ep One', ?)",
+        (str(transcript_path),),
+    )
+    conn.commit()
+    conn.close()
+
+    rc = cli.main(["--db", str(path), "load-ad-detections", str(batch)])
+    assert rc == 0
+    assert "ok    Ep One: 0 ad span(s) loaded" in capsys.readouterr().out
+
+
+def test_load_ad_detections_missing_file_fails(tmp_path, capsys):
+    rc = cli.main(["--db", str(tmp_path / "t.db"), "load-ad-detections", str(tmp_path / "nope.jsonl")])
+    assert rc == 1
+    assert "cannot read" in capsys.readouterr().err
+
+
 def test_cut_skips_disabled_shows(tmp_path, capsys):
     path = tmp_path / "t.db"
     conn = db.connect(path)

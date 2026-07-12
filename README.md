@@ -23,22 +23,24 @@ episode's own page.
 
 The deployed instance runs its own pipeline unattended: subscription sync, ingest,
 canonicalization, chapter-scanning, transcription, and ad-cutting all run on a
-schedule with no manual steps. Topic extraction and claims comparison — the two
-steps that need real judgment, not just fetching/matching — run the same way but as
-a scheduled Claude agent instead of a paid API call (`claude-fleet`'s
-`jobs/agents/hark-pipeline.md`); this project has never used `$ANTHROPIC_API_KEY`
-and isn't starting now. See docs/PLAN.md's "Deployed pipeline automation" section.
+schedule with no manual steps. Topic extraction, claims comparison, and ad-span
+detection — the three steps that need real judgment, not just fetching/matching —
+run the same way but as a scheduled Claude agent instead of a paid API call
+(`claude-fleet`'s `jobs/agents/hark-pipeline.md`); this project has never used
+`$ANTHROPIC_API_KEY` and isn't starting now. See docs/PLAN.md's "Deployed pipeline
+automation" section.
 
-See `docs/PLAN.md` for milestones. Current state (0.12.0): feed resolution,
+See `docs/PLAN.md` for milestones. Current state (0.13.0): feed resolution,
 episode ingest, LLM topic extraction with Wikidata canonicalization, the
 cross-show topic index, a full web UI, adscrub-backed ad-stripping (with a
-per-show on/off toggle and feed URL, both from the show page), cross-show
-claims comparison, M2 discovery (related shows/topics by co-occurrence,
-candidate-show search, and an interim notable-episodes page), M3's
-AntennaPod loop (Nextcloud gpodder subscription + listen-history sync, OPML
-import fallback, and hark speaking the gpodder-sync protocol itself so
-AntennaPod can point directly at it — no app fork needed), and a per-show
-topic-index toggle (new shows start excluded from extraction until
+per-show on/off toggle and feed URL, both from the show page; ad-span
+detection is now session-as-X automated too, not just chapter-marker
+scanning), cross-show claims comparison, M2 discovery (related shows/topics
+by co-occurrence, candidate-show search, and an interim notable-episodes
+page), M3's AntennaPod loop (Nextcloud gpodder subscription + listen-history
+sync, OPML import fallback, and hark speaking the gpodder-sync protocol
+itself so AntennaPod can point directly at it — no app fork needed), and a
+per-show topic-index toggle (new shows start excluded from extraction until
 reviewed — most subscriptions aren't subject-per-episode genre shows) —
 deployed live.
 
@@ -91,6 +93,7 @@ uv run hark chapters           # scan chapter markers for ad spans (free — no 
 uv run hark transcribe         # Whisper the rest
 uv run hark transcribe --cross-show-only  # priority subset: episodes on topics 2+ shows cover
 uv run hark detect-ads         # LLM ad-span classification (needs $ANTHROPIC_API_KEY)
+uv run hark load-ad-detections out.jsonl  # pre-computed (batch runs, no API key needed)
 uv run hark cut                # ffmpeg out the ad spans
 uv run hark fsck --fix         # clear transcript_path pointers whose file no longer exists
 

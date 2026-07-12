@@ -235,8 +235,8 @@ the adscrub port, wired in fully once that merge landed.
 The `transcribe` service's compose command now runs the *entire* free pipeline
 unattended, not just transcription:
 - **Once at container start:** `sync-subscriptions`, `sync-history`.
-- **Every ~60-90s cycle:** `fsck --fix`, load any dropped-in comparisons/extractions
-  batch, `transcribe --cross-show-only --limit 5`, `cut`.
+- **Every ~60-90s cycle:** `fsck --fix`, load any dropped-in comparisons/extractions/
+  ad-detections batch, `transcribe --cross-show-only --limit 5`, `cut`.
 - **Every ~30 minutes** (gated by a `.last_slow_cycle` marker file's mtime, not every
   cycle — 73+ shows' RSS feeds don't need refetching every 60-90s): `ingest`, `canon`,
   `chapters`.
@@ -245,21 +245,54 @@ A 2026-07-12 gpodder sync brought in 67 shows' full back catalogs in one shot
 (~2,200 → ~24,000 total episodes), which is why `ingest` alone now matters enough to
 automate — most of that corpus was previously invisible to hark entirely.
 
-**Extraction and claims comparison stay session-as-X** (no `$ANTHROPIC_API_KEY`
-anywhere in this project, deliberately — see M1's history above) but are no longer
-manual-only: `claude-fleet`'s `jobs/agents/hark-pipeline.md` is a scheduled unattended
-agent (hourly, `systemd/fleet-hark-pipeline.timer`) that reads hark's production db
-directly (same read-only shared-mount access this session used manually), does the
-extraction/comparison judgment itself as a Claude agent, and drops the output as
-`pending-extractions.jsonl`/`pending-comparisons.jsonl` for the deployed `transcribe`
-service to pick up and load — same mechanism, just scheduled instead of ad hoc. Batch
-sizes (40 episodes in sub-batches of ~15, 3 topics per run) and the hourly cadence are
-sized for the post-sync backlog; revisit once it's actually cleared. Two real bugs found
-running this the first time, both fixed in the job file: `claude -p`'s headless sandbox
-blocks `cd`/`ls` outside the launch directory (use `uv run --project`/`test -f` instead,
-matching `board-minutes.md`'s own absolute-path style), and a single very large tool
-result (querying 150 episodes in one shot) correlated with the job dying mid-run —
-smaller sub-batches avoid it.
+**Extraction, claims comparison, and ad-span detection all stay session-as-X** (no
+`$ANTHROPIC_API_KEY` anywhere in this project, deliberately — see M1's history above)
+but are no longer manual-only: `claude-fleet`'s `jobs/agents/hark-pipeline.md` is a
+scheduled unattended agent (hourly, `systemd/fleet-hark-pipeline.timer`, `Host=code` —
+the earlier install had it sitting on the fleet primary with nothing enabled to run it,
+so it silently never fired; see below) that reads hark's production db directly
+(same read-only shared-mount access this session used manually), does the
+extraction/comparison/detection judgment itself as a Claude agent, and drops the
+output as `pending-extractions.jsonl`/`pending-comparisons.jsonl`/
+`pending-ad-detections.jsonl` for the deployed `transcribe` service to pick up and
+load — same mechanism, just scheduled instead of ad hoc. Batch sizes (40 episodes in
+sub-batches of ~15 for extraction, 3 topics for comparison, ~10 episodes for
+ad-detection) and the hourly cadence are sized for the post-sync backlog; revisit once
+it's actually cleared. Two real bugs found running this the first time, both fixed in
+the job file: `claude -p`'s headless sandbox blocks `cd`/`ls` outside the launch
+directory (use `uv run --project`/`test -f` instead, matching `board-minutes.md`'s own
+absolute-path style), and a single very large tool result (querying 150 episodes in
+one shot) correlated with the job dying mid-run — smaller sub-batches avoid it.
+
+**Ad-span detection (0.13.0)** closes the gap where production ad-stripping was
+silently chapter-markers-only: `detect-ads` (the LLM-over-transcript classifier —
+the whole reason adscrub exists, since chapter markers alone miss host-read/
+dynamically-inserted ads) had never been added to the fast loop, since it needs
+`$ANTHROPIC_API_KEY` like `extract`/`compare` did — but unlike those two, it never
+got the session-as-X treatment either, so it just never ran at all. Meanwhile
+`transcribe --cross-show-only` *was* running automatically, so transcripts piled up
+in `llm_detected_at IS NULL` limbo indefinitely. Fixed the same way extraction/compare
+were: a third `hark-pipeline.md` section reads each pending episode's transcript
+(the same numbered/timestamped segment format `ClaudeAdDetector`'s own prompt uses)
+and picks ad-span segment indices, `hark load-ad-detections` stores them via
+`adscrub.detect.detect_episode()`/`spans_from_segment_indices()` (adscrub 0.5.0)
+unchanged. **Not a genuinely real-time ("on the fly") path** — a fresh episode needs
+transcription *and* LLM classification before any span exists, both too slow to do
+synchronously at audio-serve time — so this stays a pre-computed batch step folded
+into the same hourly cadence as extraction/comparison rather than a separate tighter
+timer (no case yet for that added complexity). End-to-end lag: up to an hour for
+detection to run, then within the next ~60-90s fast-loop tick for `cut` to act on it —
+the best available without paying for a live API.
+
+**Verifying "automatic" actually means unattended, not just present:** the timer can
+be installed and enabled while never having actually fired — `systemctl --user
+list-timers` showing a near-future trigger only proves it's *scheduled*, not that a
+real run has completed successfully end to end. `systemctl --user start
+fleet-agent@hark-pipeline.service` runs exactly what the timer would, on demand;
+check `/mnt/Tap/apps/hark/data/loaded-*-<timestamp>.jsonl` mtimes afterward (matched
+against the drop-in file's own initial `pending-*` write, which the fast loop
+consumes within ~90s) to confirm the whole chain — agent run → drop-in file → loaded
+by the deployed pipeline — actually completed, not just that pieces of it exist.
 
 **Not every synced show is worth extracting from — 0.11.0's `topic_index_enabled`
 scopes this.** The 67 shows the 2026-07-12 gpodder sync added are mostly not
@@ -292,7 +325,9 @@ Resolve their real feed URLs via iTunes Search API at runtime — do not hand-co
   `nvidia` runtime is registered — see the adscrub dependency section above.
 - ~~How to make the adscrub path dependency work in the Docker build~~ Resolved
   2026-07-11: `scripts/build-image.sh`, see the ad-stripping section above.
-- `hark detect-ads` currently defaults to `claude-opus-4-8`; revisit cost vs.
-  accuracy on ad-span boundaries once run against real transcripts.
+- `hark detect-ads` (the live-API path, still available for manual/local use) defaults
+  to `claude-opus-4-8`; revisit accuracy on ad-span boundaries — the deployed instance
+  uses the session-as-X `load-ad-detections` path instead (0.13.0), so this mainly
+  matters if the live path ever gets used for real.
 - ~~When to actually wire the gpodder/Nextcloud subscription sync~~ Resolved 2026-07-12:
   M3 shipped in 0.10.0 — see above.

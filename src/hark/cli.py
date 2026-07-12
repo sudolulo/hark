@@ -1,6 +1,7 @@
 """hark command line: resolve, ingest, sync-subscriptions, sync-history,
-import-opml, discover, extract, chapters, transcribe, detect-ads, cut, fsck,
-compare, load-comparisons, stats, topics, who, web.
+import-opml, discover, extract, chapters, transcribe, detect-ads,
+load-ad-detections, cut, fsck, compare, load-comparisons, stats, topics, who,
+web.
 
 chapters/transcribe/detect-ads/cut call straight into the `adscrub` package
 (a separate product, depended on as a library — see pyproject.toml) rather
@@ -376,6 +377,57 @@ def cmd_detect_ads(args: argparse.Namespace) -> int:
     remaining = len(_filter_enabled(ad_detect.pending_episodes(conn), enabled))
     print(f"detected across {ok} episode(s) ({errors} failed, {remaining} still pending)")
     return 1 if errors else 0
+
+
+class _PrecomputedDetector:
+    """Adapts session-as-X-produced {start_segment, end_segment, reason} spans
+    for ONE episode to the AdSpanDetector protocol, so detect_episode() below
+    runs unchanged — same index-grounding (adscrub's spans_from_segment_indices)
+    and llm_detected_at marking a live ClaudeAdDetector run gets, just fed
+    pre-computed judgment instead of calling the API. Mirrors extract/compare's
+    own load-precomputed idiom (pipeline.load_extractions/claims.load_comparisons)."""
+
+    def __init__(self, raw_spans: list[dict]):
+        self._raw_spans = raw_spans
+
+    def detect(self, transcript: list[dict]) -> list[ad_detect.DetectedAdSpan]:
+        return ad_detect.spans_from_segment_indices(transcript, self._raw_spans)
+
+
+def cmd_load_ad_detections(args: argparse.Namespace) -> int:
+    import json
+
+    conn = db.connect(args.db)
+    try:
+        with open(args.file, encoding="utf-8") as fh:
+            records = [json.loads(line) for line in fh if line.strip()]
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"cannot read {args.file}: {exc}", file=sys.stderr)
+        return 1
+
+    ok = failed = 0
+    for rec in records:
+        episode_id = rec.get("episode_id")
+        row = conn.execute(
+            "SELECT * FROM episodes WHERE id = ? AND transcript_path IS NOT NULL", (episode_id,)
+        ).fetchone() if episode_id is not None else None
+        if row is None:
+            failed += 1
+            print(f"  FAIL  episode {episode_id!r}: no such episode with a transcript")
+            continue
+        try:
+            found = ad_detect.detect_episode(
+                conn, row, _PrecomputedDetector(rec.get("ad_spans", []))
+            )
+        except Exception as exc:  # noqa: BLE001 — per-record isolation, matches cmd_load
+            conn.rollback()
+            failed += 1
+            print(f"  FAIL  {row['title'] or ''}: {exc}")
+            continue
+        ok += 1
+        print(f"  ok    {row['title'] or ''}: {found} ad span(s) loaded")
+    print(f"loaded {ok} episode(s) ({failed} failed)")
+    return 1 if failed else 0
 
 
 def cmd_cut(args: argparse.Namespace) -> int:
@@ -765,6 +817,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true",
                    help="only report how many episodes are pending")
     p.set_defaults(func=cmd_detect_ads)
+
+    p = sub.add_parser(
+        "load-ad-detections",
+        help="load pre-computed ad-span detections JSONL (batch runs, session output)",
+    )
+    p.add_argument(
+        "file",
+        help="JSONL: {episode_id, ad_spans: [{start_segment, end_segment, reason}]}",
+    )
+    p.set_defaults(func=cmd_load_ad_detections)
 
     p = sub.add_parser("cut", help="cut ad spans out of episode audio with ffmpeg")
     p.add_argument("--limit", type=int, help="max episodes to process this run")

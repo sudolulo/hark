@@ -475,7 +475,7 @@ class App:
             "claims unique to one show, among topics with a claims comparison loaded.</p>" +
             (f'<table><tr><th>topic</th><th>shared claims</th><th>unique claims</th>'
              f'<th>genres</th></tr>{contested_html}</table>' if contested else
-             '<p class="dim">No claims comparisons loaded yet (<code>hark compare</code>).</p>') +
+             '<p class="dim">No claims comparisons loaded yet.</p>') +
             "<h2>Rare coverage</h2>" +
             (f'<p class="dim">Episodes covering hark\'s least-common genres — '
              f"{', '.join(rare_genres)}.</p>"
@@ -540,8 +540,7 @@ class App:
             )
         elif len(shows_transcribed) >= 2:
             compare_note = (
-                '<p class="pending">Transcribed by 2+ shows but not compared yet '
-                "(<code>hark compare</code>).</p>"
+                '<p class="pending">Transcribed by 2+ shows but not compared yet.</p>'
             )
         body = (
             f"<h1>{esc(topic['label'])}{qid}</h1><p>{pills}</p>"
@@ -840,8 +839,7 @@ class App:
             elif episode["transcript_path"] is None:
                 body += '<p class="dim">This episode hasn’t been transcribed yet.</p>'
             elif shows_transcribed >= 2:
-                body += ('<p class="dim">Transcribed by 2+ shows but not compared yet '
-                         '(<code>hark compare</code>).</p>')
+                body += '<p class="dim">Transcribed by 2+ shows but not compared yet.</p>'
             else:
                 body += '<p class="dim">Only this show has covered this topic so far.</p>'
         return page(episode["title"], body, user["username"])
@@ -1090,7 +1088,7 @@ def pipeline_status_html(transcribe_pending: int, detect_pending: int,
     if compare_pending:
         lines.append(
             f'<p class="pending">{plural(compare_pending, "topic")} ready for cross-show '
-            f'claims comparison (<code>hark compare</code>).</p>'
+            f'claims comparison.</p>'
         )
     return f'<div class="status">{"".join(lines)}</div>'
 

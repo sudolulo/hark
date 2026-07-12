@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-07-12
+
+### Added
+
+- `hark load-ad-detections`: loads pre-computed ad-span detections (session-as-X,
+  same idiom as `load`/`load-comparisons`) — no `$ANTHROPIC_API_KEY` needed. Ad-span
+  classification (the LLM-over-transcript step that catches host-read/dynamically-
+  inserted ads chapter markers can't) had never actually been automated: the deployed
+  pipeline's fast loop only ran `transcribe`/`cut`, so production ad-stripping was
+  chapter-markers-only this whole time even though transcripts were piling up
+  unprocessed (`llm_detected_at IS NULL`). `claude-fleet`'s `hark-pipeline.md` fleet
+  job now has a third section that reads each pending episode's transcript directly
+  and does the same segment-index judgment `ClaudeAdDetector` would, dropping
+  `pending-ad-detections.jsonl` for the deployed loop to pick up — same drop-in
+  mechanism as extraction/comparison.
+- `_PrecomputedDetector` (cli.py): adapts a batch of `{start_segment, end_segment,
+  reason}` spans to adscrub's `AdSpanDetector` protocol so `load-ad-detections` reuses
+  `detect_episode()`/`spans_from_segment_indices()` (adscrub 0.5.0) unchanged — same
+  index-grounding and `llm_detected_at` marking a live `ClaudeAdDetector` run gets.
+
+### Fixed
+
+- Dashboard/topic/episode pages told the owner to run `hark compare` — a CLI command
+  not exposed anywhere in the web UI — to get a claims comparison. Comparison has been
+  session-as-X automated since 0.12.0; the copy just never caught up. Now just reports
+  status ("not compared yet" / pending count) with no command the viewer can't actually
+  run.
+
+### Note
+
+- **On "on the fly" ad detection:** true real-time (detect-during-serve) isn't
+  feasible — a fresh episode needs Whisper transcription *and* an LLM classification
+  pass before any span exists to cut, both multi-second-to-minute operations, so doing
+  either synchronously at request time would stall audio playback. Ad-detection stays
+  a pre-computed batch step like extraction/comparison, folded into the same hourly
+  fleet-agent run rather than a separate tighter-cadence job (no case yet for the added
+  complexity of a second timer). End-to-end lag is bounded by that hourly cadence plus
+  whatever's left of the ~60-90s fast loop's next `cut` pass — much tighter than the
+  previous "never, unless someone runs `detect-ads` by hand with a real API key."
+
 ## [0.12.0] - 2026-07-12
 
 ### Added

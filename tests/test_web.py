@@ -296,7 +296,6 @@ def test_topic_page_shows_comparison_pending_note(tmp_path):
         resp, body = request(srv, "GET", "/topic/1", cookie=cookie)
         assert resp.status == 200
         assert "not compared yet" in body
-        assert "hark compare" in body
     finally:
         srv.shutdown()
 
@@ -898,7 +897,6 @@ def test_episode_page_notes_by_comparison_state(tmp_path):
         resp, body = request(srv, "GET", "/episode/3", cookie=cookie)
         assert resp.status == 200
         assert "not compared yet" in body
-        assert "hark compare" in body
     finally:
         srv.shutdown()
 
