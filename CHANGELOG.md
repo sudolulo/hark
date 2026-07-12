@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-07-12
+
+### Added
+
+- **Per-show topic-index toggle** (`shows.topic_index_enabled`, show page): a show not yet
+  reviewed for genre relevance is now excluded from topic extraction entirely, separate
+  from `ad_stripping_enabled` (which is meant to cover *every* subscription — different
+  question). Motivated directly by the 2026-07-12 gpodder sync: most of the 67 shows it
+  added aren't subject-per-episode genre shows at all (news, politics, personal finance),
+  and running extraction on one just burns session-as-X effort for a guaranteed-empty
+  result every time. Defaults **on** for hand-curated shows (`hark resolve`), **off** for
+  anything added via the bare feed-URL path (`sync-subscriptions`, `import-opml`,
+  `discover --add`) pending a look at the show page. A migration backfills existing
+  databases retroactively (query == feed_url is how a bare-row show is identified after
+  the fact — see db.py's `_backfill_topic_index_enabled`).
+- `/shows` flags unreviewed shows with a count banner and a per-row pill, so the owner can
+  actually find which of a large sync batch need a decision.
+
+### Deployed pipeline (compose config only — see docs/PLAN.md's "Deployed pipeline
+automation" section for the full picture)
+
+- The `transcribe` service's compose command now also runs `ingest`/`canon`/`chapters`/
+  `cut` — `ingest` and `canon` every ~30 minutes (gated by a marker file, not every
+  60-90s cycle), `chapters`/`cut` alongside them.
+- New `claude-fleet` scheduled agent job (`jobs/agents/hark-pipeline.md`, hourly): does
+  topic extraction and claims comparison as a Claude agent directly (session-as-X, still
+  no `$ANTHROPIC_API_KEY` anywhere in this project), dropping `pending-extractions.jsonl`/
+  `pending-comparisons.jsonl` for the deployed service to load — same drop-in mechanism
+  0.10.0 built for manually-generated comparisons, now scheduled instead of ad hoc.
+
 ## [0.10.0] - 2026-07-12
 
 ### Added

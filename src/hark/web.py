@@ -275,9 +275,12 @@ class App:
         conn.row_factory = sqlite3.Row
         return conn
 
-    def toggle_ad_stripping(self, show_id: int) -> bool | None:
-        """Flip a show's ad_stripping_enabled flag. Returns the new state, or
-        None if the show doesn't exist.
+    def _toggle_show_flag(self, show_id: int, column: str) -> bool | None:
+        """Flip a boolean column on `shows` (ad_stripping_enabled,
+        topic_index_enabled). Returns the new state, or None if the show
+        doesn't exist. `column` is only ever one of the two hardcoded
+        literals below — never user input — so building the UPDATE with an
+        f-string here doesn't open a SQL-injection surface.
 
         Deliberately the only write path from web.py into hark.db (every
         other mutation here lives in auth.db instead — see module docstring:
@@ -294,18 +297,23 @@ class App:
         conn.row_factory = sqlite3.Row
         try:
             cur = conn.execute(
-                "UPDATE shows SET ad_stripping_enabled = 1 - ad_stripping_enabled WHERE id = ?",
-                (show_id,),
+                f"UPDATE shows SET {column} = 1 - {column} WHERE id = ?", (show_id,)
             )
             if cur.rowcount == 0:
                 return None
             conn.commit()
             new_state = conn.execute(
-                "SELECT ad_stripping_enabled FROM shows WHERE id = ?", (show_id,)
-            ).fetchone()["ad_stripping_enabled"]
+                f"SELECT {column} FROM shows WHERE id = ?", (show_id,)
+            ).fetchone()[column]
             return bool(new_state)
         finally:
             conn.close()
+
+    def toggle_ad_stripping(self, show_id: int) -> bool | None:
+        return self._toggle_show_flag(show_id, "ad_stripping_enabled")
+
+    def toggle_topic_index(self, show_id: int) -> bool | None:
+        return self._toggle_show_flag(show_id, "topic_index_enabled")
 
     def cookie_attrs(self, token: str, max_age: int) -> str:
         secure = "; Secure" if self.cookie_secure else ""
@@ -603,7 +611,8 @@ class App:
         try:
             rows = conn.execute(
                 """
-                SELECT s.id, COALESCE(s.title, s.query) AS name, COUNT(e.id) AS episodes,
+                SELECT s.id, COALESCE(s.title, s.query) AS name, s.topic_index_enabled,
+                       COUNT(e.id) AS episodes,
                        COALESCE(SUM(e.extracted_at IS NOT NULL), 0) AS extracted,
                        MAX(e.pubdate) AS latest
                 FROM shows s LEFT JOIN episodes e ON e.show_id = s.id
@@ -612,14 +621,21 @@ class App:
             ).fetchall()
         finally:
             conn.close()
+        unreviewed = sum(1 for r in rows if not r["topic_index_enabled"])
+        note = (
+            f'<p class="pending">{plural(unreviewed, "show")} not yet reviewed for the topic '
+            "index — open one to enable it there.</p>"
+        ) if unreviewed else ""
         table = "".join(
-            f"<tr><td><a href='/show/{r['id']}'>{esc(r['name'])}</a></td>"
+            f"<tr><td><a href='/show/{r['id']}'>{esc(r['name'])}</a>"
+            + ('' if r["topic_index_enabled"] else ' <span class="pill">unreviewed</span>') +
+            "</td>"
             f"<td class='num'>{r['episodes']}</td>"
             f"<td class='num{'' if r['extracted'] == r['episodes'] else ' pending'}'>{r['extracted']}</td>"
             f"<td class='dim'>{esc((r['latest'] or '')[:10])}</td></tr>"
             for r in rows
         )
-        body = ("<h1>shows</h1><table><tr><th>show</th><th>episodes</th>"
+        body = ("<h1>shows</h1>" + note + "<table><tr><th>show</th><th>episodes</th>"
                 f"<th>indexed</th><th>latest</th></tr>{table}</table>")
         return page("shows", body, user["username"])
 
@@ -629,7 +645,8 @@ class App:
         try:
             show = conn.execute(
                 """
-                SELECT id, COALESCE(title, query) AS name, feed_token, ad_stripping_enabled
+                SELECT id, COALESCE(title, query) AS name, feed_token,
+                       ad_stripping_enabled, topic_index_enabled
                 FROM shows WHERE id = ?
                 """,
                 (show_id,),
@@ -676,6 +693,10 @@ class App:
                 """,
                 (show_id,),
             ).fetchone()
+            extracted_count = conn.execute(
+                "SELECT COUNT(*) FROM episodes WHERE show_id = ? AND extracted_at IS NOT NULL",
+                (show_id,),
+            ).fetchone()[0]
             related = related_shows(conn, show_id)
         finally:
             conn.close()
@@ -706,6 +727,22 @@ class App:
             f'<button class="ghost">{toggle_label}</button></form>'
             "</div>"
         )
+        topic_index_on = bool(show["topic_index_enabled"])
+        topic_toggle_label = "Remove from topic index" if topic_index_on else "Add to topic index"
+        topic_index_section = (
+            '<div class="status">'
+            f'<p>Topic index for this show: <strong>{"enabled" if topic_index_on else "disabled"}</strong>'
+            + ("" if topic_index_on else
+               ' — episodes won\'t be checked for a real-world subject until enabled. New shows '
+               'start disabled until reviewed (most subscriptions aren\'t subject-per-episode '
+               'genre shows, and extraction on one that isn\'t just burns effort for an empty '
+               'result every time).') +
+            "</p>"
+            f'<p class="dim">{extracted_count}/{total_episodes} extracted.</p>'
+            f'<form method="post" action="/show/{show_id}/topic-index">'
+            f'<button class="ghost">{topic_toggle_label}</button></form>'
+            "</div>"
+        )
         related_html = ""
         if related:
             pills = " ".join(
@@ -718,6 +755,7 @@ class App:
             f"<h1>{esc(show['name'])}</h1>"
             f"<h2>{plural(total_episodes, 'episode')}, {plural(topic_count, 'topic')} covered</h2>"
             f"{adblock_section}"
+            f"{topic_index_section}"
             f"{related_html}"
             f"<table><tr><th>episode</th><th>date</th><th>topics</th></tr>{rows_html}</table>{pager}"
         )
@@ -1342,6 +1380,14 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError:
                     return self.not_found(user)
                 if app.toggle_ad_stripping(show_id) is None:
+                    return self.not_found(user)
+                return self.redirect(f"/show/{show_id}")
+            if route.startswith("/show/") and route.endswith("/topic-index"):
+                try:
+                    show_id = int(route.removeprefix("/show/").removesuffix("/topic-index"))
+                except ValueError:
+                    return self.not_found(user)
+                if app.toggle_topic_index(show_id) is None:
                     return self.not_found(user)
                 return self.redirect(f"/show/{show_id}")
         except sqlite3.OperationalError:

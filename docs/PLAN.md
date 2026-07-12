@@ -201,11 +201,6 @@ the adscrub port, wired in fully once that merge landed.
   refetch every run would be wasteful.
 - **OPML import fallback:** `hark import-opml <file>` — same `add_show_by_feed_url()` path,
   for a one-off OPML export instead of (or alongside) the live Nextcloud account.
-- **Deployed pipeline integration:** the `transcribe` service's compose command runs
-  `sync-subscriptions`/`sync-history` once at container start (before the fsck/transcribe/
-  compare loop) rather than every cycle — subscriptions change rarely enough that
-  once-per-restart is a reasonable cadence for v1; a real periodic mechanism (cron-style
-  interval independent of restarts) is a cheap follow-up if that ever proves too coarse.
 - **TLS:** the deployed Nextcloud instance uses a self-signed cert (LAN-only service) —
   `--nextcloud-insecure`/`$HARK_NEXTCLOUD_INSECURE` opts out of verification for that one
   connection specifically (`make_nextcloud_client()`, separate from `make_client()`, which
@@ -215,6 +210,46 @@ the adscrub port, wired in fully once that merge landed.
   "recommended for you" feature exists yet to generate a feed *for*. Revisit once M2's
   discovery signals (or M4's scoring) actually produce a ranked list worth delivering this
   way, rather than building the delivery mechanism first.
+
+## Deployed pipeline automation (2026-07-12)
+
+The `transcribe` service's compose command now runs the *entire* free pipeline
+unattended, not just transcription:
+- **Once at container start:** `sync-subscriptions`, `sync-history`.
+- **Every ~60-90s cycle:** `fsck --fix`, load any dropped-in comparisons/extractions
+  batch, `transcribe --cross-show-only --limit 5`, `cut`.
+- **Every ~30 minutes** (gated by a `.last_slow_cycle` marker file's mtime, not every
+  cycle — 73+ shows' RSS feeds don't need refetching every 60-90s): `ingest`, `canon`,
+  `chapters`.
+
+A 2026-07-12 gpodder sync brought in 67 shows' full back catalogs in one shot
+(~2,200 → ~24,000 total episodes), which is why `ingest` alone now matters enough to
+automate — most of that corpus was previously invisible to hark entirely.
+
+**Extraction and claims comparison stay session-as-X** (no `$ANTHROPIC_API_KEY`
+anywhere in this project, deliberately — see M1's history above) but are no longer
+manual-only: `claude-fleet`'s `jobs/agents/hark-pipeline.md` is a scheduled unattended
+agent (hourly, `systemd/fleet-hark-pipeline.timer`) that reads hark's production db
+directly (same read-only shared-mount access this session used manually), does the
+extraction/comparison judgment itself as a Claude agent, and drops the output as
+`pending-extractions.jsonl`/`pending-comparisons.jsonl` for the deployed `transcribe`
+service to pick up and load — same mechanism, just scheduled instead of ad hoc. Batch
+sizes (40 episodes in sub-batches of ~15, 3 topics per run) and the hourly cadence are
+sized for the post-sync backlog; revisit once it's actually cleared. Two real bugs found
+running this the first time, both fixed in the job file: `claude -p`'s headless sandbox
+blocks `cd`/`ls` outside the launch directory (use `uv run --project`/`test -f` instead,
+matching `board-minutes.md`'s own absolute-path style), and a single very large tool
+result (querying 150 episodes in one shot) correlated with the job dying mid-run —
+smaller sub-batches avoid it.
+
+**Not every synced show is worth extracting from — 0.11.0's `topic_index_enabled`
+scopes this.** The 67 shows the 2026-07-12 gpodder sync added are mostly not
+subject-per-episode genre shows at all (news, politics, personal finance) — extraction
+on one of those just burns session-as-X effort for a guaranteed-empty result. New shows
+now default to excluded from extraction until reviewed from the show page; hand-curated
+`hark resolve` shows default included, matching prior behavior. `hark discover`'s
+existing genre-filtered search is the fast path for finding shows that likely *should*
+be enabled without reviewing all 67 by hand.
 
 ## M4 — episode scoring (tiltmeter-style)
 

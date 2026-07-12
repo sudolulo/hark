@@ -14,8 +14,10 @@ def conn(tmp_path):
 def _schema_without_column(table: str, column: str) -> str:
     """db.SCHEMA with one column's definition line stripped — used to simulate
     a pre-migration database. Matches on the column name token, not exact
-    whitespace, so it doesn't silently no-op if SCHEMA's alignment changes."""
-    pattern = rf"\n\s*{re.escape(column)}\s+\S+,"
+    whitespace, so it doesn't silently no-op if SCHEMA's alignment changes.
+    The definition itself may be single-token (`TEXT,`) or multi-word
+    (`INTEGER NOT NULL DEFAULT 1,`) — matches up to the first comma either way."""
+    pattern = rf"\n\s*{re.escape(column)}\s+[^\n,]+,"
     new_schema, n = re.subn(pattern, "", db.SCHEMA, count=1)
     assert n == 1, f"{column!r} not found in SCHEMA — test fixture is stale"
     return new_schema
@@ -97,6 +99,49 @@ def test_migration_adds_feed_token_to_old_shows(tmp_path):
     conn = db.connect(path)
     row = conn.execute("SELECT feed_token FROM shows").fetchone()
     assert row["feed_token"] is not None  # backfilled, not just added-and-null
+
+
+def test_migration_backfills_topic_index_disabled_for_bare_row_shows(tmp_path):
+    """A pre-0.10.0 database's existing shows get retroactively split: shows
+    added via resolve.add_show_by_feed_url() (query == feed_url, no search
+    term to record) land disabled; hand-curated hark-resolve shows (query is
+    a human-typed name) keep the schema's DEFAULT 1."""
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.executescript(_schema_without_column("shows", "topic_index_enabled"))
+    old.execute("INSERT INTO shows (query, feed_url) VALUES ('Casefile True Crime', 'http://a')")
+    old.execute("INSERT INTO shows (query, feed_url) VALUES ('http://b', 'http://b')")
+    old.commit()
+    old.close()
+
+    conn = db.connect(path)
+    curated = conn.execute(
+        "SELECT topic_index_enabled FROM shows WHERE query = 'Casefile True Crime'"
+    ).fetchone()
+    bare_row = conn.execute(
+        "SELECT topic_index_enabled FROM shows WHERE query = 'http://b'"
+    ).fetchone()
+    assert curated["topic_index_enabled"] == 1
+    assert bare_row["topic_index_enabled"] == 0
+
+
+def test_topic_index_backfill_does_not_repeat_on_later_connect(tmp_path):
+    # The backfill must only run once, alongside the ALTER TABLE — otherwise
+    # an owner's manual re-enable (via the show page) of a bare-row show
+    # would get silently reverted on the app's next restart.
+    path = tmp_path / "test.db"
+    conn = db.connect(path)
+    conn.execute("INSERT INTO shows (query, feed_url) VALUES ('http://a', 'http://a')")
+    conn.commit()
+    conn.execute("UPDATE shows SET topic_index_enabled = 1 WHERE query = 'http://a'")
+    conn.commit()
+    conn.close()
+
+    reconnected = db.connect(path)
+    row = reconnected.execute(
+        "SELECT topic_index_enabled FROM shows WHERE query = 'http://a'"
+    ).fetchone()
+    assert row["topic_index_enabled"] == 1  # not stomped back to 0
 
 
 def test_backfill_feed_tokens_gives_every_show_a_unique_token(tmp_path):

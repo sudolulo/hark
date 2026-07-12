@@ -114,12 +114,17 @@ def add_show_by_feed_url(conn: sqlite3.Connection, feed_url: str, title: str | N
     including one added via resolve_show()'s iTunes path, which is why this
     checks feed_url rather than relying on the query-column ON CONFLICT that
     upsert_show() uses (a different query value for the same feed_url would
-    otherwise violate shows.feed_url's own UNIQUE constraint)."""
+    otherwise violate shows.feed_url's own UNIQUE constraint).
+
+    topic_index_enabled starts OFF here (unlike upsert_show()'s hand-curated
+    path, which keeps the schema default of on) — nothing has reviewed
+    whether this show is even genre-relevant yet. Toggle it on from the show
+    page once it is. See db.py's schema comment for the full reasoning."""
     existing = conn.execute("SELECT id FROM shows WHERE feed_url = ?", (feed_url,)).fetchone()
     if existing is not None:
         return False
     conn.execute(
-        "INSERT INTO shows (query, title, feed_url) VALUES (?, ?, ?)",
+        "INSERT INTO shows (query, title, feed_url, topic_index_enabled) VALUES (?, ?, ?, 0)",
         (feed_url, title, feed_url),
     )
     conn.commit()

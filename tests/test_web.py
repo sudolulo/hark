@@ -776,6 +776,68 @@ def test_adblock_toggle_requires_login(server):
     assert resp.getheader("Location") == "/login"
 
 
+def test_show_page_shows_topic_index_toggle(server):
+    cookie = login(server)
+    resp, body = request(server, "GET", "/show/1", cookie=cookie)
+    assert resp.status == 200
+    assert "Topic index for this show: <strong>enabled</strong>" in body  # server fixture default
+    assert "Remove from topic index" in body
+
+
+def test_topic_index_toggle_flips_state_and_redirects(server):
+    cookie = login(server)
+    resp, _ = request(server, "POST", "/show/1/topic-index", body={}, cookie=cookie)
+    assert resp.status == 303
+    assert resp.getheader("Location") == "/show/1"
+
+    resp, body = request(server, "GET", "/show/1", cookie=cookie)
+    assert "Topic index for this show: <strong>disabled</strong>" in body
+    assert "Add to topic index" in body
+    assert "won't be checked for a real-world subject" in body
+
+    request(server, "POST", "/show/1/topic-index", body={}, cookie=cookie)
+    resp, body = request(server, "GET", "/show/1", cookie=cookie)
+    assert "Topic index for this show: <strong>enabled</strong>" in body
+
+
+def test_topic_index_toggle_404_for_missing_show(server):
+    cookie = login(server)
+    resp, _ = request(server, "POST", "/show/999/topic-index", body={}, cookie=cookie)
+    assert resp.status == 404
+
+
+def test_topic_index_toggle_requires_login(server):
+    resp, _ = request(server, "POST", "/show/1/topic-index", body={})
+    assert resp.status == 303
+
+
+def test_shows_page_flags_unreviewed_shows(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('q', 'Curated', 'http://x')")
+    conn.execute(
+        "INSERT INTO shows (query, title, feed_url, topic_index_enabled)"
+        " VALUES ('http://y', 'Unreviewed', 'http://y', 0)"
+    )
+    conn.commit()
+    conn.close()
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
+        cookie = resp.getheader("Set-Cookie").split(";")[0]
+        resp, body = request(srv, "GET", "/shows", cookie=cookie)
+        assert resp.status == 200
+        assert "1 show not yet reviewed for the topic index" in body
+        unreviewed_row = body.split("Unreviewed")[1].split("</tr>")[0]
+        assert "unreviewed" in unreviewed_row
+        curated_row = body.split("Curated")[1].split("</tr>")[0]
+        assert "unreviewed" not in curated_row
+    finally:
+        srv.shutdown()
+
+
 def test_plural():
     assert web.plural(0, "episode") == "0 episodes"
     assert web.plural(1, "episode") == "1 episode"

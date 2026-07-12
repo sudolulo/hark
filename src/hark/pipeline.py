@@ -36,10 +36,15 @@ class ExtractResult:
 
 
 def pending_episodes(conn: sqlite3.Connection, limit: int | None = None) -> list[sqlite3.Row]:
+    # topic_index_enabled: a show not yet reviewed for genre relevance (see
+    # db.py's schema comment) shouldn't burn extraction effort — its
+    # episodes would just come back with an empty topic list anyway, but at
+    # real session-as-X cost. ad_stripping_enabled has no bearing here;
+    # they gate different pipeline stages for different reasons.
     sql = """
         SELECT e.id, e.title, e.description, COALESCE(s.title, s.query) AS show
         FROM episodes e JOIN shows s ON s.id = e.show_id
-        WHERE e.extracted_at IS NULL
+        WHERE e.extracted_at IS NULL AND s.topic_index_enabled = 1
         ORDER BY e.show_id, e.pubdate
     """
     if limit is not None:

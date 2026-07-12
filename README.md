@@ -21,14 +21,24 @@ transcription step), hark can also compare what each show actually claimed —
 shared facts vs. claims unique to one show's telling — shown on every
 episode's own page.
 
-See `docs/PLAN.md` for milestones. Current state (0.10.0): feed resolution,
+The deployed instance runs its own pipeline unattended: subscription sync, ingest,
+canonicalization, chapter-scanning, transcription, and ad-cutting all run on a
+schedule with no manual steps. Topic extraction and claims comparison — the two
+steps that need real judgment, not just fetching/matching — run the same way but as
+a scheduled Claude agent instead of a paid API call (`claude-fleet`'s
+`jobs/agents/hark-pipeline.md`); this project has never used `$ANTHROPIC_API_KEY`
+and isn't starting now. See docs/PLAN.md's "Deployed pipeline automation" section.
+
+See `docs/PLAN.md` for milestones. Current state (0.11.0): feed resolution,
 episode ingest, LLM topic extraction with Wikidata canonicalization, the
 cross-show topic index, a full web UI, adscrub-backed ad-stripping (with a
 per-show on/off toggle and feed URL, both from the show page), cross-show
 claims comparison, M2 discovery (related shows/topics by co-occurrence,
-candidate-show search, and an interim notable-episodes page), and M3's
+candidate-show search, and an interim notable-episodes page), M3's
 AntennaPod loop (Nextcloud gpodder subscription + listen-history sync, OPML
-import fallback) — deployed live.
+import fallback), and a per-show topic-index toggle (new shows start
+excluded from extraction until reviewed — most subscriptions aren't
+subject-per-episode genre shows) — deployed live.
 
 ## Demo
 
@@ -111,8 +121,9 @@ build (the build context only has hark's own files) — see the Dockerfile's
 (coverage stats, genre breakdown, live indexing status, ad-stripping/claims-
 comparison pipeline status, recently-indexed feed), topic pages ("who
 covered X"), per-show pages (episode list, ad-stripping toggle + feed URL,
-per-show pipeline progress, related shows), genre-filtered and paginated
-topic browsing, an interim `/notable` page (most-contested claims
+topic-index toggle, per-show pipeline progress, related shows), a `/shows`
+list flagging any not yet reviewed for the topic index, genre-filtered and
+paginated topic browsing, an interim `/notable` page (most-contested claims
 comparisons, rarest-genre episodes), and search. The whole site is behind a
 session login wall; only `/login`, `/logout` and `/healthz` are open.
 Bootstrap: set `HARK_ADMIN_TOKEN`, sign in as `admin` with that token, then set

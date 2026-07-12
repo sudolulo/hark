@@ -63,6 +63,17 @@ def test_zero_topic_episode_marked_extracted(tmp_path):
     assert pipeline.pending_episodes(conn) == []
 
 
+def test_pending_episodes_excludes_topic_index_disabled_shows(tmp_path):
+    conn = db.connect(tmp_path / "t.db")
+    conn.execute(
+        "INSERT INTO shows (query, title, feed_url, topic_index_enabled)"
+        " VALUES ('q', 'Show', 'http://x', 0)"
+    )
+    conn.execute("INSERT INTO episodes (show_id, guid, title, pubdate) VALUES (1, 'g1', 'ep1', '2025-01-01T00:00:00Z')")
+    conn.commit()
+    assert pipeline.pending_episodes(conn) == []
+
+
 def test_failed_episode_stays_pending(tmp_path):
     conn = db.connect(tmp_path / "t.db")
     seed(conn, ["boom", "ep1"])

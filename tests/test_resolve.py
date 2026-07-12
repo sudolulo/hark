@@ -88,6 +88,17 @@ def test_add_show_by_feed_url_inserts_with_feed_url_as_query(tmp_path):
     assert row["title"] == "New Show"
 
 
+def test_add_show_by_feed_url_starts_topic_index_disabled(tmp_path):
+    # Unreviewed shows (gpodder sync, OPML import, discover --add) shouldn't
+    # burn extraction effort until the owner confirms genre relevance from
+    # the show page — unlike resolve_show()'s hand-curated path, which
+    # keeps the schema default of enabled.
+    conn = db.connect(tmp_path / "test.db")
+    resolve.add_show_by_feed_url(conn, "https://feeds.example.com/new-show")
+    row = conn.execute("SELECT topic_index_enabled FROM shows").fetchone()
+    assert row["topic_index_enabled"] == 0
+
+
 def test_add_show_by_feed_url_is_idempotent(tmp_path):
     conn = db.connect(tmp_path / "test.db")
     resolve.add_show_by_feed_url(conn, "https://feeds.example.com/x")
