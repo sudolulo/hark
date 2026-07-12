@@ -451,3 +451,64 @@ def test_cut_success_path_calls_adscrub_directly(tmp_path, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "ok    Ep One: removed 5.0s of ads" in out
     assert "cut 1 episode(s) (0 failed, 0 still pending)" in out
+
+
+def test_fsck_reports_dangling_transcript_paths_without_fix(tmp_path, capsys):
+    path = tmp_path / "t.db"
+    real_transcript = tmp_path / "real.json"
+    real_transcript.write_text("[]")
+    conn = db.connect(path)
+    conn.execute("INSERT INTO shows (query) VALUES ('Show A')")
+    conn.execute(
+        "INSERT INTO episodes (show_id, guid, title, transcript_path) VALUES (1, 'g1', 'Missing', ?)",
+        (str(tmp_path / "gone.json"),),
+    )
+    conn.execute(
+        "INSERT INTO episodes (show_id, guid, title, transcript_path) VALUES (1, 'g2', 'Present', ?)",
+        (str(real_transcript),),
+    )
+    conn.commit()
+    conn.close()
+
+    rc = cli.main(["--db", str(path), "fsck"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "1 of 2 transcript_path pointer(s) reference a missing file" in out
+
+    conn = db.connect(path)
+    row = conn.execute("SELECT transcript_path FROM episodes WHERE title = 'Missing'").fetchone()
+    assert row["transcript_path"] is not None  # dry-run: not cleared without --fix
+
+
+def test_fsck_fix_clears_only_dangling_pointers(tmp_path, capsys):
+    path = tmp_path / "t.db"
+    real_transcript = tmp_path / "real.json"
+    real_transcript.write_text("[]")
+    conn = db.connect(path)
+    conn.execute("INSERT INTO shows (query) VALUES ('Show A')")
+    conn.execute(
+        "INSERT INTO episodes (show_id, guid, title, transcript_path) VALUES (1, 'g1', 'Missing', ?)",
+        (str(tmp_path / "gone.json"),),
+    )
+    conn.execute(
+        "INSERT INTO episodes (show_id, guid, title, transcript_path) VALUES (1, 'g2', 'Present', ?)",
+        (str(real_transcript),),
+    )
+    conn.commit()
+    conn.close()
+
+    rc = cli.main(["--db", str(path), "fsck", "--fix"])
+    assert rc == 0
+    assert "cleared 1 dangling transcript_path pointer(s)" in capsys.readouterr().out
+
+    conn = db.connect(path)
+    missing = conn.execute("SELECT transcript_path FROM episodes WHERE title = 'Missing'").fetchone()
+    present = conn.execute("SELECT transcript_path FROM episodes WHERE title = 'Present'").fetchone()
+    assert missing["transcript_path"] is None
+    assert present["transcript_path"] == str(real_transcript)
+
+
+def test_fsck_with_nothing_dangling_succeeds(tmp_path, capsys):
+    rc = cli.main(["--db", str(tmp_path / "t.db"), "fsck"])
+    assert rc == 0
+    assert "0 of 0 transcript_path pointer(s) reference a missing file" in capsys.readouterr().out

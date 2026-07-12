@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-07-12
+
+### Added
+
+- **`hark fsck [--fix]`**: finds `episodes.transcript_path` pointers whose
+  file no longer exists and clears them (with `--fix`) so the pipeline
+  re-queues those episodes instead of treating already-lost data as done.
+  Found in production: 209 of 212 transcript_path entries in the deployed
+  `hark.db` pointed at files that don't exist on the shared volume — an
+  earlier local-database cleanup deleted the transcript files those rows
+  referenced without invalidating the pointers. Now run automatically at
+  the start of every `transcribe` cycle.
+- **Comparisons drop-and-auto-load**: the deployed `transcribe` service now
+  checks for `/app/data/pending-comparisons.jsonl` every cycle and, if
+  present, runs `hark load-comparisons` on it and archives the file —
+  no more needing one-off container access to load a session-generated
+  comparison batch into the live database.
+
+### Fixed
+
+- `cmd_load_comparisons`'s `report()` callback still type-hinted
+  `claims.LoadResult`, deleted in 0.9.0's dataclass consolidation. Harmless
+  under `from __future__ import annotations` (never evaluated) but a stale
+  reference; now `claims.CompareResult`.
+
 ## [0.9.2] - 2026-07-12
 
 ### Fixed

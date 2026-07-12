@@ -1,5 +1,5 @@
 """hark command line: resolve, ingest, extract, chapters, transcribe, detect-ads,
-cut, compare, load-comparisons, stats, topics, who, web.
+cut, fsck, compare, load-comparisons, stats, topics, who, web.
 
 chapters/transcribe/detect-ads/cut call straight into the `adscrub` package
 (a separate product, depended on as a library — see pyproject.toml) rather
@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from pathlib import Path
 from typing import Callable
 
 import httpx
@@ -267,6 +268,30 @@ def cmd_cut(args: argparse.Namespace) -> int:
     return 1 if errors else 0
 
 
+def cmd_fsck(args: argparse.Namespace) -> int:
+    """Find episodes.transcript_path pointers whose file no longer exists —
+    e.g. after a data-directory restore/migration that carried over
+    database rows without the transcript files they reference — and clear
+    them so the pipeline re-queues those episodes for real transcription
+    instead of treating already-lost data as done."""
+    conn = db.connect(args.db)
+    rows = conn.execute(
+        "SELECT id, transcript_path FROM episodes WHERE transcript_path IS NOT NULL"
+    ).fetchall()
+    dangling = [r for r in rows if not Path(r["transcript_path"]).is_file()]
+    print(f"{len(dangling)} of {len(rows)} transcript_path pointer(s) reference a missing file")
+    if not dangling:
+        return 0
+    if not args.fix:
+        print("re-run with --fix to clear them", file=sys.stderr)
+        return 1
+    for r in dangling:
+        conn.execute("UPDATE episodes SET transcript_path = NULL WHERE id = ?", (r["id"],))
+    conn.commit()
+    print(f"cleared {len(dangling)} dangling transcript_path pointer(s)")
+    return 0
+
+
 def cmd_compare(args: argparse.Namespace) -> int:
     conn = db.connect(args.db)
     pending = claims.pending_topics(conn, args.limit)
@@ -317,7 +342,7 @@ def cmd_load_comparisons(args: argparse.Namespace) -> int:
         return 1
     errors = 0
 
-    def report(r: claims.LoadResult) -> None:
+    def report(r: claims.CompareResult) -> None:
         nonlocal errors
         if r.error:
             errors += 1
@@ -560,6 +585,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true",
                    help="only report how many episodes are pending")
     p.set_defaults(func=cmd_cut)
+
+    p = sub.add_parser(
+        "fsck", help="find and clear transcript_path pointers whose file is missing"
+    )
+    p.add_argument("--fix", action="store_true", help="clear dangling pointers (default: report only)")
+    p.set_defaults(func=cmd_fsck)
 
     p = sub.add_parser("extract", help="extract episode topics with a Claude model")
     p.add_argument("--limit", type=int, help="max episodes to process this run")
