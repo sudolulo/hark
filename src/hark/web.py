@@ -32,7 +32,6 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import html
-import os
 import secrets
 import sqlite3
 import time
