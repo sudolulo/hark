@@ -32,6 +32,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import html
+import json
 import secrets
 import sqlite3
 import time
@@ -234,7 +235,7 @@ PAGE = """<!doctype html>
 
 HEADER = """<header>
 <a class="brand" href="/">HARK</a>
-<nav><a href="/topics">topics</a> <a href="/shows">shows</a> <a href="/search">search</a></nav>
+<nav><a href="/topics">topics</a> <a href="/shows">shows</a> <a href="/notable">notable</a> <a href="/search">search</a></nav>
 <span class="spacer"></span>
 <nav><span class="dim">{user}</span> <a href="/account">account</a></nav>
 </header>"""
@@ -426,6 +427,50 @@ class App:
         pager = pagination_html("/topics", query, page_num, total, "topics")
         body = f"<h1>{esc(title)}</h1><p>{pills}</p>" + topic_table(rows) + pager
         return page(title, body, user["username"])
+
+    def view_notable(self, user) -> str:
+        """Two interim "notable" signals, distinct from the home page's
+        cross-show-coverage ranking (which already surfaces "most covered" —
+        repeating that here would just be the same table twice). Both are
+        explicitly provisional: PLAN.md's M4 (interestingness scoring,
+        calibrated against real listening) is the eventual real version of
+        this page; these are what's derivable without it."""
+        conn = self.db()
+        try:
+            contested = contested_topics(conn, limit=15)
+            rare_genres, rare = rare_genre_episodes(conn, limit=15)
+        finally:
+            conn.close()
+        contested_html = "".join(
+            f"<tr><td><a href='/topic/{r['topic_id']}'>{esc(r['label'])}</a></td>"
+            f"<td class='num'>{r['shared_count']}</td><td class='num'>{r['unique_count']}</td>"
+            f"<td class='dim'>{esc(', '.join(r['genres']))}</td></tr>"
+            for r in contested
+        )
+        rare_html = "".join(
+            f"<tr><td><a href='/episode/{r['id']}'>{esc(r['title'])}</a></td>"
+            f"<td><a href='/show/{r['show_id']}'>{esc(r['show'])}</a></td>"
+            f"<td><a href='/topic/{r['topic_id']}'>{esc(r['label'])}</a></td>"
+            f"<td class='dim'>{esc(r['genre'])}</td></tr>"
+            for r in rare
+        )
+        body = (
+            "<h1>Notable</h1>"
+            '<p class="dim">Interim signals, not M4\'s real interestingness scoring yet — '
+            "just what's derivable from what hark already has.</p>"
+            "<h2>Most contested</h2>"
+            '<p class="dim">Topics where shows\' tellings diverge the most — highest count of '
+            "claims unique to one show, among topics with a claims comparison loaded.</p>" +
+            (f'<table><tr><th>topic</th><th>shared claims</th><th>unique claims</th>'
+             f'<th>genres</th></tr>{contested_html}</table>' if contested else
+             '<p class="dim">No claims comparisons loaded yet (<code>hark compare</code>).</p>') +
+            "<h2>Rare coverage</h2>" +
+            (f'<p class="dim">Episodes covering hark\'s least-common genres — '
+             f"{', '.join(rare_genres)}.</p>"
+             f'<table><tr><th>episode</th><th>show</th><th>topic</th><th>genre</th></tr>'
+             f'{rare_html}</table>' if rare else '<p class="dim">Nothing yet.</p>')
+        )
+        return page("notable", body, user["username"])
 
     def view_topic(self, user, topic_id: int) -> str | None:
         conn = self.db()
@@ -859,6 +904,72 @@ def related_shows(conn: sqlite3.Connection, show_id: int, limit: int = 5) -> lis
     ).fetchall()
 
 
+def contested_topics(conn: sqlite3.Connection, limit: int = 15) -> list[dict]:
+    """Topics with a loaded claims comparison, ranked by how many claims are
+    unique to one show rather than shared — a proxy for "the shows actually
+    disagree/diverge here," distinct from the home page's cross-show
+    *coverage* ranking. shared/unique_by_show are stored as JSON text (see
+    claims.py); counted in Python rather than via SQLite JSON functions to
+    match how the rest of the codebase already handles these columns.
+    Read-only-connection-safe: topic_comparisons may not exist yet on a
+    database no `hark compare`/`load-comparisons` has ever run against —
+    same concern claims.count_pending_topics() already documents."""
+    try:
+        rows = conn.execute(
+            """
+            SELECT tc.topic_id, t.label, tc.shared, tc.unique_by_show,
+                   COALESCE(GROUP_CONCAT(DISTINCT tg.genre), '') AS genres
+            FROM topic_comparisons tc
+            JOIN topics t ON t.id = tc.topic_id
+            LEFT JOIN topic_genres tg ON tg.topic_id = tc.topic_id
+            GROUP BY tc.topic_id
+            """
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    scored = []
+    for r in rows:
+        shared_count = len(json.loads(r["shared"]))
+        unique_count = sum(len(v) for v in json.loads(r["unique_by_show"]).values())
+        scored.append({
+            "topic_id": r["topic_id"], "label": r["label"],
+            "shared_count": shared_count, "unique_count": unique_count,
+            "genres": [g for g in r["genres"].split(",") if g],
+        })
+    scored.sort(key=lambda s: s["unique_count"], reverse=True)
+    return scored[:limit]
+
+
+def rare_genre_episodes(conn: sqlite3.Connection, limit: int = 15) -> tuple[list[str], list[sqlite3.Row]]:
+    """Episodes covering topics in hark's two least-common genres (by total
+    topic count) — a rarity signal the home page's popularity-sorted tables
+    don't surface. Returns the genre names picked (for the page's own
+    explanatory text) alongside the episode rows."""
+    genre_counts = conn.execute(
+        "SELECT genre, COUNT(DISTINCT topic_id) AS n FROM topic_genres GROUP BY genre ORDER BY n ASC"
+    ).fetchall()
+    if not genre_counts:
+        return [], []
+    rare_genres = [r["genre"] for r in genre_counts[:2]]
+    placeholders = ",".join("?" * len(rare_genres))
+    rows = conn.execute(
+        f"""
+        SELECT e.id, e.title, s.id AS show_id, COALESCE(s.title, s.query) AS show,
+               t.id AS topic_id, t.label, tg.genre
+        FROM topic_genres tg
+        JOIN topics t ON t.id = tg.topic_id
+        JOIN episode_topics et ON et.topic_id = t.id
+        JOIN episodes e ON e.id = et.episode_id
+        JOIN shows s ON s.id = e.show_id
+        WHERE tg.genre IN ({placeholders})
+        ORDER BY et.confidence DESC NULLS LAST, e.pubdate DESC
+        LIMIT ?
+        """,
+        (*rare_genres, limit),
+    ).fetchall()
+    return rare_genres, rows
+
+
 PAGE_SIZE = 50
 
 
@@ -1156,6 +1267,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(200, app.view_home(user))
             if route == "/topics":
                 return self.respond(200, app.view_topics(user, params))
+            if route == "/notable":
+                return self.respond(200, app.view_notable(user))
             if route.startswith("/topic/"):
                 try:
                     topic_id = int(route.rsplit("/", 1)[1])

@@ -103,6 +103,34 @@ CREATE INDEX IF NOT EXISTS idx_ad_segments_episode ON ad_segments (episode_id);
 -- (topic co-occurrence) and view_topic's episode listing all filter/join on
 -- topic_id on every page view; without this they're full table scans.
 CREATE INDEX IF NOT EXISTS idx_episode_topics_topic ON episode_topics (topic_id);
+
+-- M3: raw AntennaPod listen history, read from Nextcloud's GPodder Sync app
+-- (see nextcloud.py). Stored as-is, keyed by feed/episode URL rather than
+-- hark's own episode_id, since a listen can arrive before hark has ever
+-- ingested that episode (or for a show hark doesn't track at all) —
+-- resolving to episode_id is a query-time join, not a storage-time one.
+-- Consumed by M4's scoring calibration; nothing reads this table yet.
+CREATE TABLE IF NOT EXISTS listen_actions (
+    id           INTEGER PRIMARY KEY,
+    podcast_url  TEXT NOT NULL,
+    episode_url  TEXT NOT NULL,
+    episode_guid TEXT,
+    action       TEXT NOT NULL,
+    position     INTEGER,
+    total        INTEGER,
+    occurred_at  TEXT,
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    UNIQUE (podcast_url, episode_url, action, occurred_at)
+);
+CREATE INDEX IF NOT EXISTS idx_listen_actions_episode_url ON listen_actions (episode_url);
+
+-- Generic small key/value store for sync cursors — currently just the
+-- GPodder Sync episode_action `since` timestamp (subscriptions are cheap
+-- enough to full-fetch every sync instead of needing a cursor).
+CREATE TABLE IF NOT EXISTS sync_state (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 

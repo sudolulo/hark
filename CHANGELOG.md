@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-12
+
+### Added
+
+- **M3 — AntennaPod loop, done.** `hark sync-subscriptions` reads Nextcloud's
+  GPodder Sync app (`nextcloud.py`) and registers any subscribed feed hark
+  doesn't already track — this is what actually delivers "every subscription
+  gets ad-stripped," not just the manually-curated `feeds.txt` list.
+  Deliberately never removes a show on gpodder-side unsubscribe: hark's
+  topic index stays a durable "who covered X" record independent of current
+  subscription state. `hark sync-history` pulls play-history events into a
+  new `listen_actions` table (nothing reads it yet — it's there for M4's
+  "calibrated against the owner's actual listening" scoring), incremental
+  via a stored cursor in a new `sync_state` table. `hark import-opml <file>`
+  is the same show-registration path from a one-off OPML export instead.
+  The deployed `transcribe` service now runs both syncs once at container
+  start.
+- **M2 — candidate-show discovery.** `hark discover [--genre G] [--add]`:
+  an iTunes Search sweep over curated per-genre seed terms
+  (`discover.SEED_TERMS`), deduplicated against already-tracked shows.
+  Report-only by default; `--add` registers candidates the same
+  bare-row way as sync-subscriptions/import-opml.
+- **M2 — notable episodes (interim).** New `/notable` page: "most contested"
+  (topics with a loaded claims comparison, ranked by claims unique to one
+  show rather than shared) and "rare coverage" (episodes in hark's two
+  least-common genres). Explicitly labeled provisional — PLAN.md's M4 is
+  the eventual real version of this page.
+- `resolve.add_show_by_feed_url()`: the shared "register a show hark
+  already has a direct feed URL for" path behind sync-subscriptions,
+  import-opml, and discover --add — skips resolve_show()'s iTunes Search
+  lookup (nothing to search for, the feed URL is already known) and leaves
+  title/description/image for the next `hark ingest` to fill in.
+- Home page and show page now surface the M3/M2 additions alongside the
+  existing pipeline-status banner and per-show progress.
+
+### Notes
+
+- `--nextcloud-insecure`/`$HARK_NEXTCLOUD_INSECURE` opts out of TLS
+  verification for Nextcloud specifically (self-signed cert on a LAN-only
+  service) — `make_nextcloud_client()` is a separate client from
+  `make_client()`, which stays fully verifying for every other caller.
+  Defaults to verifying; off by default, set explicitly in the deployed
+  container's environment.
+
 ## [0.9.5] - 2026-07-12
 
 ### Added

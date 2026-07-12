@@ -1,5 +1,6 @@
-"""hark command line: resolve, ingest, extract, chapters, transcribe, detect-ads,
-cut, fsck, compare, load-comparisons, stats, topics, who, web.
+"""hark command line: resolve, ingest, sync-subscriptions, sync-history,
+import-opml, discover, extract, chapters, transcribe, detect-ads, cut, fsck,
+compare, load-comparisons, stats, topics, who, web.
 
 chapters/transcribe/detect-ads/cut call straight into the `adscrub` package
 (a separate product, depended on as a library — see pyproject.toml) rather
@@ -19,6 +20,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Callable
 
@@ -29,7 +31,7 @@ from adscrub import cut as ad_cut
 from adscrub import detect as ad_detect
 from adscrub import transcribe as ad_transcribe
 
-from . import __version__, claims, db, extract, ingest, pipeline, resolve, wikidata
+from . import __version__, claims, db, discover, extract, ingest, nextcloud, opml, pipeline, resolve, wikidata
 
 DEFAULT_DB = os.environ.get("HARK_DB", "hark.db")
 DEFAULT_FEEDS = "feeds.txt"
@@ -40,6 +42,18 @@ USER_AGENT = f"hark/{__version__} (homelab podcast indexer)"
 def make_client() -> httpx.Client:
     return httpx.Client(
         timeout=30.0, follow_redirects=True, headers={"User-Agent": USER_AGENT}
+    )
+
+
+def make_nextcloud_client(args: argparse.Namespace) -> httpx.Client:
+    """Separate from make_client(): a self-hosted Nextcloud instance on the
+    LAN commonly runs behind a self-signed cert, and --nextcloud-insecure is
+    an explicit, per-command opt-out of verification for that one case —
+    make_client() itself must stay fully verifying for every other caller
+    (Anthropic, iTunes, HF Hub, arbitrary podcast feed hosts)."""
+    return httpx.Client(
+        timeout=30.0, follow_redirects=True, headers={"User-Agent": USER_AGENT},
+        verify=not args.nextcloud_insecure,
     )
 
 
@@ -111,6 +125,141 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         else:
             print(f"  ok    {r.query}: +{r.inserted} new, {r.updated} updated ({r.total} in feed)")
     return 1 if errors else 0
+
+
+def _nextcloud_configured(args: argparse.Namespace) -> bool:
+    if args.nextcloud_url and args.nextcloud_user and args.nextcloud_password:
+        return True
+    print("hint: set $HARK_NEXTCLOUD_URL, $HARK_NEXTCLOUD_USER, $HARK_NEXTCLOUD_PASSWORD "
+          "(an app password, not the account password) — same account AntennaPod "
+          "itself syncs to via the GPodder Sync app", file=sys.stderr)
+    return False
+
+
+def cmd_sync_subscriptions(args: argparse.Namespace) -> int:
+    """M3: register any show in the Nextcloud gpodder subscription list that
+    hark doesn't already know, so new AntennaPod subscriptions reach the
+    ad-stripping pipeline without hand-editing feeds.txt. Never removes a
+    show on gpodder-side unsubscribe — hark's topic index stays a durable
+    "who covered X" record independent of what you're still subscribed to."""
+    if not _nextcloud_configured(args):
+        return 1
+    conn = db.connect(args.db)
+    auth = (args.nextcloud_user, args.nextcloud_password)
+    with make_nextcloud_client(args) as client:
+        try:
+            feed_urls = nextcloud.current_subscriptions(client, args.nextcloud_url, auth)
+        except httpx.HTTPError as exc:
+            print(f"nextcloud: {exc}", file=sys.stderr)
+            return 1
+    added = 0
+    for feed_url in feed_urls:
+        if resolve.add_show_by_feed_url(conn, feed_url):
+            added += 1
+            print(f"  ok    {feed_url}")
+    print(f"synced {len(feed_urls)} subscription(s), {added} new "
+          f"(run `hark ingest` to fetch episodes and titles)")
+    return 0
+
+
+def cmd_sync_history(args: argparse.Namespace) -> int:
+    """M3: pull new AntennaPod play-history events into listen_actions —
+    consumed by M4's scoring calibration, nothing reads it yet. Incremental
+    via a stored cursor (sync_state), since this list only grows."""
+    if not _nextcloud_configured(args):
+        return 1
+    conn = db.connect(args.db)
+    cursor_row = conn.execute(
+        "SELECT value FROM sync_state WHERE key = 'gpodder_episode_action_since'"
+    ).fetchone()
+    since = int(cursor_row["value"]) if cursor_row else 0
+    auth = (args.nextcloud_user, args.nextcloud_password)
+    with make_nextcloud_client(args) as client:
+        try:
+            actions, new_since = nextcloud.fetch_episode_actions(
+                client, args.nextcloud_url, auth, since=since
+            )
+        except httpx.HTTPError as exc:
+            print(f"nextcloud: {exc}", file=sys.stderr)
+            return 1
+    inserted = 0
+    for a in actions:
+        podcast_url, episode_url = a.get("podcast"), a.get("episode")
+        if not podcast_url or not episode_url:
+            continue  # malformed entry — nothing to key it on
+        cur = conn.execute(
+            """
+            INSERT OR IGNORE INTO listen_actions
+                (podcast_url, episode_url, episode_guid, action, position, total, occurred_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (podcast_url, episode_url, a.get("guid"), a.get("action"),
+             a.get("position"), a.get("total"), a.get("timestamp")),
+        )
+        inserted += cur.rowcount
+    conn.execute(
+        """
+        INSERT INTO sync_state (key, value) VALUES ('gpodder_episode_action_since', ?)
+        ON CONFLICT (key) DO UPDATE SET value = excluded.value
+        """,
+        (str(new_since),),
+    )
+    conn.commit()
+    print(f"synced {len(actions)} listen action(s) since last run, {inserted} new")
+    return 0
+
+
+def cmd_import_opml(args: argparse.Namespace) -> int:
+    """Fallback path onto the same show-registration hark.resolve gives
+    gpodder sync — for a one-off OPML export instead of (or alongside) the
+    live Nextcloud account."""
+    conn = db.connect(args.db)
+    try:
+        entries = opml.read_opml_file(args.file)
+    except (OSError, ET.ParseError) as exc:
+        print(f"cannot read {args.file}: {exc}", file=sys.stderr)
+        return 1
+    if not entries:
+        print(f"no <outline xmlUrl=...> feeds found in {args.file}", file=sys.stderr)
+        return 1
+    added = 0
+    for entry in entries:
+        if resolve.add_show_by_feed_url(conn, entry.feed_url, title=entry.title):
+            added += 1
+            print(f"  ok    {entry.title or entry.feed_url}")
+    print(f"imported {len(entries)} feed(s) from {args.file}, {added} new "
+          f"(run `hark ingest` to fetch episodes)")
+    return 0
+
+
+def cmd_discover(args: argparse.Namespace) -> int:
+    """M2: cheap-signal candidate-show search — report only by default.
+    `--add` registers candidates the same way sync-subscriptions/import-opml
+    do (bare row, title/description filled in by the next `hark ingest`);
+    without it this never touches `shows`, since the whole point is owner
+    review before spending any real pipeline budget on a new show."""
+    conn = db.connect(args.db)
+    terms = list(discover.SEED_TERMS[args.genre]) if args.genre else None
+    with make_client() as client:
+        candidates = discover.search_candidates(client, terms, limit_per_term=args.limit_per_term)
+    candidates = discover.filter_known(conn, candidates)[:args.limit]
+    if not candidates:
+        print("no new candidates found", file=sys.stderr)
+        return 1
+    added = 0
+    for c in candidates:
+        marker = "  ok    " if args.add and resolve.add_show_by_feed_url(conn, c.feed_url, title=c.title) else "        "
+        if marker.strip():
+            added += 1
+        eps = f"{c.episode_count} eps" if c.episode_count is not None else "? eps"
+        print(f"{marker}{c.title} — {c.genre or '?'}, {eps}, by {c.author or '?'} "
+              f"(matched {c.matched_term!r})\n          {c.feed_url}")
+    if args.add:
+        print(f"found {len(candidates)} candidate(s), added {added} "
+              f"(run `hark ingest` to fetch episodes)")
+    else:
+        print(f"found {len(candidates)} candidate(s) — re-run with --add to register any of them")
+    return 0
 
 
 def cmd_chapters(args: argparse.Namespace) -> int:
@@ -553,6 +702,51 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("ingest", help="fetch resolved feeds and upsert episodes")
     p.set_defaults(func=cmd_ingest)
+
+    def _add_nextcloud_args(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--nextcloud-url", default=os.environ.get("HARK_NEXTCLOUD_URL"),
+                       help="Nextcloud base URL, e.g. https://host:9001 (default: $HARK_NEXTCLOUD_URL)")
+        p.add_argument("--nextcloud-user", default=os.environ.get("HARK_NEXTCLOUD_USER"),
+                       help="default: $HARK_NEXTCLOUD_USER")
+        p.add_argument("--nextcloud-password", default=os.environ.get("HARK_NEXTCLOUD_PASSWORD"),
+                       help="an app password, not the account password — "
+                            "default: $HARK_NEXTCLOUD_PASSWORD")
+        p.add_argument("--nextcloud-insecure", action="store_true",
+                       default=bool(os.environ.get("HARK_NEXTCLOUD_INSECURE")),
+                       help="skip TLS verification — for a self-hosted instance on a "
+                            "self-signed cert (default: $HARK_NEXTCLOUD_INSECURE)")
+
+    p = sub.add_parser(
+        "sync-subscriptions",
+        help="M3: register new shows from the Nextcloud gpodder subscription list",
+    )
+    _add_nextcloud_args(p)
+    p.set_defaults(func=cmd_sync_subscriptions)
+
+    p = sub.add_parser(
+        "sync-history",
+        help="M3: pull new AntennaPod listen-history events (for future M4 scoring)",
+    )
+    _add_nextcloud_args(p)
+    p.set_defaults(func=cmd_sync_history)
+
+    p = sub.add_parser(
+        "import-opml", help="register shows by feed URL from an OPML export"
+    )
+    p.add_argument("file", help="OPML file to import")
+    p.set_defaults(func=cmd_import_opml)
+
+    p = sub.add_parser(
+        "discover",
+        help="M2: cheap-signal iTunes Search candidate shows, not yet tracked (report-only unless --add)",
+    )
+    p.add_argument("--genre", choices=sorted(discover.SEED_TERMS), help="restrict to one genre's seed terms")
+    p.add_argument("--limit", type=int, default=20, help="max candidates to report (default: 20)")
+    p.add_argument("--limit-per-term", type=int, default=10,
+                   help="iTunes Search results per seed term (default: 10)")
+    p.add_argument("--add", action="store_true",
+                   help="register candidates as shows (default: report only)")
+    p.set_defaults(func=cmd_discover)
 
     p = sub.add_parser("chapters", help="scan episodes' existing chapter markers for ad spans")
     p.set_defaults(func=cmd_chapters)

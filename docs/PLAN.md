@@ -167,23 +167,54 @@ the adscrub port, wired in fully once that merge landed.
   purely because the *upstream* Wikidata label is wrong) is worth remembering if it
   recurs — check the actual Wikidata entity before assuming hark's extraction is at
   fault.
-- Notable back-catalog episodes: not started. Deliberately left separate from M4's planned
-  interestingness scoring — a "notable" surfacing here would just be cross-show coverage
-  count again, which is already visible via the topic index; a real distinct signal
-  probably wants to wait for M4's actual metrics.
-- Candidate-show pipeline: cheap signals first, deeper analysis only for shows that pass.
-  Not started.
+- **Notable back-catalog episodes (done, interim, 0.10.0):** `/notable` — explicitly
+  labeled provisional, not M4's real interestingness scoring. Two distinct signals that
+  don't just repeat the home page's cross-show-coverage ranking: "most contested" (topics
+  with a loaded claims comparison, ranked by how many claims are unique to one show rather
+  than shared — `web.contested_topics()`) and "rare coverage" (episodes in hark's two
+  least-common genres by topic count — `web.rare_genre_episodes()`). Revisit once M4 ships
+  real metrics; this page's framing should shift from "here's what we can derive" to
+  "here's what's actually rated highly."
+- **Candidate-show pipeline (done, first cut, 0.10.0):** `hark discover [--genre G] [--add]`
+  — cheap signal is an iTunes Search sweep over a curated seed-term list per hark genre
+  (`discover.SEED_TERMS`), deduplicated against already-tracked shows by feed_url. Reports
+  candidates ranked by episode count; report-only by default, `--add` registers them
+  (same `resolve.add_show_by_feed_url()` bare-row path as sync-subscriptions/import-opml).
+  "Deeper analysis only for shows that pass" isn't a second automated stage — it's the
+  owner's review of the reported list, then the existing ingest/extract pipeline once a
+  candidate is actually added, same as any other show.
 
-## M3 — AntennaPod loop
+## M3 — AntennaPod loop (done, 0.10.0)
 
-- Read subscriptions/history from Nextcloud gpodder sync (truenas).
-- Generate custom RSS feeds as the recommendation delivery channel.
-- Note: this is also how new shows should reach the ad-stripping pipeline
-  (currently manual via `feeds.txt`/`hark resolve`) — wiring gpodder sync in
-  properly is what actually delivers "every subscription gets ad-stripped,"
-  not just "every show you've typed into feeds.txt." Deliberately deferred,
-  not built alongside the adscrub dependency work — a real API integration
-  project of its own.
+- **Subscriptions:** `hark sync-subscriptions` reads Nextcloud's GPodder Sync app
+  (`nextcloud.py`) — `GET /index.php/apps/gpoddersync/subscriptions` returns a full
+  add/remove history, not a live snapshot; "currently subscribed" is `add − remove`.
+  Registers any feed URL not already a known show (bare row, same as OPML import —
+  title/description/image get filled in by the next `hark ingest`). Deliberately never
+  removes a show on gpodder-side unsubscribe: hark's topic index is meant to be a durable
+  "who covered X" record independent of current subscription state.
+- **Listen history:** `hark sync-history` pulls `episode_action` events (play position,
+  timestamps) into a new `listen_actions` table — nothing reads it yet, it's there for M4's
+  "calibrated against the owner's actual listening" scoring. Incremental via a stored
+  cursor (`sync_state` table + GPodder Sync's own `since=<timestamp>` param), since this
+  list only grows (2935 actions in the real account at the time this was built) — a full
+  refetch every run would be wasteful.
+- **OPML import fallback:** `hark import-opml <file>` — same `add_show_by_feed_url()` path,
+  for a one-off OPML export instead of (or alongside) the live Nextcloud account.
+- **Deployed pipeline integration:** the `transcribe` service's compose command runs
+  `sync-subscriptions`/`sync-history` once at container start (before the fsck/transcribe/
+  compare loop) rather than every cycle — subscriptions change rarely enough that
+  once-per-restart is a reasonable cadence for v1; a real periodic mechanism (cron-style
+  interval independent of restarts) is a cheap follow-up if that ever proves too coarse.
+- **TLS:** the deployed Nextcloud instance uses a self-signed cert (LAN-only service) —
+  `--nextcloud-insecure`/`$HARK_NEXTCLOUD_INSECURE` opts out of verification for that one
+  connection specifically (`make_nextcloud_client()`, separate from `make_client()`, which
+  stays fully verifying for every other caller: Anthropic, iTunes, HF Hub, podcast feed
+  hosts). Defaults to verifying; the deployed container sets the opt-out explicitly.
+- Generate custom RSS feeds as the recommendation delivery channel: not built — no
+  "recommended for you" feature exists yet to generate a feed *for*. Revisit once M2's
+  discovery signals (or M4's scoring) actually produce a ranked list worth delivering this
+  way, rather than building the delivery mechanism first.
 
 ## M4 — episode scoring (tiltmeter-style)
 
@@ -209,5 +240,5 @@ Resolve their real feed URLs via iTunes Search API at runtime — do not hand-co
   2026-07-11: `scripts/build-image.sh`, see the ad-stripping section above.
 - `hark detect-ads` currently defaults to `claude-opus-4-8`; revisit cost vs.
   accuracy on ad-span boundaries once run against real transcripts.
-- When to actually wire the gpodder/Nextcloud subscription sync (M3) so ad-stripping
-  covers real subscriptions instead of the manually-curated `feeds.txt` list.
+- ~~When to actually wire the gpodder/Nextcloud subscription sync~~ Resolved 2026-07-12:
+  M3 shipped in 0.10.0 — see above.

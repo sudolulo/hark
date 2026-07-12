@@ -21,12 +21,14 @@ transcription step), hark can also compare what each show actually claimed —
 shared facts vs. claims unique to one show's telling — shown on every
 episode's own page.
 
-See `docs/PLAN.md` for milestones. Current state (0.9.5): feed resolution,
+See `docs/PLAN.md` for milestones. Current state (0.10.0): feed resolution,
 episode ingest, LLM topic extraction with Wikidata canonicalization, the
 cross-show topic index, a full web UI, adscrub-backed ad-stripping (with a
 per-show on/off toggle and feed URL, both from the show page), cross-show
-claims comparison, and M2 discovery's first cut (related shows and related
-topics, both by co-occurrence) — deployed live.
+claims comparison, M2 discovery (related shows/topics by co-occurrence,
+candidate-show search, and an interim notable-episodes page), and M3's
+AntennaPod loop (Nextcloud gpodder subscription + listen-history sync, OPML
+import fallback) — deployed live.
 
 ## Demo
 
@@ -63,6 +65,15 @@ uv run hark stats              # counts per show
 uv run hark topics             # topics ranked by cross-show coverage
 uv run hark who "dyatlov"      # who covered X (label substring or Wikidata QID)
 
+# M3: subscriptions/history from Nextcloud's GPodder Sync app, or an OPML export
+uv run hark sync-subscriptions --nextcloud-url https://host:9001 \
+  --nextcloud-user U --nextcloud-password P   # register new shows from subscriptions
+uv run hark sync-history --nextcloud-url ...  # play-history events, for future M4 scoring
+uv run hark import-opml export.opml           # same show-registration, from a file instead
+
+# M2: candidate shows not yet tracked (report-only unless --add)
+uv run hark discover --genre true_crime --add
+
 # ad-stripping pipeline (backed by the adscrub library) — every show, not just feeds.txt's
 uv run hark chapters           # scan chapter markers for ad spans (free — no transcription)
 uv run hark transcribe         # Whisper the rest
@@ -97,10 +108,13 @@ build (the build context only has hark's own files) — see the Dockerfile's
 ## Web UI
 
 `hark web` serves the topic index (default `0.0.0.0:8710`): a home dashboard
-(coverage stats, genre breakdown, live indexing status, recently-indexed
-feed), topic pages ("who covered X"), per-show pages, genre-filtered and
-paginated topic browsing, and search. The whole site is behind a session
-login wall; only `/login`, `/logout` and `/healthz` are open.
+(coverage stats, genre breakdown, live indexing status, ad-stripping/claims-
+comparison pipeline status, recently-indexed feed), topic pages ("who
+covered X"), per-show pages (episode list, ad-stripping toggle + feed URL,
+per-show pipeline progress, related shows), genre-filtered and paginated
+topic browsing, an interim `/notable` page (most-contested claims
+comparisons, rarest-genre episodes), and search. The whole site is behind a
+session login wall; only `/login`, `/logout` and `/healthz` are open.
 Bootstrap: set `HARK_ADMIN_TOKEN`, sign in as `admin` with that token, then set
 a real password at `/account` (the token stops working once a password exists;
 with neither set, login is impossible — fail-closed). Sessions live in a
@@ -121,7 +135,11 @@ every generated audio link, and `web` warns if left at the unreachable
 In Docker: `docker compose up -d` (mounts `./data`, serves :8710); pipeline
 stages run as one-shots, e.g. `docker compose run --rm hark ingest`.
 Transcription runs CPU-only by default — see `compose.gpu.yaml` and CLAUDE.md
-for the GPU deploy path.
+for the GPU deploy path. Set `HARK_NEXTCLOUD_URL`/`_USER`/`_PASSWORD` (and
+`HARK_NEXTCLOUD_INSECURE=1` for a self-signed cert — see `--nextcloud-insecure`
+above) to enable `sync-subscriptions`/`sync-history` in a scheduled pipeline
+run; without them M3 sync is simply skipped, same fail-soft shape as
+`$ANTHROPIC_API_KEY` being unset for `extract`/`compare`.
 
 Extraction calls the Anthropic API (default model `claude-opus-4-8`; override
 with `--model` or `$HARK_MODEL`) and canonicalizes labels against Wikidata so

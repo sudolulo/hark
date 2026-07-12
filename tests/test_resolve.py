@@ -76,3 +76,33 @@ def test_resolve_all_reports_misses_without_storing(tmp_path):
         results = resolve.resolve_all(conn, client, ["Unknown Show"])
     assert results == [("Unknown Show", None)]
     assert conn.execute("SELECT COUNT(*) FROM shows").fetchone()[0] == 0
+
+
+def test_add_show_by_feed_url_inserts_with_feed_url_as_query(tmp_path):
+    conn = db.connect(tmp_path / "test.db")
+    added = resolve.add_show_by_feed_url(conn, "https://feeds.example.com/new-show", title="New Show")
+    assert added is True
+    row = conn.execute("SELECT * FROM shows").fetchone()
+    assert row["query"] == "https://feeds.example.com/new-show"
+    assert row["feed_url"] == "https://feeds.example.com/new-show"
+    assert row["title"] == "New Show"
+
+
+def test_add_show_by_feed_url_is_idempotent(tmp_path):
+    conn = db.connect(tmp_path / "test.db")
+    resolve.add_show_by_feed_url(conn, "https://feeds.example.com/x")
+    added_again = resolve.add_show_by_feed_url(conn, "https://feeds.example.com/x")
+    assert added_again is False
+    assert conn.execute("SELECT COUNT(*) FROM shows").fetchone()[0] == 1
+
+
+def test_add_show_by_feed_url_skips_url_already_resolved_by_name(tmp_path, search_payload):
+    # A show already added via resolve_show()'s iTunes path (a different
+    # `query`) must not be re-added under the feed URL as query — that would
+    # violate shows.feed_url's own UNIQUE constraint.
+    conn = db.connect(tmp_path / "test.db")
+    with make_client(search_payload) as client:
+        resolve.resolve_all(conn, client, ["Casefile True Crime"])
+    added = resolve.add_show_by_feed_url(conn, "https://feeds.example.com/casefile")
+    assert added is False
+    assert conn.execute("SELECT COUNT(*) FROM shows").fetchone()[0] == 1

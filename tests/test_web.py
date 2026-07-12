@@ -66,7 +66,8 @@ def login(srv, password="letmein"):
 
 
 def test_everything_gated_except_allowlist(server):
-    for path in ("/", "/topics", "/topic/1", "/search", "/shows", "/show/1", "/episode/1", "/account"):
+    for path in ("/", "/topics", "/topic/1", "/notable", "/search", "/shows", "/show/1",
+                 "/episode/1", "/account"):
         resp, _ = request(server, "GET", path)
         assert resp.status == 303, path
         assert resp.getheader("Location") == "/login"
@@ -89,7 +90,8 @@ def test_no_inline_styles(server):
     # is silently no-op'd by the browser rather than erroring — easy to miss
     # without actually rendering the page. Guard against it creeping back in.
     cookie = login(server)
-    for path in ("/login", "/", "/topics", "/topic/1", "/shows", "/show/1", "/search", "/account"):
+    for path in ("/login", "/", "/topics", "/topic/1", "/notable", "/shows", "/show/1",
+                 "/search", "/account"):
         _, body = request(server, "GET", path, cookie=cookie)
         assert 'style="' not in body, path
 
@@ -325,6 +327,89 @@ def test_topic_page_shows_comparison_available_note(tmp_path):
         assert "not compared yet" not in body
     finally:
         srv.shutdown()
+
+
+def test_contested_topics_ranks_by_unique_claim_count(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO topics (id, label) VALUES (1, 'Low Divergence')")
+    conn.execute("INSERT INTO topics (id, label) VALUES (2, 'High Divergence')")
+    conn.execute("INSERT INTO topic_genres (topic_id, genre) VALUES (2, 'mystery')")
+    conn.commit()
+    claims.load_comparisons(conn, [
+        {"topic_id": 1, "shared": ["a", "b", "c"], "unique_by_show": {"Show A": ["x"]}},
+        {"topic_id": 2, "shared": ["a"], "unique_by_show": {"Show A": ["x", "y"], "Show B": ["z"]}},
+    ])
+    result = web.contested_topics(conn, limit=10)
+    assert [r["topic_id"] for r in result] == [2, 1]
+    assert result[0]["unique_count"] == 3
+    assert result[0]["shared_count"] == 1
+    assert result[0]["genres"] == ["mystery"]
+    conn.close()
+
+
+def test_rare_genre_episodes_picks_two_least_common_genres(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title) VALUES ('q', 'Show A')")
+    conn.executemany(
+        "INSERT INTO topics (id, label) VALUES (?, ?)",
+        [(1, "Common"), (2, "Common2"), (3, "Common3"), (4, "Rare"), (5, "Rarest")],
+    )
+    # 'history' covers 3 topics, 'cult' covers 1, 'espionage' covers 1 -> the
+    # two least common should be cult and espionage (order between equally
+    # rare genres isn't asserted).
+    conn.executemany(
+        "INSERT INTO topic_genres (topic_id, genre) VALUES (?, ?)",
+        [(1, "history"), (2, "history"), (3, "history"), (4, "cult"), (5, "espionage")],
+    )
+    conn.executemany(
+        "INSERT INTO episodes (show_id, guid, title) VALUES (1, ?, ?)",
+        [("g4", "Rare Ep"), ("g5", "Rarest Ep")],
+    )
+    conn.executemany(
+        "INSERT INTO episode_topics (episode_id, topic_id, source) VALUES (?, ?, 't')",
+        [(1, 4), (2, 5)],
+    )
+    conn.commit()
+    genres, rows = web.rare_genre_episodes(conn, limit=10)
+    assert set(genres) == {"cult", "espionage"}
+    assert {r["title"] for r in rows} == {"Rare Ep", "Rarest Ep"}
+    conn.close()
+
+
+def test_notable_page_shows_both_sections(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title) VALUES ('q', 'Show A')")
+    conn.execute("INSERT INTO topics (id, label) VALUES (1, 'Contested Case')")
+    conn.execute("INSERT INTO topics (id, label) VALUES (2, 'Rare Case')")
+    conn.execute("INSERT INTO topic_genres (topic_id, genre) VALUES (2, 'cult')")
+    conn.execute("INSERT INTO episodes (show_id, guid, title) VALUES (1, 'g1', 'Rare Episode')")
+    conn.execute("INSERT INTO episode_topics (episode_id, topic_id, source) VALUES (1, 2, 't')")
+    conn.commit()
+    claims.load_comparisons(conn, [
+        {"topic_id": 1, "shared": ["a"], "unique_by_show": {"Show A": ["x"]}},
+    ])
+    conn.close()
+
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
+        cookie = resp.getheader("Set-Cookie").split(";")[0]
+        resp, body = request(srv, "GET", "/notable", cookie=cookie)
+        assert resp.status == 200
+        assert 'href=\'/topic/1\'>Contested Case</a>' in body
+        assert 'href=\'/episode/1\'>Rare Episode</a>' in body
+    finally:
+        srv.shutdown()
+
+
+def test_notable_page_handles_empty_state(server):
+    cookie = login(server)
+    resp, body = request(server, "GET", "/notable", cookie=cookie)
+    assert resp.status == 200
+    assert "No claims comparisons loaded yet" in body
 
 
 def test_show_page_distinguishes_unindexed_from_topicless_episodes(tmp_path):

@@ -4,7 +4,7 @@ from adscrub import cut as ad_cut
 from adscrub import detect as ad_detect
 from adscrub import transcribe as ad_transcribe
 
-from hark import cli, db
+from hark import cli, db, discover, nextcloud
 from hark.extract import NullExtractor
 
 
@@ -512,3 +512,190 @@ def test_fsck_with_nothing_dangling_succeeds(tmp_path, capsys):
     rc = cli.main(["--db", str(tmp_path / "t.db"), "fsck"])
     assert rc == 0
     assert "0 of 0 transcript_path pointer(s) reference a missing file" in capsys.readouterr().out
+
+
+# --- M3: sync-subscriptions / sync-history / import-opml ---
+
+
+NEXTCLOUD_ARGS = [
+    "--nextcloud-url", "https://nc.example", "--nextcloud-user", "u", "--nextcloud-password", "p",
+]
+
+
+def test_sync_subscriptions_requires_credentials(tmp_path, capsys):
+    rc = cli.main(["--db", str(tmp_path / "t.db"), "sync-subscriptions"])
+    assert rc == 1
+    assert "HARK_NEXTCLOUD_URL" in capsys.readouterr().err
+
+
+def test_sync_subscriptions_adds_new_shows_only(tmp_path, capsys, monkeypatch):
+    path = tmp_path / "t.db"
+    conn = db.connect(path)
+    conn.execute("INSERT INTO shows (query, feed_url) VALUES ('already known', 'https://a.example/feed')")
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(
+        nextcloud, "current_subscriptions",
+        lambda client, url, auth: ["https://a.example/feed", "https://b.example/feed"],
+    )
+
+    rc = cli.main(["--db", str(path), "sync-subscriptions", *NEXTCLOUD_ARGS])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "ok    https://b.example/feed" in out
+    assert "https://a.example/feed" not in out  # already known -> not reported as newly added
+    assert "synced 2 subscription(s), 1 new" in out
+
+    rows = db.connect(path).execute("SELECT feed_url FROM shows").fetchall()
+    assert {r["feed_url"] for r in rows} == {"https://a.example/feed", "https://b.example/feed"}
+
+
+def test_sync_subscriptions_reports_http_error(tmp_path, capsys, monkeypatch):
+    import httpx
+
+    def boom(client, url, auth):
+        raise httpx.ConnectError("no route to host")
+
+    monkeypatch.setattr(nextcloud, "current_subscriptions", boom)
+    rc = cli.main(["--db", str(tmp_path / "t.db"), "sync-subscriptions", *NEXTCLOUD_ARGS])
+    assert rc == 1
+    assert "nextcloud:" in capsys.readouterr().err
+
+
+def test_sync_history_stores_actions_and_advances_cursor(tmp_path, capsys, monkeypatch):
+    path = tmp_path / "t.db"
+    db.connect(path).close()
+
+    calls = []
+
+    def fake_fetch(client, url, auth, since=0):
+        calls.append(since)
+        return (
+            [{"podcast": "https://a.example/feed", "episode": "https://a.example/e1.mp3",
+              "guid": "g1", "action": "PLAY", "position": 10, "total": 100,
+              "timestamp": "2026-01-01T00:00:00+00:00"}],
+            42,
+        )
+
+    monkeypatch.setattr(nextcloud, "fetch_episode_actions", fake_fetch)
+    rc = cli.main(["--db", str(path), "sync-history", *NEXTCLOUD_ARGS])
+    assert rc == 0
+    assert "synced 1 listen action(s) since last run, 1 new" in capsys.readouterr().out
+    assert calls == [0]  # first run: no stored cursor yet
+
+    conn = db.connect(path)
+    assert conn.execute("SELECT COUNT(*) FROM listen_actions").fetchone()[0] == 1
+    cursor = conn.execute(
+        "SELECT value FROM sync_state WHERE key = 'gpodder_episode_action_since'"
+    ).fetchone()
+    assert cursor["value"] == "42"
+
+    # second run picks up the stored cursor instead of starting from 0
+    cli.main(["--db", str(path), "sync-history", *NEXTCLOUD_ARGS])
+    assert calls == [0, 42]
+
+
+def test_sync_history_deduplicates_reinserted_actions(tmp_path, monkeypatch):
+    path = tmp_path / "t.db"
+    db.connect(path).close()
+
+    def fake_fetch(client, url, auth, since=0):
+        return (
+            [{"podcast": "https://a.example/feed", "episode": "https://a.example/e1.mp3",
+              "guid": "g1", "action": "PLAY", "position": 10, "total": 100,
+              "timestamp": "2026-01-01T00:00:00+00:00"}],
+            10,
+        )
+
+    monkeypatch.setattr(nextcloud, "fetch_episode_actions", fake_fetch)
+    cli.main(["--db", str(path), "sync-history", *NEXTCLOUD_ARGS])
+    cli.main(["--db", str(path), "sync-history", *NEXTCLOUD_ARGS])
+    conn = db.connect(path)
+    assert conn.execute("SELECT COUNT(*) FROM listen_actions").fetchone()[0] == 1
+
+
+def test_import_opml_adds_shows_by_feed_url(tmp_path, capsys):
+    opml_path = tmp_path / "feeds.opml"
+    opml_path.write_text(
+        '<opml><body><outline type="rss" title="Show A" xmlUrl="https://a.example/feed.rss"/>'
+        '</body></opml>'
+    )
+    db_path = tmp_path / "t.db"
+    rc = cli.main(["--db", str(db_path), "import-opml", str(opml_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "ok    Show A" in out
+    assert "imported 1 feed(s)" in out
+    row = db.connect(db_path).execute("SELECT * FROM shows").fetchone()
+    assert row["feed_url"] == "https://a.example/feed.rss"
+    assert row["title"] == "Show A"
+
+
+def test_import_opml_missing_file_fails(tmp_path, capsys):
+    rc = cli.main(["--db", str(tmp_path / "t.db"), "import-opml", str(tmp_path / "nope.opml")])
+    assert rc == 1
+    assert "cannot read" in capsys.readouterr().err
+
+
+def test_import_opml_no_feeds_found_fails(tmp_path, capsys):
+    opml_path = tmp_path / "empty.opml"
+    opml_path.write_text('<opml><body><outline text="Empty folder"/></body></opml>')
+    rc = cli.main(["--db", str(tmp_path / "t.db"), "import-opml", str(opml_path)])
+    assert rc == 1
+    assert "no <outline" in capsys.readouterr().err
+
+
+# --- discover (M2 candidate-show pipeline) ---
+
+
+def _fake_candidates(client, terms, limit_per_term=10):
+    return [discover.Candidate("Candidate Show", "https://c.example/feed", "True Crime",
+                               "Someone", 50, "true crime")]
+
+
+def test_discover_report_only_does_not_touch_shows(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(discover, "search_candidates", _fake_candidates)
+    path = tmp_path / "t.db"
+    rc = cli.main(["--db", str(path), "discover"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Candidate Show" in out
+    assert "re-run with --add" in out
+    assert db.connect(path).execute("SELECT COUNT(*) FROM shows").fetchone()[0] == 0
+
+
+def test_discover_add_registers_candidates(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(discover, "search_candidates", _fake_candidates)
+    path = tmp_path / "t.db"
+    rc = cli.main(["--db", str(path), "discover", "--add"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "ok" in out and "added 1" in out
+    row = db.connect(path).execute("SELECT * FROM shows").fetchone()
+    assert row["feed_url"] == "https://c.example/feed"
+    assert row["title"] == "Candidate Show"
+
+
+def test_discover_filters_out_already_known_shows(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(discover, "search_candidates", _fake_candidates)
+    path = tmp_path / "t.db"
+    conn = db.connect(path)
+    conn.execute("INSERT INTO shows (query, feed_url) VALUES ('q', 'https://c.example/feed')")
+    conn.commit()
+    conn.close()
+    rc = cli.main(["--db", str(path), "discover"])
+    assert rc == 1
+    assert "no new candidates found" in capsys.readouterr().err
+
+
+def test_discover_genre_restricts_seed_terms(tmp_path, monkeypatch):
+    seen_terms = []
+
+    def spy(client, terms, limit_per_term=10):
+        seen_terms.append(terms)
+        return []
+
+    monkeypatch.setattr(discover, "search_candidates", spy)
+    cli.main(["--db", str(tmp_path / "t.db"), "discover", "--genre", "cult"])
+    assert seen_terms == [list(discover.SEED_TERMS["cult"])]

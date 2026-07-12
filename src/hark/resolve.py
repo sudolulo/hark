@@ -95,3 +95,32 @@ def resolve_all(
         results.append((name, show))
     conn.commit()
     return results
+
+
+def add_show_by_feed_url(conn: sqlite3.Connection, feed_url: str, title: str | None = None) -> bool:
+    """Register a show hark already has a direct feed URL for — gpodder
+    subscription sync and OPML import both land here instead of going
+    through resolve_show()'s iTunes Search lookup, since that's only needed
+    to turn a *name* into a feed URL and these already have one.
+
+    `query` (shows' actual UNIQUE key) is set to the feed URL itself: there's
+    no search term to record, and a feed URL is guaranteed unique the same
+    way a real one is. title/description/image are left for the next `hark
+    ingest` to fill in from the feed itself — same as any other show — except
+    OPML's own <outline text="..."> is used as a first-pass title when given,
+    so a freshly-imported show isn't nameless until the next ingest run.
+
+    Returns False (no-op) if a show with this feed_url already exists —
+    including one added via resolve_show()'s iTunes path, which is why this
+    checks feed_url rather than relying on the query-column ON CONFLICT that
+    upsert_show() uses (a different query value for the same feed_url would
+    otherwise violate shows.feed_url's own UNIQUE constraint)."""
+    existing = conn.execute("SELECT id FROM shows WHERE feed_url = ?", (feed_url,)).fetchone()
+    if existing is not None:
+        return False
+    conn.execute(
+        "INSERT INTO shows (query, title, feed_url) VALUES (?, ?, ?)",
+        (feed_url, title, feed_url),
+    )
+    conn.commit()
+    return True
