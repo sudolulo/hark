@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-07-12
+
+### Fixed
+
+- **GPU transcription crashed on every episode with `RuntimeError: Library
+  libcublas.so.12 is not found or cannot be loaded`**, even with the 0.9.1
+  fix applied and the model downloading successfully. adscrub's `gpu` extra
+  installs `nvidia-cublas-cu12`/`nvidia-cudnn-cu12` as pip wheels, which
+  bundle their `.so` files under `site-packages/nvidia/*/lib` — not
+  anywhere the dynamic linker searches by default. ctranslate2 (via
+  faster-whisper) needs `LD_LIBRARY_PATH` to include those directories.
+  Fixed by setting it in the image; harmless on non-GPU builds since the
+  linker just skips a path that doesn't exist.
+
 ## [0.9.1] - 2026-07-12
 
 ### Fixed

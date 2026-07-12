@@ -52,7 +52,14 @@ ENV PATH="/app/.venv/bin:$PATH" \
     HARK_DB=/app/data/hark.db \
     HARK_AUTH_DB=/app/data/auth.db \
     HARK_DATA_DIR=/app/data \
-    HF_HOME=/app/data/.hf-cache
+    HF_HOME=/app/data/.hf-cache \
+    LD_LIBRARY_PATH="/app/.venv/lib/python3.13/site-packages/nvidia/cublas/lib:/app/.venv/lib/python3.13/site-packages/nvidia/cudnn/lib"
+# adscrub's `gpu` extra installs nvidia-cublas-cu12/nvidia-cudnn-cu12 as pip
+# wheels — they bundle their .so files under site-packages, not any path the
+# dynamic linker searches by default, so ctranslate2 fails at inference time
+# with "Library libcublas.so.12 is not found" even though the packages are
+# installed. Harmless to set unconditionally on non-GPU builds: the linker
+# just skips a LD_LIBRARY_PATH entry that doesn't exist.
 # `hark` is --no-create-home (see below), so huggingface_hub's default cache
 # location (~/.cache/huggingface) resolves to an unwritable /home/hark. Every
 # Whisper model load then fails to persist its revision-check bookkeeping and
