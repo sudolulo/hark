@@ -5,38 +5,34 @@ Cross-podcast topic index and discovery service for subject-per-episode genres
 real-world case/event/person they cover, so you can ask "who covered the Dyatlov
 Pass incident?" and compare treatments across shows.
 
-hark also strips ads from every subscription (not just the genre-curated shows
-above) by depending on [adscrub](https://git.onetick.ninja/flan/adscrub) — a
-separate, standalone product — as a library: `hark chapters`/`transcribe`/
-`detect-ads`/`cut` call straight into adscrub's functions, since hark's own
-`episodes`/`ad_segments` schema was deliberately shaped to match adscrub's, so
-adscrub's schema-coupled functions work unchanged against hark's database.
-Nothing here is a copy of adscrub's code — see CLAUDE.md and docs/PLAN.md for
-the integration design and why it's a dependency, not a merge. Ad-stripping is
-per-show (on by default) — toggle it from that show's page, which also shows
-the feed URL to subscribe to in AntennaPod once you're ready.
+![hark dashboard](docs/screenshots/dashboard.png)
 
-Once a topic has transcripts from 2+ shows (from the ad-stripping pipeline's
-transcription step), hark can also compare what each show actually claimed —
-shared facts vs. claims unique to one show's telling — shown on every
-episode's own page.
+**What it does**
 
-hark is multi-user: each account has its own subscription list and listen
-history, but the show catalog and everything the pipeline produces
-(transcripts, ad spans, topic extraction) stay global and shared — a show two
-accounts both subscribe to only gets processed once, not once per subscriber.
-Point each person's AntennaPod at hark's gpodder-sync endpoint with their own
-login and they see only their own subscriptions/history. Non-admin accounts
-are capped at 10 podcasts (enforced the same way whether the show gets added
-via AntennaPod sync or the web UI); the admin account is exempt and can also
-toggle the two settings that are genuinely shared across everyone —
-ad-stripping and topic-index enablement per show.
+- **Topic index** — resolves each episode to the real-world case/event/person it covers,
+  so you can search by subject rather than by show.
+- **Claims comparison** — once 2+ shows have covered the same topic, hark diffs what each
+  one actually *claimed*: shared facts vs. claims unique to a single telling.
+- **Ad stripping** — every subscription, not just the indexed shows. Point AntennaPod at
+  hark's feed URL and the ads are gone.
+- **Multi-user** — each account gets its own subscriptions and history, capped at 10
+  podcasts per account; the catalog and everything the pipeline produces stays global, so
+  a show two people follow is processed once, not twice.
 
-Inviting someone: `hark user invite <name>` (or the `/admin/users` web page)
-creates an account with a one-time `/invite/<token>` link — send it to them,
-they set their own password and land straight in the dashboard. No shared
-secret changes hands; the link only works for that one account and expires
-after a week.
+Ad-stripping is done by depending on [adscrub](https://github.com/sudolulo/adscrub) — a
+separate, standalone product — as a library, rather than duplicating its code: hark's
+`episodes`/`ad_segments` schema was deliberately shaped to match adscrub's, so adscrub's
+schema-coupled functions work unchanged against hark's database. See docs/PLAN.md for why
+it's a dependency and not a merge.
+
+On multi-user: point each person's AntennaPod at hark's gpodder-sync endpoint with their own
+login and they see only their own subscriptions and history. Inviting someone —
+`hark user invite <name>`, or the `/admin/users` web page — creates an account with a
+one-time `/invite/<token>` link: send it to them, they set their own password and land
+straight in the dashboard, no shared secret changes hands. The bootstrap admin account is
+exempt from the 10-podcast cap and can also toggle the two genuinely shared settings —
+ad-stripping and topic-index enablement, per show — while everyone else just curates their
+own list from `/shows` or AntennaPod.
 
 The deployed instance runs its own pipeline unattended: subscription sync, ingest,
 canonicalization, chapter-scanning, transcription, and ad-cutting all run on a
@@ -47,7 +43,7 @@ run the same way but as a scheduled Claude agent instead of a paid API call
 `$ANTHROPIC_API_KEY` and isn't starting now. See docs/PLAN.md's "Deployed pipeline
 automation" section.
 
-See `docs/PLAN.md` for milestones. Current state (0.14.0): feed resolution,
+See `docs/PLAN.md` for milestones. Current state (0.15.0): feed resolution,
 episode ingest, LLM topic extraction with Wikidata canonicalization, the
 cross-show topic index, a full web UI, adscrub-backed ad-stripping (with a
 per-show on/off toggle and feed URL, both from the show page; ad-span
@@ -59,8 +55,8 @@ sync, OPML import fallback, and hark speaking the gpodder-sync protocol
 itself so AntennaPod can point directly at it — no app fork needed), a
 per-show topic-index toggle (new shows start excluded from extraction until
 reviewed — most subscriptions aren't subject-per-episode genre shows), and
-multi-user accounts (per-user subscription lists + listen history, shared
-processing) — deployed live.
+multi-user accounts (per-user subscription lists + listen history + quota,
+shared processing, invite-link onboarding) — deployed live.
 
 ## Demo
 
@@ -131,20 +127,19 @@ Show names live in `feeds.txt`, one per line, `#` for comments.
 
 ## Setup
 
-adscrub is a **path dependency** (`../adscrub`, editable — see
-`pyproject.toml`'s `[tool.uv.sources]`), so `flan/adscrub` needs to be checked
-out as a sibling of this repo before `uv sync` will resolve it:
-
 ```
-cd .. && git clone ssh://git@git.onetick.ninja:55214/flan/adscrub.git
+git clone https://github.com/sudolulo/hark.git
 cd hark && uv sync
 ```
 
-For local development, that's all you need. Plain `docker build .`/`docker compose
-build` run from this repo alone still won't work, though — the build context only has
-hark's own files, and the adscrub path dependency needs adscrub's source alongside it.
-Use `scripts/build-image.sh` instead (stages git-archive-clean copies of both repos
-into a temp directory and builds against that) — see docs/PLAN.md's ad-stripping
+That's it. [adscrub](https://github.com/sudolulo/adscrub) is a git dependency, pinned by
+`uv.lock`, so it resolves automatically. To develop the two side by side, override it with
+an editable install afterwards: `uv pip install -e ../adscrub`.
+
+Plain `docker build .`/`docker compose build` run from this repo alone still won't work,
+though — the build context only has hark's own files, and the image needs adscrub's source
+alongside it. Use `scripts/build-image.sh` instead (stages git-archive-clean copies of both
+repos into a temp directory and builds against that) — see docs/PLAN.md's ad-stripping
 section for the full story.
 
 ## Web UI

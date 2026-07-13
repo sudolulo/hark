@@ -144,6 +144,6 @@ def test_serve_no_warning_for_a_configured_hostname(tmp_path, capsys, monkeypatc
     monkeypatch.setattr(web, "make_server", lambda *a, **k: _FakeServer())
     web.serve(
         tmp_path / "hark.db", tmp_path / "auth.db", "127.0.0.1:0", None, False,
-        base_url="http://truenas.local:8710",
+        base_url="http://hark.example:8710",
     )
     assert "warning:" not in capsys.readouterr().out.lower()

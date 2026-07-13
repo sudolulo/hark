@@ -5,7 +5,7 @@ requires-python = ">=3.12"
 [[package]]
 name = "adscrub"
 version = "0.5.0"
-source = { editable = "../adscrub" }
+source = { git = "https://github.com/sudolulo/adscrub.git?branch=main#9c7100d6c8e86aba7d0cf22249df8540eb012f4b" }
 dependencies = [
     { name = "anthropic" },
     { name = "faster-whisper" },
@@ -19,21 +19,6 @@ gpu = [
     { name = "nvidia-cublas-cu12" },
     { name = "nvidia-cudnn-cu12" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "anthropic", specifier = ">=0.116.0" },
-    { name = "faster-whisper", specifier = ">=1.0" },
-    { name = "feedgen", specifier = ">=1.0.0" },
-    { name = "feedparser", specifier = ">=6.0.11" },
-    { name = "httpx", specifier = ">=0.28" },
-    { name = "nvidia-cublas-cu12", marker = "extra == 'gpu'" },
-    { name = "nvidia-cudnn-cu12", marker = "extra == 'gpu'" },
-]
-provides-extras = ["gpu"]
-
-[package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=8.3" }]
 
 [[package]]
 name = "annotated-types"
@@ -279,8 +264,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "adscrub", editable = "../adscrub" },
-    { name = "adscrub", extras = ["gpu"], marker = "extra == 'gpu'", editable = "../adscrub" },
+    { name = "adscrub", git = "https://github.com/sudolulo/adscrub.git?branch=main" },
+    { name = "adscrub", extras = ["gpu"], marker = "extra == 'gpu'", git = "https://github.com/sudolulo/adscrub.git?branch=main" },
     { name = "anthropic", specifier = ">=0.116.0" },
     { name = "feedgen", specifier = ">=1.0.0" },
     { name = "feedparser", specifier = ">=6.0.11" },

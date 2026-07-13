@@ -10,13 +10,13 @@
 # Usage:
 #   scripts/build-image.sh [TAG] [--gpu]
 #
-# TAG defaults to hark's own __version__. Image name is fixed at
-# git.onetick.ninja/flan/hark (Gitea's own registry — see CLAUDE.md).
+# TAG defaults to hark's own __version__. Override the image name with REGISTRY_IMAGE to
+# push somewhere of your own, e.g. REGISTRY_IMAGE=ghcr.io/you/hark
 set -euo pipefail
 
 HARK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ADSCRUB_DIR="${ADSCRUB_DIR:-$HARK_DIR/../adscrub}"
-REGISTRY_IMAGE="git.onetick.ninja/flan/hark"
+REGISTRY_IMAGE="${REGISTRY_IMAGE:-hark}"
 
 GPU=0
 TAG=""

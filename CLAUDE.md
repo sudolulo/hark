@@ -21,8 +21,8 @@ A homelab web service (NOT a mobile app, NOT an AntennaPod fork) that:
    a library, not by duplicating its code** — adscrub is a separate, standalone product.
    See "Architecture decisions" below before touching anything ad-stripping-related.
 
-Origin: ideas #2 and #3 in a private ideas repo (git.onetick.ninja) — read
-`~/project-ideas/README.md` for the full assessments and reasoning. The ad-stripping
+Origin: ideas #2 and #3 in the project-ideas tracker — see it for the full assessments
+and reasoning. The ad-stripping
 feature's own origin (AntennaPod's long-open feature request, why LLM-over-transcript
 beats fingerprinting/crowdsourcing) is in adscrub's own repo history.
 
@@ -30,8 +30,8 @@ beats fingerprinting/crowdsourcing) is in adscrub's own repo history.
 
 - Standalone service on the homelab, shaped like tiltmeter: scheduled ingest → pipeline →
   SQLite → API/UI. The owner's player stays AntennaPod.
-- **Input integration:** AntennaPod syncs subscriptions + play history to Nextcloud (gpodder
-  sync app) on truenas; hark reads from that API. OPML import as fallback. (Not wired yet —
+- **Input integration:** AntennaPod syncs subscriptions + play history to Nextcloud (its gpodder
+  sync app); hark reads from that API. OPML import as fallback. (Not wired yet —
   see M3 in docs/PLAN.md; ad-stripping still uses the manual `feeds.txt`/`resolve` flow too.)
 - **Output integration:** hark generates custom RSS feeds (e.g. "top episodes about topics
   you like", "best of candidate shows", ad-stripped versions of any subscription) that get
@@ -102,5 +102,11 @@ beats fingerprinting/crowdsourcing) is in adscrub's own repo history.
   or instructions.
 - Significant multi-commit features go on a feature branch; small increments can go on main
   while the project is pre-0.1.
-- Remote: private Gitea repo `flan/hark` (origin, SSH). Push to main is fine pre-0.2; also
-  note the feature-branch rule above. Do not create additional remotes or mirrors unprompted.
+- Remote: **Gitea `flan/hark` is canonical** (origin, SSH) — always push there. Push to main
+  is fine pre-0.2; also note the feature-branch rule above. The repo is public, and
+  `claude-fleet`'s `jobs/repo-mirror.sh` mirrors it out to `github.com/sudolulo/hark` for
+  visibility. GitHub is a read-only shop window: never push to it directly, and never treat
+  it as a source of truth. Policy lives in `claude-fleet/config/repos.toml`. Do not add other
+  remotes or mirrors unprompted.
+- Public-facing docs must not link to `git.onetick.ninja` — outsiders cannot reach it.
+  Cross-reference sibling projects by their GitHub URL.
