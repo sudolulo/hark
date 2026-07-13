@@ -738,8 +738,12 @@ def cmd_user_list(args: argparse.Namespace) -> int:
         print("no users", file=sys.stderr)
         return 1
     for u in users:
-        flags = " ".join(f for f, on in (("admin", u["is_admin"]), ("has-password", u["has_password"])) if on)
+        flags = " ".join(f for f, on in (
+            ("admin", u["is_admin"]), ("has-password", u["has_password"]),
+        ) if on)
         print(f"  {u['id']:<4} {u['username']:<20} {flags}")
+        if u["invite_pending"]:
+            print(f"        invite pending: /invite/{u['invite_token']}")
     return 0
 
 
@@ -750,6 +754,28 @@ def cmd_user_remove(args: argparse.Namespace) -> int:
         return 1
     print(f"removed {args.username!r} (sessions revoked; their show subscriptions are untouched"
           f" in hark.db — see docs/PLAN.md if you want those cleared too)")
+    return 0
+
+
+def cmd_user_invite(args: argparse.Namespace) -> int:
+    """Preferred over `user add` for onboarding someone else: a single-use
+    link scoped to just their account, instead of handing out the shared
+    $HARK_ADMIN_TOKEN (which also happens to work on any other
+    as-yet-passwordless row)."""
+    auth = _open_auth(args)
+    try:
+        _, token = auth.create_invite(args.username, is_admin=args.admin)
+    except Exception as exc:  # noqa: BLE001 — surfaces e.g. UNIQUE violation on a dup username
+        print(f"cannot invite {args.username!r}: {exc}", file=sys.stderr)
+        return 1
+    path = f"/invite/{token}"
+    base = args.base_url or os.environ.get("HARK_BASE_URL", "")
+    link = f"{base.rstrip('/')}{path}" if base else path
+
+    from . import web
+    print(f"invited {args.username!r}{' (admin)' if args.admin else ''} — send them this link"
+          f" (expires in {web.INVITE_EXPIRES_DAYS} days):")
+    print(f"  {link}")
     return 0
 
 
@@ -959,12 +985,25 @@ def main(argv: list[str] | None = None) -> int:
     p_user = sub.add_parser("user", help="manage accounts (auth.db) — multi-user subscriptions")
     user_sub = p_user.add_subparsers(dest="user_command", required=True)
 
-    p = user_sub.add_parser("add", help="create an account with no password set yet")
+    p = user_sub.add_parser(
+        "add", help="create an account bootstrapped via the shared $HARK_ADMIN_TOKEN"
+    )
     p.add_argument("username")
     p.add_argument("--admin", action="store_true",
-                   help="grant admin (global show toggles, user management via the web UI later)")
+                   help="grant admin (global show toggles, user management)")
     _add_auth_db_arg(p)
     p.set_defaults(func=cmd_user_add)
+
+    p = user_sub.add_parser(
+        "invite", help="create an account with a single-use invite link (preferred for onboarding)"
+    )
+    p.add_argument("username")
+    p.add_argument("--admin", action="store_true", help="grant admin")
+    p.add_argument("--base-url", default=None,
+                   help="prepended to the printed invite path (default: $HARK_BASE_URL, "
+                        "or just the bare /invite/<token> path if unset)")
+    _add_auth_db_arg(p)
+    p.set_defaults(func=cmd_user_invite)
 
     p = user_sub.add_parser("list", help="list accounts")
     _add_auth_db_arg(p)

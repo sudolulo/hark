@@ -5,6 +5,7 @@ stays fast; the logic under test is identical.
 """
 
 import base64
+import contextlib
 import http.client
 import json
 import threading
@@ -1279,6 +1280,96 @@ def test_delete_user_revokes_sessions(tmp_path):
     assert auth.session_user(token) is None
 
 
+def test_is_admin_true_for_admin_account(tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="t")
+    admin_id = auth.list_users()[0]["id"]
+    assert auth.is_admin(admin_id) is True
+
+
+def test_is_admin_false_for_regular_account(tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="t")
+    user_id = auth.create_user("alice")
+    assert auth.is_admin(user_id) is False
+
+
+def test_set_password_only_revokes_that_accounts_sessions(tmp_path):
+    # Regression: set_password used to run a bare `DELETE FROM sessions`
+    # with no WHERE clause — harmless pre-multi-user (only one account's
+    # sessions ever existed), but would silently log out every other
+    # account the moment any one of them changed a password.
+    auth = web.Auth(tmp_path / "auth.db", admin_token="t")
+    admin_id = auth.list_users()[0]["id"]
+    alice_id = auth.create_user("alice")
+    admin_session = auth.create_session(admin_id)
+    auth.set_password(alice_id, "alice-password")
+    assert auth.session_user(admin_session) is not None
+
+
+# --- Invite links (0.14.0) ---
+
+def test_create_invite_returns_working_token(tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="t")
+    user_id, token = auth.create_invite("alice")
+    invite = auth.find_by_invite_token(token)
+    assert invite is not None
+    assert invite["id"] == user_id and invite["username"] == "alice"
+
+
+def test_create_invite_defaults_to_non_admin(tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="t")
+    auth.create_invite("alice")
+    row = [u for u in auth.list_users() if u["username"] == "alice"][0]
+    assert row["is_admin"] == 0
+    assert row["invite_pending"] == 1
+
+
+def test_create_invite_can_grant_admin(tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="t")
+    auth.create_invite("alice", is_admin=True)
+    row = [u for u in auth.list_users() if u["username"] == "alice"][0]
+    assert row["is_admin"] == 1
+
+
+def test_find_by_invite_token_unknown_returns_none(tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="t")
+    assert auth.find_by_invite_token("not-a-real-token") is None
+
+
+def test_find_by_invite_token_expired_returns_none(tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="t")
+    _, token = auth.create_invite("alice")
+    # Simulate time passing past the expiry window rather than monkeypatching
+    # utcnow() globally (find_by_invite_token compares against the stored
+    # invite_expires_at, so backdating that column has the same effect).
+    with contextlib.closing(auth._connect()) as conn:
+        conn.execute(
+            "UPDATE users SET invite_expires_at = '2020-01-01T00:00:00Z' WHERE username = 'alice'"
+        )
+        conn.commit()
+    assert auth.find_by_invite_token(token) is None
+
+
+def test_accept_invite_sets_password_and_clears_token(tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="t")
+    user_id, token = auth.create_invite("alice")
+    accepted_id = auth.accept_invite(token, "a-real-password")
+    assert accepted_id == user_id
+    assert auth.verify("alice", "a-real-password") == user_id
+    assert auth.find_by_invite_token(token) is None  # single-use
+
+
+def test_accept_invite_unknown_token_returns_none(tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="t")
+    assert auth.accept_invite("bogus", "a-real-password") is None
+
+
+def test_accept_invite_cannot_be_reused(tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="t")
+    _, token = auth.create_invite("alice")
+    auth.accept_invite(token, "first-password")
+    assert auth.accept_invite(token, "second-password") is None
+
+
 # --- Multi-user: web UI + gpodder-sync isolation (0.14.0) ---
 
 def test_shows_page_defaults_to_my_list_only(server, tmp_path):
@@ -1414,3 +1505,196 @@ def test_gpodder_sync_both_accounts_share_one_global_show_row(server, tmp_path):
     assert conn.execute(
         "SELECT COUNT(*) FROM shows WHERE feed_url = ?", ("https://shared.example/feed",)
     ).fetchone()[0] == 1
+
+
+# --- Invite links: HTTP (0.14.0) ---
+
+def test_invite_page_renders_for_valid_token(server, tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="letmein")
+    _, token = auth.create_invite("alice")
+    resp, body = request(server, "GET", f"/invite/{token}")
+    assert resp.status == 200
+    assert "alice" in body
+
+
+def test_invite_page_404s_for_unknown_token(server):
+    resp, body = request(server, "GET", "/invite/not-a-real-token")
+    assert resp.status == 404
+    assert "invalid or has expired" in body
+
+
+def test_invite_accept_sets_password_and_logs_in(server, tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="letmein")
+    _, token = auth.create_invite("alice")
+    resp, _ = request(server, "POST", f"/invite/{token}",
+                      body={"password": "a-real-password", "password2": "a-real-password"})
+    assert resp.status == 303
+    assert resp.getheader("Set-Cookie", "").startswith("hark_session=")
+    assert auth.verify("alice", "a-real-password") is not None
+
+
+def test_invite_accept_rejects_short_password(server, tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="letmein")
+    _, token = auth.create_invite("alice")
+    resp, body = request(server, "POST", f"/invite/{token}",
+                         body={"password": "short", "password2": "short"})
+    assert resp.status == 400
+    assert "too short" in body
+
+
+def test_invite_accept_rejects_mismatched_passwords(server, tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="letmein")
+    _, token = auth.create_invite("alice")
+    resp, body = request(server, "POST", f"/invite/{token}",
+                         body={"password": "a-real-password", "password2": "different-password"})
+    assert resp.status == 400
+    assert "do not match" in body
+
+
+def test_invite_accept_cannot_be_reused(server, tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="letmein")
+    _, token = auth.create_invite("alice")
+    request(server, "POST", f"/invite/{token}",
+            body={"password": "first-password", "password2": "first-password"})
+    resp, _ = request(server, "POST", f"/invite/{token}",
+                      body={"password": "second-password", "password2": "second-password"})
+    assert resp.status == 404
+
+
+# --- /admin/users (0.14.0) ---
+
+def test_admin_users_page_requires_admin(server, tmp_path):
+    web.Auth(tmp_path / "auth.db", admin_token="letmein").create_user("viewer")
+    resp, _ = request(server, "POST", "/login", body={"username": "viewer", "password": "letmein"})
+    cookie = resp.getheader("Set-Cookie").split(";")[0]
+    resp, _ = request(server, "GET", "/admin/users", cookie=cookie)
+    assert resp.status == 403
+
+
+def test_admin_users_page_lists_accounts(server, tmp_path):
+    web.Auth(tmp_path / "auth.db", admin_token="letmein").create_user("alice")
+    cookie = login(server)
+    resp, body = request(server, "GET", "/admin/users", cookie=cookie)
+    assert resp.status == 200
+    assert "admin" in body and "alice" in body
+
+
+def test_admin_create_invite_shows_link(server):
+    cookie = login(server)
+    resp, _ = request(server, "POST", "/admin/users/invite",
+                      body={"username": "bob"}, cookie=cookie)
+    assert resp.status == 303
+    location = resp.getheader("Location")
+    assert "invite_link=" in location
+
+    resp, body = request(server, "GET", "/admin/users", cookie=cookie)
+    assert "/invite/" in body
+
+
+def test_admin_create_invite_requires_admin(server, tmp_path):
+    web.Auth(tmp_path / "auth.db", admin_token="letmein").create_user("viewer")
+    resp, _ = request(server, "POST", "/login", body={"username": "viewer", "password": "letmein"})
+    cookie = resp.getheader("Set-Cookie").split(";")[0]
+    resp, _ = request(server, "POST", "/admin/users/invite", body={"username": "bob"}, cookie=cookie)
+    assert resp.status == 403
+
+
+def test_admin_remove_user(server, tmp_path):
+    web.Auth(tmp_path / "auth.db", admin_token="letmein").create_user("alice")
+    cookie = login(server)
+    resp, _ = request(server, "POST", "/admin/users/remove", body={"username": "alice"}, cookie=cookie)
+    assert resp.status == 303
+    resp, body = request(server, "GET", "/admin/users", cookie=cookie)
+    assert "alice" not in body
+
+
+def test_admin_cannot_remove_own_account(server):
+    cookie = login(server)
+    resp, body = request(server, "POST", "/admin/users/remove", body={"username": "admin"}, cookie=cookie)
+    assert resp.status == 400
+    assert "own account" in body
+
+
+# --- Per-user show quota (0.14.0) ---
+
+def _seed_shows(tmp_path, n, offset=0):
+    conn = db.connect(tmp_path / "hark.db")
+    for i in range(offset, offset + n):
+        conn.execute(
+            "INSERT INTO shows (query, title, feed_url) VALUES (?, ?, ?)",
+            (f"q{i}", f"Show {i}", f"http://x/{i}"),
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_subscribe_blocked_at_quota_for_non_admin(server, tmp_path):
+    web.Auth(tmp_path / "auth.db", admin_token="letmein").create_user("alice")
+    _seed_shows(tmp_path, 11, offset=100)  # 100..110 -> show ids 2..12 (id 1 is the fixture's Show A)
+    resp, _ = request(server, "POST", "/login", body={"username": "alice", "password": "letmein"})
+    cookie = resp.getheader("Set-Cookie").split(";")[0]
+
+    conn = db.connect(tmp_path / "hark.db")
+    show_ids = [r["id"] for r in conn.execute("SELECT id FROM shows WHERE query LIKE 'q1%'")]
+    assert len(show_ids) == 11
+
+    for sid in show_ids[:10]:
+        resp, _ = request(server, "POST", f"/show/{sid}/subscribe", body={}, cookie=cookie)
+        assert resp.status == 303
+    resp, _ = request(server, "POST", f"/show/{show_ids[10]}/subscribe", body={}, cookie=cookie)
+    assert resp.status == 303
+    assert "err=quota" in resp.getheader("Location")
+
+    resp, body = request(server, "GET", f"/show/{show_ids[10]}", cookie=cookie)
+    assert "Not in your list yet." in body
+
+
+def test_subscribe_admin_exempt_from_quota(server, tmp_path):
+    _seed_shows(tmp_path, 11, offset=200)
+    cookie = login(server)  # admin, already subscribed to Show A via the fixture
+    conn = db.connect(tmp_path / "hark.db")
+    show_ids = [r["id"] for r in conn.execute("SELECT id FROM shows WHERE query LIKE 'q2%'")]
+    for sid in show_ids:
+        resp, _ = request(server, "POST", f"/show/{sid}/subscribe", body={}, cookie=cookie)
+        assert resp.status == 303
+    resp, body = request(server, "GET", f"/show/{show_ids[-1]}", cookie=cookie)
+    assert "In your list." in body
+
+
+def test_resubscribe_at_quota_is_still_idempotent(server, tmp_path):
+    # Re-adding a show already in the list must not be blocked by being AT
+    # the cap — only a genuinely new addition should be.
+    web.Auth(tmp_path / "auth.db", admin_token="letmein").create_user("alice")
+    _seed_shows(tmp_path, 10, offset=300)
+    resp, _ = request(server, "POST", "/login", body={"username": "alice", "password": "letmein"})
+    cookie = resp.getheader("Set-Cookie").split(";")[0]
+    conn = db.connect(tmp_path / "hark.db")
+    show_ids = [r["id"] for r in conn.execute("SELECT id FROM shows WHERE query LIKE 'q3%'")]
+    for sid in show_ids:
+        request(server, "POST", f"/show/{sid}/subscribe", body={}, cookie=cookie)
+    resp, _ = request(server, "POST", f"/show/{show_ids[0]}/subscribe", body={}, cookie=cookie)
+    assert resp.status == 303
+    assert "err=quota" not in resp.getheader("Location")
+
+
+def test_gpodder_sync_quota_enforced_for_non_admin(server, tmp_path):
+    web.Auth(tmp_path / "auth.db", admin_token="letmein").create_user("alice")
+    auth = ("alice", "letmein")
+    urls = [f"https://quota-test-{i}.example/feed" for i in range(15)]
+    request(server, "POST", "/index.php/apps/gpoddersync/subscription_change/create",
+            auth=auth, json_body={"add": urls, "remove": []})
+    resp, body = request(server, "GET", "/index.php/apps/gpoddersync/subscriptions",
+                         auth=auth, json_body=None)
+    data = json.loads(body)
+    assert len(data["add"]) == 10
+
+
+def test_gpodder_sync_quota_not_enforced_for_admin(server, tmp_path):
+    admin_auth = ("admin", "letmein")
+    urls = [f"https://admin-quota-test-{i}.example/feed" for i in range(15)]
+    request(server, "POST", "/index.php/apps/gpoddersync/subscription_change/create",
+            auth=admin_auth, json_body={"add": urls, "remove": []})
+    resp, body = request(server, "GET", "/index.php/apps/gpoddersync/subscriptions",
+                         auth=admin_auth, json_body=None)
+    data = json.loads(body)
+    assert len([u for u in urls if u in data["add"]]) == 15

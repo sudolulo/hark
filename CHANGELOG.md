@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-07-13
+
+### Added
+
+- **Invite links.** `hark user invite <username>` (and a matching `/admin/users`
+  web page) creates an account with a single-use `/invite/<token>` link instead
+  of the shared `$HARK_ADMIN_TOKEN` bootstrap — a link scoped to exactly one
+  account, safe to hand to a specific friend, rather than a master credential
+  that also happens to work on any other as-yet-passwordless row. Expires after
+  7 days; visiting it lets them set their own password and logs them straight
+  in. `hark user add`/the token-bootstrap flow both still work unchanged.
+- **`/admin/users`** — admin-only page to invite accounts, see pending invite
+  links (persistently, not just in the one redirect right after creation —
+  `list_users()` now returns the raw `invite_token`), and remove accounts.
+  Exists mainly because this project's own homelab deploy has no container
+  shell access, so CLI-only user management wasn't actually usable day to day.
+- **Per-account show quota.** Non-admin accounts are capped at
+  `MAX_SHOWS_PER_USER` (10) subscriptions — enforced identically whether a
+  show gets added via the web UI's "add to my list" or AntennaPod's gpodder
+  sync. The admin account is exempt. The gpodder-sync path can't report a
+  per-item rejection (the protocol has no such signal), so a feed_url that
+  would push someone over the cap is silently skipped rather than logged and
+  then re-offered on the next sync as if it succeeded.
+
+### Fixed
+
+- `Auth.set_password` ran a bare `DELETE FROM sessions` — no `WHERE user_id`.
+  Harmless pre-multi-user (only one account's sessions ever existed to
+  delete), but left as-is it would have logged out *every* account the
+  moment any single one of them changed a password. Found while wiring up
+  invite acceptance, which calls `set_password` right before creating the
+  new account's own first session.
+
 ## [0.14.0] - 2026-07-13
 
 ### Added

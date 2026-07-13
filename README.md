@@ -26,11 +26,17 @@ history, but the show catalog and everything the pipeline produces
 (transcripts, ad spans, topic extraction) stay global and shared — a show two
 accounts both subscribe to only gets processed once, not once per subscriber.
 Point each person's AntennaPod at hark's gpodder-sync endpoint with their own
-login and they see only their own subscriptions/history. `hark user
-add/list/remove` manages accounts (CLI-only, `--auth-db`); the bootstrap
-admin account can also toggle the two settings that are genuinely
-shared — ad-stripping and topic-index enablement per show — everyone else
-just curates their own list from `/shows` or AntennaPod.
+login and they see only their own subscriptions/history. Non-admin accounts
+are capped at 10 podcasts (enforced the same way whether the show gets added
+via AntennaPod sync or the web UI); the admin account is exempt and can also
+toggle the two settings that are genuinely shared across everyone —
+ad-stripping and topic-index enablement per show.
+
+Inviting someone: `hark user invite <name>` (or the `/admin/users` web page)
+creates an account with a one-time `/invite/<token>` link — send it to them,
+they set their own password and land straight in the dashboard. No shared
+secret changes hands; the link only works for that one account and expires
+after a week.
 
 The deployed instance runs its own pipeline unattended: subscription sync, ingest,
 canonicalization, chapter-scanning, transcription, and ad-cutting all run on a
@@ -114,9 +120,9 @@ uv run hark compare                    # live, needs $ANTHROPIC_API_KEY
 uv run hark load-comparisons out.jsonl # pre-computed (batch runs, no API key needed)
 
 # multi-user accounts (auth.db only — no --db)
-uv run hark user add alice [--admin]   # no password yet: log in once with $HARK_ADMIN_TOKEN,
-                                        # then set a real password at /account
-uv run hark user list
+uv run hark user invite alice [--admin]  # preferred: prints a one-time /invite/<token> link
+uv run hark user add alice [--admin]     # bootstraps via the shared $HARK_ADMIN_TOKEN instead
+uv run hark user list                    # shows any still-pending invite links too
 uv run hark user remove alice
 ```
 
@@ -154,18 +160,18 @@ list defaulting to your own subscriptions (`?all=1` browses the full
 catalog) and flagging any not yet reviewed for the topic index,
 genre-filtered and paginated topic browsing, an interim `/notable` page
 (most-contested claims comparisons, rarest-genre episodes), and search. The
-whole site is behind a session login wall; only `/login`, `/logout` and
-`/healthz` are open. Bootstrap: set `HARK_ADMIN_TOKEN`, sign in as `admin`
-with that token, then set a real password at `/account` (the token stops
-working once a password exists; with neither set, login is impossible —
-fail-closed). Multi-user: `hark user add` creates further accounts (CLI
-only — see Usage above); each logs in with the same shared
-`HARK_ADMIN_TOKEN` once, then sets its own password. Sessions live in a
-separate `auth.db` (`--auth-db` / `$HARK_AUTH_DB`) so replacing `hark.db`
-with a fresh data snapshot never logs anyone out — but note that per-account
-subscription lists (`user_shows`) live in *hark.db*, not auth.db, so they
-follow hark.db's own data, not the account. Set `HARK_COOKIE_SECURE=1` when
-serving behind a TLS-terminating proxy.
+whole site is behind a session login wall; only `/login`, `/logout`,
+`/invite/<token>` and `/healthz` are open. Bootstrap: set `HARK_ADMIN_TOKEN`,
+sign in as `admin` with that token, then set a real password at `/account`
+(the token stops working once a password exists; with neither set, login is
+impossible — fail-closed). Multi-user: `/admin/users` (admin-only) or `hark
+user invite` creates further accounts with a one-time invite link — see
+Usage above; `hark user add` (the shared-token bootstrap) still works too.
+Sessions live in a separate `auth.db` (`--auth-db` / `$HARK_AUTH_DB`) so
+replacing `hark.db` with a fresh data snapshot never logs anyone out — but
+note that per-account subscription lists (`user_shows`) live in *hark.db*,
+not auth.db, so they follow hark.db's own data, not the account. Set
+`HARK_COOKIE_SECURE=1` when serving behind a TLS-terminating proxy.
 
 The same server also answers `GET /feed/<show_id>/<token>` (the cleaned RSS
 feed) and `GET /audio/<episode_id>/<token>.<ext>` (locally-cut episodes) —

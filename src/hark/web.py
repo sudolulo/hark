@@ -56,12 +56,14 @@ MAX_JSON_BODY_BYTES = 1_000_000
 
 AUTH_SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
-    id            INTEGER PRIMARY KEY,
-    username      TEXT NOT NULL UNIQUE,
-    salt          TEXT,
-    password_hash TEXT,
-    is_admin      INTEGER NOT NULL DEFAULT 0,
-    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    id                INTEGER PRIMARY KEY,
+    username          TEXT NOT NULL UNIQUE,
+    salt              TEXT,
+    password_hash     TEXT,
+    is_admin          INTEGER NOT NULL DEFAULT 0,
+    invite_token      TEXT UNIQUE,
+    invite_expires_at TEXT,
+    created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 CREATE TABLE IF NOT EXISTS sessions (
     token      TEXT PRIMARY KEY,
@@ -75,7 +77,16 @@ CREATE TABLE IF NOT EXISTS sessions (
 # executescript()'s CREATE-IF-NOT-EXISTS never touched existing tables).
 _AUTH_MIGRATIONS = (
     ("users", "is_admin", "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0"),
+    ("users", "invite_token", "ALTER TABLE users ADD COLUMN invite_token TEXT UNIQUE"),
+    ("users", "invite_expires_at", "ALTER TABLE users ADD COLUMN invite_expires_at TEXT"),
 )
+
+INVITE_EXPIRES_DAYS = 7
+# MAX_SHOWS_PER_USER lives in gpodder_server.py (imported below) — shared
+# with the AntennaPod-sync path so the cap is identical regardless of
+# whether a show gets added via sync or the web UI's "add to my list". The
+# admin account itself is exempt (see is_admin() below).
+MAX_SHOWS_PER_USER = gpodder_server.MAX_SHOWS_PER_USER
 
 
 def stretch(salt: str, password: str) -> str:
@@ -154,9 +165,14 @@ class Auth:
             return cur.lastrowid
 
     def list_users(self) -> list[sqlite3.Row]:
+        """invite_token is included (not just an invite_pending boolean) so a
+        caller can rebuild the /invite/<token> link for a still-pending
+        invite without having to create a new one — otherwise the link only
+        ever existed transiently, right after creation."""
         with contextlib.closing(self._connect()) as conn:
             return conn.execute(
                 "SELECT id, username, is_admin, password_hash IS NOT NULL AS has_password,"
+                " invite_token, invite_token IS NOT NULL AS invite_pending, invite_expires_at,"
                 " created_at FROM users ORDER BY id"
             ).fetchall()
 
@@ -166,6 +182,62 @@ class Auth:
             cur = conn.execute("DELETE FROM users WHERE username = ?", (username,))
             conn.commit()
             return cur.rowcount > 0
+
+    def is_admin(self, user_id: int) -> bool:
+        with contextlib.closing(self._connect()) as conn:
+            row = conn.execute("SELECT is_admin FROM users WHERE id = ?", (user_id,)).fetchone()
+            return bool(row and row["is_admin"])
+
+    def create_invite(self, username: str, is_admin: bool = False) -> tuple[int, str]:
+        """Register a new account with a single-use invite token instead of
+        the shared $HARK_ADMIN_TOKEN bootstrap — a link you can hand a
+        specific friend, scoped to just their own account, rather than a
+        master credential that also happens to work on any other
+        as-yet-passwordless row. Returns (user_id, token); the caller (web
+        route or CLI) builds the actual /invite/<token> URL, since Auth
+        itself doesn't know the deployment's base_url."""
+        token = secrets.token_urlsafe(24)
+        expires = iso(utcnow() + timedelta(days=INVITE_EXPIRES_DAYS))
+        with contextlib.closing(self._connect()) as conn:
+            cur = conn.execute(
+                "INSERT INTO users (username, is_admin, invite_token, invite_expires_at)"
+                " VALUES (?, ?, ?, ?)",
+                (username, int(is_admin), token, expires),
+            )
+            conn.commit()
+            return cur.lastrowid, token
+
+    def find_by_invite_token(self, token: str) -> sqlite3.Row | None:
+        """None if the token doesn't exist, already got used (password set,
+        invite_token cleared by accept_invite), or expired."""
+        with contextlib.closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT id, username, invite_expires_at FROM users WHERE invite_token = ?",
+                (token,),
+            ).fetchone()
+            if row is None:
+                return None
+            if row["invite_expires_at"] and parse_iso(row["invite_expires_at"]) < utcnow():
+                return None
+            return row
+
+    def accept_invite(self, token: str, password: str) -> int | None:
+        """Sets the invited account's password and clears the invite token
+        (single-use) in one step. Returns the user id on success, None if
+        the token is invalid/expired — re-checked here, not just by the
+        route calling find_by_invite_token() first, so this is safe to call
+        on its own too."""
+        user = self.find_by_invite_token(token)
+        if user is None:
+            return None
+        self.set_password(user["id"], password)
+        with contextlib.closing(self._connect()) as conn:
+            conn.execute(
+                "UPDATE users SET invite_token = NULL, invite_expires_at = NULL WHERE id = ?",
+                (user["id"],),
+            )
+            conn.commit()
+        return user["id"]
 
     def verify(self, username: str, password: str) -> int | None:
         """Return user id on success. Fail-closed: an account with no stored
@@ -216,14 +288,20 @@ class Auth:
             conn.commit()
 
     def set_password(self, user_id: int, password: str) -> None:
-        """Set a new password and revoke every session (all devices log out)."""
+        """Set a new password and revoke every session *for this account*
+        (all its devices log out). Scoped to user_id — before multi-user
+        this was a bare `DELETE FROM sessions`, harmless when there was only
+        ever one account's sessions to delete; left unscoped it would log
+        out every other account too the moment any one of them changed a
+        password, found while wiring up invite acceptance (which calls this
+        right before creating the new account's own first session)."""
         salt = secrets.token_hex(16)
         with contextlib.closing(self._connect()) as conn:
             conn.execute(
                 "UPDATE users SET salt = ?, password_hash = ? WHERE id = ?",
                 (salt, stretch(salt, password), user_id),
             )
-            conn.execute("DELETE FROM sessions")
+            conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
             conn.commit()
 
 
@@ -369,13 +447,24 @@ class App:
 
     def subscribe(self, user_id: int, show_id: int) -> bool | None:
         """Add a show to one account's personal list. Returns None if the
-        show doesn't exist, True on success — never False (idempotent, same
-        as an AntennaPod re-sync of an already-added feed)."""
+        show doesn't exist, False if it would push a non-admin account over
+        MAX_SHOWS_PER_USER, True on success. Re-subscribing to a show
+        already in the list is idempotent (checked before the quota count,
+        so it's never itself blocked by being at the limit)."""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
             if conn.execute("SELECT 1 FROM shows WHERE id = ?", (show_id,)).fetchone() is None:
                 return None
+            already_subscribed = conn.execute(
+                "SELECT 1 FROM user_shows WHERE user_id = ? AND show_id = ?", (user_id, show_id)
+            ).fetchone() is not None
+            if not already_subscribed and not self.auth.is_admin(user_id):
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM user_shows WHERE user_id = ?", (user_id,)
+                ).fetchone()[0]
+                if count >= MAX_SHOWS_PER_USER:
+                    return False
             conn.execute(
                 "INSERT OR IGNORE INTO user_shows (user_id, show_id) VALUES (?, ?)",
                 (user_id, show_id),
@@ -808,9 +897,16 @@ class App:
         )
         pager = pagination_html(f"/show/{show_id}", {}, page_num, total_episodes, "episodes")
         feed_url = podcast_feed.feed_url(show, self.base_url)
+        quota_note = ""
+        if params.get("err", [""])[0] == "quota" and not subscribed:
+            quota_note = (
+                f'<p class="pending">You\'ve reached your {MAX_SHOWS_PER_USER}-podcast limit — '
+                "remove one from your list before adding another.</p>"
+            )
         subscribe_section = (
             '<div class="status">'
             f'<p>{"In your list." if subscribed else "Not in your list yet."}</p>'
+            f"{quota_note}"
             f'<form method="post" action="/show/{show_id}/'
             f'{"unsubscribe" if subscribed else "subscribe"}">'
             f'<button class="ghost">{"Remove from my list" if subscribed else "Add to my list"}'
@@ -962,6 +1058,63 @@ class App:
 <form method="post" action="/logout"><button class="ghost">Log out</button></form>
 </div>"""
         return page("account", body, user["username"])
+
+    def view_admin_users(self, user, params: dict, msg: str = "") -> str:
+        """Admin-only. Web-UI equivalent of `hark user add/invite/remove` —
+        exists mainly because the admin might not have shell access to the
+        deployed container to run those directly (this project's own homelab
+        deploy doesn't currently expose one)."""
+        accounts = self.auth.list_users()
+        conn = self.db()
+        try:
+            counts = {
+                r["user_id"]: r["n"] for r in conn.execute(
+                    "SELECT user_id, COUNT(*) AS n FROM user_shows GROUP BY user_id"
+                )
+            }
+        finally:
+            conn.close()
+        invite_link = params.get("invite_link", [""])[0]
+        link_note = (
+            f'<p class="pending">Invite created — send this link: '
+            f'<code>{esc(invite_link)}</code></p>'
+        ) if invite_link else ""
+        note = f"<p>{esc(msg)}</p>" if msg else ""
+
+        def status_cell(a) -> str:
+            if not a["invite_pending"]:
+                return "" if a["has_password"] else "no password"
+            # The link stays visible for as long as the invite itself does
+            # (list_users() now returns the raw token) — otherwise it only
+            # ever existed transiently, in the one redirect right after
+            # creation, with no way to re-find it if that got lost.
+            link = f"{self.base_url}/invite/{a['invite_token']}"
+            return f'invite pending — <code>{esc(link)}</code>'
+
+        rows = "".join(
+            f"<tr><td>{esc(a['username'])}</td>"
+            f"<td class='dim'>{'admin' if a['is_admin'] else ''}</td>"
+            f"<td class='num'>{counts.get(a['id'], 0)}"
+            f"{'' if a['is_admin'] else f'/{MAX_SHOWS_PER_USER}'}</td>"
+            f"<td class='dim'>{status_cell(a)}</td>"
+            + (
+                '<td><form method="post" action="/admin/users/remove">'
+                f'<input type="hidden" name="username" value="{esc(a["username"])}">'
+                '<button class="ghost">Remove</button></form></td>'
+                if a["username"] != user["username"] else "<td></td>"
+            ) + "</tr>"
+            for a in accounts
+        )
+        body = f"""<h1>users</h1>{link_note}{note}
+<table><tr><th>account</th><th>role</th><th>podcasts</th><th>status</th><th></th></tr>
+{rows}</table>
+<h2>Invite someone</h2>
+<form method="post" action="/admin/users/invite" class="login-box">
+<label>Username</label><input type="text" name="username" required autofocus>
+<label><input type="checkbox" name="is_admin" value="1"> Admin</label>
+<button>Create invite link</button>
+</form>"""
+        return page("users", body, user["username"])
 
 
 def _topics_filter(genre: str, q: str) -> tuple[str, list]:
@@ -1243,6 +1396,21 @@ LOGIN_PAGE = """<div class="login-box">
 <button>Sign in</button>
 </form></div>"""
 
+INVITE_PAGE = """<div class="login-box">
+<h1>hark</h1>
+<p>You've been invited as <strong>{username}</strong>. Set a password to get started.</p>
+{err}
+<form method="post" action="/invite/{token}">
+<label>Password</label><input type="password" name="password" minlength="8" autofocus required>
+<label>Repeat</label><input type="password" name="password2" minlength="8" required>
+<button>Set password</button>
+</form></div>"""
+
+INVITE_INVALID_PAGE = """<div class="login-box">
+<h1>hark</h1>
+<p class="err">This invite link is invalid or has expired — ask whoever invited you for a new one.</p>
+</div>"""
+
 
 # ---------------------------------------------------------------------------
 # HTTP plumbing
@@ -1460,10 +1628,11 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(400, "bad request", "text/plain; charset=utf-8")
         add = [u for u in body.get("add", []) if isinstance(u, str)]
         remove = [u for u in body.get("remove", []) if isinstance(u, str)]
+        is_admin = self.app.auth.is_admin(user_id)
         conn = sqlite3.connect(self.app.db_path)
         conn.row_factory = sqlite3.Row
         try:
-            ts = gpodder_server.record_subscription_changes(conn, user_id, add, remove)
+            ts = gpodder_server.record_subscription_changes(conn, user_id, add, remove, is_admin)
         finally:
             conn.close()
         self.respond(200, json.dumps({"timestamp": ts}), "application/json")
@@ -1510,6 +1679,13 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(200, STYLE, "text/css; charset=utf-8")
         if route == "/login":
             return self.respond(200, page("login", LOGIN_PAGE.format(err="")))
+        if route.startswith("/invite/"):
+            token = route.removeprefix("/invite/")
+            invite = app.auth.find_by_invite_token(token)
+            if invite is None:
+                return self.respond(404, page("invite", INVITE_INVALID_PAGE))
+            body = INVITE_PAGE.format(username=esc(invite["username"]), token=esc(token), err="")
+            return self.respond(200, page("invite", body))
         if route.startswith("/feed/"):
             return self._serve_feed(route)
         if route.startswith("/audio/"):
@@ -1563,6 +1739,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(200, body)
             if route == "/account":
                 return self.respond(200, app.view_account(user))
+            if route == "/admin/users":
+                if not user["is_admin"]:
+                    return self.forbidden(user)
+                return self.respond(200, app.view_admin_users(user, params))
         except sqlite3.OperationalError:
             return self.db_unavailable(user)
         return self.not_found(user)
@@ -1590,6 +1770,31 @@ class Handler(BaseHTTPRequestHandler):
             token = app.auth.create_session(user_id)
             return self.redirect("/", {"Set-Cookie": app.cookie_attrs(token, SESSION_DAYS * 86_400)})
 
+        if route.startswith("/invite/"):
+            invite_token = route.removeprefix("/invite/")
+            invite = app.auth.find_by_invite_token(invite_token)
+            if invite is None:
+                return self.respond(404, page("invite", INVITE_INVALID_PAGE))
+            pw, pw2 = form.get("password", ""), form.get("password2", "")
+            err = None
+            if len(pw) < 8:
+                err = "Password too short (min 8)."
+            elif pw != pw2:
+                err = "Passwords do not match."
+            if err:
+                body = INVITE_PAGE.format(
+                    username=esc(invite["username"]), token=esc(invite_token),
+                    err=f'<p class="err">{esc(err)}</p>',
+                )
+                return self.respond(400, page("invite", body))
+            user_id = app.auth.accept_invite(invite_token, pw)
+            if user_id is None:  # expired between the GET and this POST
+                return self.respond(404, page("invite", INVITE_INVALID_PAGE))
+            session_token = app.auth.create_session(user_id)
+            return self.redirect(
+                "/", {"Set-Cookie": app.cookie_attrs(session_token, SESSION_DAYS * 86_400)}
+            )
+
         user = app.auth.session_user(self.cookie_token())
         if user is None:
             return self.redirect("/login")
@@ -1606,6 +1811,34 @@ class Handler(BaseHTTPRequestHandler):
                     return self.respond(400, app.view_account(user, err="Passwords do not match."))
                 app.auth.set_password(user["id"], pw)
                 return self.redirect("/login", {"Set-Cookie": app.cookie_attrs("", 0)})
+            if route == "/admin/users/invite":
+                if not user["is_admin"]:
+                    return self.forbidden(user)
+                username = form.get("username", "").strip()
+                if not username:
+                    return self.respond(
+                        400, app.view_admin_users(user, {}, msg="Username required.")
+                    )
+                try:
+                    _, invite_token = app.auth.create_invite(
+                        username, is_admin=form.get("is_admin") == "1"
+                    )
+                except sqlite3.IntegrityError:
+                    return self.respond(
+                        400, app.view_admin_users(user, {}, msg=f"{username!r} already exists.")
+                    )
+                link = f"{app.base_url}/invite/{invite_token}"
+                return self.redirect(f"/admin/users?invite_link={urllib.parse.quote(link)}")
+            if route == "/admin/users/remove":
+                if not user["is_admin"]:
+                    return self.forbidden(user)
+                username = form.get("username", "")
+                if username == user["username"]:
+                    return self.respond(
+                        400, app.view_admin_users(user, {}, msg="Can't remove your own account.")
+                    )
+                app.auth.delete_user(username)
+                return self.redirect("/admin/users")
             if route.startswith("/show/") and route.endswith("/adblock"):
                 if not user["is_admin"]:
                     return self.forbidden(user)
@@ -1631,8 +1864,11 @@ class Handler(BaseHTTPRequestHandler):
                     show_id = int(route.removeprefix("/show/").removesuffix("/subscribe"))
                 except ValueError:
                     return self.not_found(user)
-                if app.subscribe(user["id"], show_id) is None:
+                result = app.subscribe(user["id"], show_id)
+                if result is None:
                     return self.not_found(user)
+                if result is False:
+                    return self.redirect(f"/show/{show_id}?err=quota")
                 return self.redirect(f"/show/{show_id}")
             if route.startswith("/show/") and route.endswith("/unsubscribe"):
                 try:

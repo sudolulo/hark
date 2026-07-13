@@ -80,8 +80,17 @@ beats fingerprinting/crowdsourcing) is in adscrub's own repo history.
   that would defeat the entire point. `users` lives in auth.db, not hark.db (same
   session-survives-a-snapshot-restore reasoning as everything else in this file); `user_id`
   columns in hark.db are a soft cross-database reference, not an enforced FK. User
-  management is CLI-only (`hark user add/list/remove`) — no web admin page, deliberately
-  minimal; add one only if actually asked for. See docs/PLAN.md's multi-user section.
+  management now has both a CLI (`hark user add/invite/list/remove`) and an admin-only
+  `/admin/users` web page — the web page got added (2026-07-13, 0.15.0) once it turned
+  out this project's own homelab deploy has no container shell access, so CLI-only
+  wasn't actually usable day to day. Both call the same `Auth` methods; neither is more
+  authoritative. `hark user invite`/`/admin/users` is the preferred onboarding path
+  (single-use `/invite/<token>` link, scoped to one account) over `hark user add` (the
+  shared-`$HARK_ADMIN_TOKEN` bootstrap, still supported but hands out a credential that
+  also works on any other passwordless row). Non-admin accounts are capped at
+  `gpodder_server.MAX_SHOWS_PER_USER` (10) — enforced on both paths that can add a
+  subscription (`web.py`'s `subscribe()` and `record_subscription_changes()`), admin
+  exempt. See docs/PLAN.md's multi-user and invite-links sections.
 
 ## Conventions
 

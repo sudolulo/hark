@@ -359,6 +359,50 @@ server (M3) made it obvious more than one person could point AntennaPod at hark.
   table rebuild (rename/create/copy/drop), not a plain `ALTER TABLE ADD COLUMN` — a new
   UNIQUE constraint can't be bolted onto an existing table any other way in SQLite.
 
+## Invite links + per-user quota (done, 0.15.0)
+
+Follow-up to multi-user, on explicit request: 0.14.0's account creation only had the
+shared `$HARK_ADMIN_TOKEN` bootstrap, workable for the owner's own account but not
+something you'd want to hand to a friend (it's a master credential, not scoped to
+their account) — and 0.14.0 shipped with no cap on how many shows a non-admin account
+could add, "make sure users can't add too many podcasts" being an explicit ask here.
+
+- **Invite links, not a bigger shared secret.** `Auth.create_invite()` generates a
+  single-use `invite_token` (new `users` column, `auth.db`) scoped to exactly one
+  account, expiring after `INVITE_EXPIRES_DAYS` (7). `/invite/<token>` (unauthenticated,
+  token-gated — same category as `/feed`/`/audio`'s own token gating) lets that person
+  set their password directly and logs them in; `accept_invite()` clears the token
+  (single-use) in the same call that sets it. `hark user add`'s original bootstrap-token
+  flow stays available unchanged — `create_invite`/`create_user` are siblings, not a
+  replacement.
+- **`/admin/users` exists because CLI-only user management wasn't actually usable
+  day to day** — this project's own homelab deploy has no container shell access (see
+  the earlier "still-open" note above this section, now moot for this specific need),
+  so an admin without shell access literally couldn't run `hark user add`/`invite`
+  before this. The page reuses the same `Auth` methods the CLI does; neither is more
+  authoritative than the other.
+- **Invite links persist, not just the one post-creation redirect.** First cut only
+  showed the link in the redirect's query string — reasonable-looking until you
+  actually lose the tab before copying it, with no way to see it again short of
+  deleting and recreating the invite. `list_users()` now returns the raw `invite_token`
+  (not just an `invite_pending` boolean) so both `/admin/users` and `hark user list`
+  can always re-show a still-pending invite's link.
+- **`MAX_SHOWS_PER_USER = 10`, admin-exempt, enforced identically on both paths that
+  can add a subscription** — `web.py`'s `subscribe()` (web UI) and
+  `gpodder_server.record_subscription_changes()` (AntennaPod sync) both check it, one
+  constant defined in `gpodder_server.py` and imported by `web.py` rather than defined
+  twice. The web path can show a real error (`?err=quota` → a message on the show
+  page); the AntennaPod-sync path can't — gpodder-sync has no per-item
+  rejection/partial-success signal, so a feed_url that would push a non-admin over the
+  cap is dropped silently (no `subscription_changes` row, no `user_shows` row) rather
+  than logged and then re-offered as "added" on the next `since=` sync.
+- **Found and fixed along the way:** `Auth.set_password()` ran a bare `DELETE FROM
+  sessions` with no `WHERE user_id` — harmless before multi-user (only one account's
+  sessions ever existed to delete), but unscoped it would silently log out *every*
+  account the instant any single one of them changed a password. Surfaced by invite
+  acceptance, which calls `set_password()` immediately before creating the new
+  account's own first session.
+
 ## M4 — episode scoring (tiltmeter-style)
 
 - Defined interestingness metrics, calibration loop against owner ratings.

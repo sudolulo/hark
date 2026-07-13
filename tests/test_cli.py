@@ -873,3 +873,53 @@ def test_sync_subscriptions_populates_user_shows_for_admin(tmp_path, monkeypatch
     assert conn.execute(
         "SELECT 1 FROM user_shows WHERE user_id = 1 AND show_id = ?", (show_id,)
     ).fetchone() is not None
+
+
+def test_user_invite_creates_account_and_prints_link(tmp_path, capsys):
+    auth_db = tmp_path / "auth.db"
+    rc = cli.main(["user", "invite", "alice", "--auth-db", str(auth_db)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "invited 'alice'" in out
+    assert "/invite/" in out
+
+    from hark import web
+    auth = web.Auth(auth_db, admin_token=None)
+    row = [u for u in auth.list_users() if u["username"] == "alice"][0]
+    assert row["invite_pending"] == 1
+
+
+def test_user_invite_admin_flag(tmp_path, capsys):
+    auth_db = tmp_path / "auth.db"
+    cli.main(["user", "invite", "bob", "--admin", "--auth-db", str(auth_db)])
+    assert "(admin)" in capsys.readouterr().out
+
+    from hark import web
+    auth = web.Auth(auth_db, admin_token=None)
+    row = [u for u in auth.list_users() if u["username"] == "bob"][0]
+    assert row["is_admin"] == 1
+
+
+def test_user_invite_prepends_base_url(tmp_path, capsys):
+    auth_db = tmp_path / "auth.db"
+    cli.main(["user", "invite", "alice", "--base-url", "https://hark.example",
+              "--auth-db", str(auth_db)])
+    out = capsys.readouterr().out
+    assert "https://hark.example/invite/" in out
+
+
+def test_user_invite_duplicate_fails(tmp_path, capsys):
+    auth_db = tmp_path / "auth.db"
+    cli.main(["user", "invite", "alice", "--auth-db", str(auth_db)])
+    rc = cli.main(["user", "invite", "alice", "--auth-db", str(auth_db)])
+    assert rc == 1
+    assert "cannot invite" in capsys.readouterr().err
+
+
+def test_user_list_shows_invite_link(tmp_path, capsys):
+    auth_db = tmp_path / "auth.db"
+    cli.main(["user", "invite", "alice", "--auth-db", str(auth_db)])
+    rc = cli.main(["user", "list", "--auth-db", str(auth_db)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "invite pending: /invite/" in out

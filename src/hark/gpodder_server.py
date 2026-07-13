@@ -28,13 +28,20 @@ from . import resolve
 _ACTION_TS_FORMAT = "%Y-%m-%dT%H:%M:%S"
 VALID_ACTIONS = {"new", "download", "play", "delete"}
 
+# Non-admin accounts (invited friends/testers) — keeps a handful of testers
+# from meaningfully spiking transcription/ad-detection compute. Shared with
+# web.py's own subscribe() so the cap is identical regardless of whether a
+# show gets added via AntennaPod sync or the web UI's "add to my list".
+MAX_SHOWS_PER_USER = 10
+
 
 def _format_ts(epoch: float) -> str:
     return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime(_ACTION_TS_FORMAT)
 
 
 def record_subscription_changes(
-    conn: sqlite3.Connection, user_id: int, add: list[str], remove: list[str]
+    conn: sqlite3.Connection, user_id: int, add: list[str], remove: list[str],
+    is_admin: bool = False,
 ) -> int:
     """Store a subscription_change/create upload and register any new feed
     URL (resolve.add_show_by_feed_url — same unreviewed-by-default path as
@@ -45,21 +52,39 @@ def record_subscription_changes(
     just that row. The show itself is never deleted on remove — hark's
     existing never-delete-on-unsubscribe stance for the global catalog,
     unaffected by any one account unsubscribing. Returns the epoch-second
-    cursor to report back to the client."""
+    cursor to report back to the client.
+
+    Non-admin accounts are capped at MAX_SHOWS_PER_USER. A feed_url that
+    would push a non-admin over the cap is skipped entirely — no
+    subscription_changes row, no user_shows row — rather than logged and
+    rejected: the gpodder-sync protocol has no "partial success"/rejection
+    signal, so logging it would make AntennaPod's next `since=` sync see it
+    in the add list again and believe it's subscribed when hark never
+    actually added it."""
     now = int(time.time())
+    count = 0 if is_admin else conn.execute(
+        "SELECT COUNT(*) FROM user_shows WHERE user_id = ?", (user_id,)
+    ).fetchone()[0]
     for feed_url in add:
+        resolve.add_show_by_feed_url(conn, feed_url)
+        show = conn.execute("SELECT id FROM shows WHERE feed_url = ?", (feed_url,)).fetchone()
+        already_subscribed = show is not None and conn.execute(
+            "SELECT 1 FROM user_shows WHERE user_id = ? AND show_id = ?", (user_id, show["id"])
+        ).fetchone() is not None
+        if not is_admin and not already_subscribed and count >= MAX_SHOWS_PER_USER:
+            continue
         conn.execute(
             "INSERT INTO subscription_changes (user_id, feed_url, action, occurred_at)"
             " VALUES (?, ?, 'add', ?)",
             (user_id, feed_url, now),
         )
-        resolve.add_show_by_feed_url(conn, feed_url)
-        show = conn.execute("SELECT id FROM shows WHERE feed_url = ?", (feed_url,)).fetchone()
         if show is not None:
             conn.execute(
                 "INSERT OR IGNORE INTO user_shows (user_id, show_id) VALUES (?, ?)",
                 (user_id, show["id"]),
             )
+            if not already_subscribed:
+                count += 1
     for feed_url in remove:
         conn.execute(
             "INSERT INTO subscription_changes (user_id, feed_url, action, occurred_at)"
