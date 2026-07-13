@@ -12,18 +12,19 @@ dependencies = [
     "adscrub",
 ]
 
-# adscrub (flan/adscrub, sibling checkout) does ad-detection/transcription/cutting
-# as its own standalone product; hark depends on it as a library for the reusable,
-# schema-agnostic pieces (chapter-JSON parsing, keep-span math, ffmpeg cutting,
-# Whisper model loading, the Claude ad-span detector) rather than duplicating that
-# code. hark's own glue (chapters.py/transcribe.py/detect.py/cut.py) wires those
-# into hark's own shows/episodes schema — see docs/PLAN.md and CLAUDE.md.
+# adscrub does ad-detection/transcription/cutting as its own standalone product; hark
+# depends on it as a library for the reusable, schema-agnostic pieces (chapter-JSON
+# parsing, keep-span math, ffmpeg cutting, Whisper model loading, the Claude ad-span
+# detector) rather than duplicating that code. hark's own glue
+# (chapters.py/transcribe.py/detect.py/cut.py) wires those into hark's shows/episodes
+# schema — see docs/PLAN.md.
 #
-# Path dependency for now since both repos live on this host; revisit for Docker
-# builds / other hosts (git dependency + deploy key, or a published package) —
-# not solved yet, see docs/PLAN.md open questions.
+# A git source, not a sibling path: a `../adscrub` path dependency made a fresh clone
+# unbuildable and CI un-passable for anyone but the author. uv.lock pins the exact commit,
+# so builds stay reproducible. To develop the two side by side, override with an editable
+# install after syncing:  uv sync && uv pip install -e ../adscrub
 [tool.uv.sources]
-adscrub = { path = "../adscrub", editable = true }
+adscrub = { git = "https://github.com/sudolulo/adscrub.git", branch = "main" }
 
 [project.scripts]
 hark = "hark.cli:main"
