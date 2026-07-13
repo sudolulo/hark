@@ -6,7 +6,7 @@ real-world case/event/person they cover, so you can ask "who covered the Dyatlov
 Pass incident?" and compare treatments across shows.
 
 hark also strips ads from every subscription (not just the genre-curated shows
-above) by depending on [adscrub](https://git.onetick.ninja/flan/adscrub) — a
+above) by depending on [adscrub](https://github.com/sudolulo/adscrub) — a
 separate, standalone product — as a library: `hark chapters`/`transcribe`/
 `detect-ads`/`cut` call straight into adscrub's functions, since hark's own
 `episodes`/`ad_segments` schema was deliberately shaped to match adscrub's, so
@@ -126,11 +126,11 @@ Show names live in `feeds.txt`, one per line, `#` for comments.
 ## Setup
 
 adscrub is a **path dependency** (`../adscrub`, editable — see
-`pyproject.toml`'s `[tool.uv.sources]`), so `flan/adscrub` needs to be checked
-out as a sibling of this repo before `uv sync` will resolve it:
+`pyproject.toml`'s `[tool.uv.sources]`), so adscrub needs to be checked out as a
+sibling of this repo before `uv sync` will resolve it:
 
 ```
-cd .. && git clone ssh://git@git.onetick.ninja:55214/flan/adscrub.git
+cd .. && git clone https://github.com/sudolulo/adscrub.git
 cd hark && uv sync
 ```
 

@@ -93,5 +93,11 @@ beats fingerprinting/crowdsourcing) is in adscrub's own repo history.
   or instructions.
 - Significant multi-commit features go on a feature branch; small increments can go on main
   while the project is pre-0.1.
-- Remote: private Gitea repo `flan/hark` (origin, SSH). Push to main is fine pre-0.2; also
-  note the feature-branch rule above. Do not create additional remotes or mirrors unprompted.
+- Remote: **Gitea `flan/hark` is canonical** (origin, SSH) — always push there. Push to main
+  is fine pre-0.2; also note the feature-branch rule above. The repo is public, and
+  `claude-fleet`'s `jobs/repo-mirror.sh` mirrors it out to `github.com/sudolulo/hark` for
+  visibility. GitHub is a read-only shop window: never push to it directly, and never treat
+  it as a source of truth. Policy lives in `claude-fleet/config/repos.toml`. Do not add other
+  remotes or mirrors unprompted.
+- Public-facing docs must not link to `git.onetick.ninja` — outsiders cannot reach it.
+  Cross-reference sibling projects by their GitHub URL.
