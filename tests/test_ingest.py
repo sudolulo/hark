@@ -1,3 +1,5 @@
+import sqlite3
+
 import httpx
 import pytest
 
@@ -130,3 +132,51 @@ def test_ingest_skips_unresolved_shows(conn, fixtures):
     with feed_client(fixtures, "feed_a.xml") as client:
         results = ingest.ingest_all(conn, client)
     assert [r.query for r in results] == ["Example Case Show"]
+
+
+def test_ingest_all_isolates_a_parse_failure_and_keeps_other_shows(conn, fixtures, monkeypatch):
+    """Regression: ingest_show() used to only guard the HTTP fetch — an
+    exception from parse_feed()/upsert_episodes() (e.g. a locked database)
+    would propagate out of ingest_all()'s list comprehension uncaught,
+    aborting every show still queued after it. Worse, since ingest_all()
+    reuses one connection across every show, a partial upsert left
+    uncommitted here would otherwise still be pending when a *later* show's
+    own conn.commit() ran — silently persisting this show's broken write
+    alongside an unrelated show's good one."""
+    conn.execute(
+        "INSERT INTO shows (query, feed_url) VALUES (?, ?)",
+        ("Second Show", "https://feeds.example.com/second-show"),
+    )
+    conn.commit()
+
+    feed_a = (fixtures / "feed_a.xml").read_bytes()
+
+    def handler(request):
+        return httpx.Response(200, content=feed_a)
+
+    real_upsert = ingest.upsert_episodes
+    calls = []
+
+    def upsert_then_boom_once(conn, show_id, episodes):
+        calls.append(show_id)
+        if len(calls) == 1:
+            real_upsert(conn, show_id, episodes)  # stages rows, uncommitted
+            raise sqlite3.OperationalError("database is locked")
+        return real_upsert(conn, show_id, episodes)
+
+    monkeypatch.setattr(ingest, "upsert_episodes", upsert_then_boom_once)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        results = ingest.ingest_all(conn, client)
+
+    failing, ok = results
+    assert failing.error is not None
+    assert (failing.inserted, failing.updated) == (0, 0)
+    assert ok.error is None
+    assert (ok.inserted, ok.updated, ok.total) == (3, 0, 3)
+    # the failing show's staged-but-unrolled-back rows must not have
+    # survived into the second show's commit.
+    assert conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0] == 3
+    assert conn.execute(
+        "SELECT COUNT(*) FROM episodes WHERE show_id = ?", (failing.show_id,)
+    ).fetchone()[0] == 0

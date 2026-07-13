@@ -179,21 +179,31 @@ def ingest_show(
     except httpx.HTTPError as exc:
         result.error = str(exc)
         return result
-    parsed = parse_feed(resp.content)
-    result.inserted, result.updated = upsert_episodes(conn, show["id"], parsed.episodes)
-    result.total = len(parsed.episodes)
-    conn.execute(
-        """
-        UPDATE shows
-        SET title = COALESCE(?, title),
-            description = COALESCE(?, description),
-            image_url = COALESCE(?, image_url),
-            last_fetched_at = ?
-        WHERE id = ?
-        """,
-        (parsed.title, parsed.description, parsed.image_url, utcnow(), show["id"]),
-    )
-    conn.commit()
+    try:
+        parsed = parse_feed(resp.content)
+        result.inserted, result.updated = upsert_episodes(conn, show["id"], parsed.episodes)
+        result.total = len(parsed.episodes)
+        conn.execute(
+            """
+            UPDATE shows
+            SET title = COALESCE(?, title),
+                description = COALESCE(?, description),
+                image_url = COALESCE(?, image_url),
+                last_fetched_at = ?
+            WHERE id = ?
+            """,
+            (parsed.title, parsed.description, parsed.image_url, utcnow(), show["id"]),
+        )
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001 — per-show isolation, matches every other
+        # batch command in this codebase (extract/transcribe/detect-ads/compare). The
+        # rollback matters beyond just this show: ingest_all() reuses one connection
+        # across every show, so a partial upsert_episodes() left uncommitted here
+        # would otherwise still be sitting in the transaction when some *later*
+        # show's own conn.commit() runs — silently persisting this show's failed,
+        # incomplete write alongside a totally unrelated show's successful one.
+        conn.rollback()
+        result.error = str(exc)
     return result
 
 
