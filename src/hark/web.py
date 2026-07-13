@@ -30,13 +30,11 @@ embedded stylesheet served from /static/style.css so the CSP can stay strict
 from __future__ import annotations
 
 import base64
-import html
 import json
 import secrets
 import sqlite3
 import time
 import urllib.parse
-from datetime import datetime, timedelta
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -51,6 +49,33 @@ from .auth import (  # noqa: F401 — Auth/iso/utcnow/INVITE_EXPIRES_DAYS re-exp
     utcnow,
 )
 from .extract import GENRES as GENRES_FILTER
+from .queries import (  # noqa: F401 — re-exported for callers (cli.py, tests)
+    PAGE_SIZE,
+    contested_topics,
+    paginate,
+    rare_genre_episodes,
+    related_shows,
+    related_topics,
+    topics_count,
+    topics_query,
+)
+from .templates import (  # noqa: F401 — re-exported for callers (cli.py, tests)
+    INVITE_INVALID_PAGE,
+    INVITE_PAGE,
+    LOGIN_PAGE,
+    STYLE,
+    conf,
+    episode_cell,
+    esc,
+    index_status_html,
+    page,
+    pagination_html,
+    pipeline_status_html,
+    plural,
+    relative_time,
+    topic_pills,
+    topic_table,
+)
 
 COOKIE = "hark_session"
 MAX_FORM_BYTES = 65536
@@ -63,97 +88,6 @@ MAX_JSON_BODY_BYTES = 1_000_000
 # gets added via sync or the web UI's "add to my list". The admin account
 # itself is exempt (see Auth.is_admin()).
 MAX_SHOWS_PER_USER = gpodder_server.MAX_SHOWS_PER_USER
-
-
-def relative_time(dt: datetime) -> str:
-    secs = (utcnow() - dt).total_seconds()
-    if secs < 60:
-        return "just now"
-    if secs < 3600:
-        return f"{int(secs // 60)}m ago"
-    if secs < 86400:
-        return f"{int(secs // 3600)}h ago"
-    return f"{int(secs // 86400)}d ago"
-
-
-# ---------------------------------------------------------------------------
-# HTML
-# ---------------------------------------------------------------------------
-
-STYLE = """
-:root { --bg:#101418; --panel:#1a2027; --ink:#e6e1d6; --dim:#8b9299; --acc:#d9a441; --line:#2a323b; }
-* { box-sizing: border-box; }
-body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.55 Georgia, 'Times New Roman', serif; }
-a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underline; }
-header { border-bottom:1px solid var(--line); padding:0.8rem 1.2rem; display:flex; gap:1.2rem; align-items:baseline; flex-wrap:wrap; }
-header .brand { font-size:1.25rem; letter-spacing:0.12em; color:var(--acc); }
-header nav { display:flex; gap:1rem; } header .spacer { flex:1; }
-main { max-width: 62rem; margin: 1.4rem auto; padding: 0 1.2rem; }
-h1 { font-size:1.4rem; font-weight:normal; border-bottom:1px solid var(--line); padding-bottom:0.4rem; }
-h2 { font-size:1.1rem; color:var(--dim); font-weight:normal; }
-table { border-collapse:collapse; width:100%; }
-td, th { padding:0.35rem 0.6rem 0.35rem 0; text-align:left; vertical-align:top; border-bottom:1px solid var(--line); }
-th { color:var(--dim); font-weight:normal; font-size:0.85rem; text-transform:uppercase; letter-spacing:0.08em; }
-.dim { color:var(--dim); font-size:0.9rem; } .num { text-align:right; }
-.pill { display:inline-block; border:1px solid var(--line); border-radius:9px; padding:0 0.5rem; margin:0 0.2rem 0.2rem 0; font-size:0.78rem; color:var(--dim); }
-form.search { display:flex; gap:0.5rem; margin:1rem 0; }
-input[type=text], input[type=password] { background:var(--panel); border:1px solid var(--line); color:var(--ink); padding:0.45rem 0.6rem; font:inherit; flex:1; }
-button { background:var(--acc); border:0; color:#151007; padding:0.45rem 1rem; font:inherit; cursor:pointer; }
-button.ghost { background:transparent; border:1px solid var(--line); color:var(--ink); }
-.cards { display:grid; grid-template-columns:repeat(auto-fit, minmax(10rem,1fr)); gap:0.8rem; margin:1.2rem 0; }
-.card { background:var(--panel); border:1px solid var(--line); padding:0.8rem 1rem; }
-.card .big { font-size:1.6rem; color:var(--acc); }
-.login-box { max-width:22rem; margin:14vh auto; background:var(--panel); border:1px solid var(--line); padding:1.6rem; }
-.login-box input { width:100%; margin-bottom:0.8rem; }
-.login-box h1 { margin-top:0; }
-.account-actions { display:flex; flex-direction:column; gap:1rem; align-items:flex-start; }
-.account-actions .login-box { margin:0; }
-.err { color:#e07a5f; }
-.qid { font-size:0.78rem; color:var(--dim); }
-.status { border:1px solid var(--line); border-left:3px solid var(--dim); background:var(--panel); padding:0.6rem 1rem; margin:1rem 0; font-size:0.9rem; }
-.status.active { border-left-color:var(--acc); }
-.status p { margin:0.2rem 0; }
-.pending { color:var(--acc); }
-ul.claims { margin:0.2rem 0 1rem 1.2rem; padding:0; }
-ul.claims li { margin-bottom:0.3rem; }
-code { background:var(--panel); border:1px solid var(--line); padding:0 0.3rem; font-size:0.9rem; }
-"""
-
-PAGE = """<!doctype html>
-<html lang="en"><head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex">
-<title>{title} — hark</title>
-<link rel="stylesheet" href="/static/style.css">
-</head><body>
-{header}
-<main>
-{body}
-</main>
-</body></html>"""
-
-HEADER = """<header>
-<a class="brand" href="/">HARK</a>
-<nav><a href="/topics">topics</a> <a href="/shows">shows</a> <a href="/notable">notable</a> <a href="/search">search</a></nav>
-<span class="spacer"></span>
-<nav><span class="dim">{user}</span> <a href="/account">account</a></nav>
-</header>"""
-
-
-def esc(value) -> str:
-    return html.escape(str(value if value is not None else ""))
-
-
-def plural(n: int, word: str, plural_word: str | None = None) -> str:
-    """`plural_word` overrides the naive `word + "s"` for irregular nouns
-    (e.g. plural(n, "match", "matches"))."""
-    return f"{n} {word}" if n == 1 else f"{n} {plural_word or word + 's'}"
-
-
-def page(title: str, body: str, user: str | None = None) -> str:
-    header = HEADER.format(user=esc(user)) if user else ""
-    return PAGE.format(title=esc(title), header=header, body=body)
 
 
 # ---------------------------------------------------------------------------
@@ -886,302 +820,6 @@ class App:
 <button>Create invite link</button>
 </form>"""
         return page("users", body, user["username"])
-
-
-def _topics_filter(genre: str, q: str) -> tuple[str, list]:
-    if genre:
-        return " WHERE t.id IN (SELECT topic_id FROM topic_genres WHERE genre = ?)", [genre]
-    if q:
-        return " WHERE (t.label LIKE ? COLLATE NOCASE OR t.wikidata_id = ?)", [f"%{q}%", q]
-    return "", []
-
-
-def topics_query(genre: str = "", q: str = "", limit: int | None = None,
-                  offset: int = 0) -> tuple[str, tuple]:
-    """Build the shared topic-listing query: base coverage stats, optionally
-    filtered by genre or a label/QID search term, optionally paginated."""
-    sql = """
-        SELECT t.id, t.label, t.wikidata_id,
-               COUNT(DISTINCT et.episode_id) AS episodes,
-               COUNT(DISTINCT e.show_id) AS shows,
-               COALESCE(GROUP_CONCAT(DISTINCT tg.genre), '') AS genres
-        FROM topics t
-        JOIN episode_topics et ON et.topic_id = t.id
-        JOIN episodes e ON e.id = et.episode_id
-        LEFT JOIN topic_genres tg ON tg.topic_id = t.id
-    """
-    where, params = _topics_filter(genre, q)
-    sql += where + " GROUP BY t.id ORDER BY shows DESC, episodes DESC, t.label"
-    if limit:
-        sql += " LIMIT ? OFFSET ?"
-        params.extend([limit, offset])
-    return sql, tuple(params)
-
-
-def topics_count(genre: str = "", q: str = "") -> tuple[str, tuple]:
-    """Total topics matching the same filter as topics_query, for pagination.
-    The filter only ever references columns on `t`, so no join is needed —
-    unlike topics_query, which joins to compute per-topic episode/show counts."""
-    where, params = _topics_filter(genre, q)
-    return f"SELECT COUNT(*) FROM topics t{where}", tuple(params)
-
-
-def related_topics(conn: sqlite3.Connection, topic_id: int, limit: int = 8) -> list[sqlite3.Row]:
-    """Other topics ranked by how many episodes mention both — e.g. Fred West
-    and Rosemary West co-occur across the same 3-part case file. Same
-    co-occurrence idiom as related_shows, one level down (topic-to-topic
-    instead of show-to-show)."""
-    return conn.execute(
-        """
-        SELECT t2.id, t2.label, COUNT(DISTINCT et1.episode_id) AS episodes
-        FROM episode_topics et1
-        JOIN episode_topics et2
-            ON et2.episode_id = et1.episode_id AND et2.topic_id != et1.topic_id
-        JOIN topics t2 ON t2.id = et2.topic_id
-        WHERE et1.topic_id = ?
-        GROUP BY t2.id
-        ORDER BY episodes DESC, t2.label
-        LIMIT ?
-        """,
-        (topic_id, limit),
-    ).fetchall()
-
-
-def related_shows(conn: sqlite3.Connection, show_id: int, limit: int = 5) -> list[sqlite3.Row]:
-    """Other shows ranked by how many topics they share with this one.
-
-    M2's discovery milestone called for embedding similarity; this is a
-    co-occurrence stand-in using data already on hand (topics + genres from
-    M1 extraction) instead of standing up an embedding model/API key just
-    for this. Good enough to be useful now; revisit if it's ever limiting.
-    """
-    return conn.execute(
-        """
-        SELECT s2.id, COALESCE(s2.title, s2.query) AS name,
-               COUNT(DISTINCT et1.topic_id) AS shared
-        FROM episode_topics et1
-        JOIN episodes e1 ON e1.id = et1.episode_id
-        JOIN episode_topics et2 ON et2.topic_id = et1.topic_id
-        JOIN episodes e2 ON e2.id = et2.episode_id AND e2.show_id != e1.show_id
-        JOIN shows s2 ON s2.id = e2.show_id
-        WHERE e1.show_id = ?
-        GROUP BY s2.id
-        ORDER BY shared DESC, name
-        LIMIT ?
-        """,
-        (show_id, limit),
-    ).fetchall()
-
-
-def contested_topics(conn: sqlite3.Connection, limit: int = 15) -> list[dict]:
-    """Topics with a loaded claims comparison, ranked by how many claims are
-    unique to one show rather than shared — a proxy for "the shows actually
-    disagree/diverge here," distinct from the home page's cross-show
-    *coverage* ranking. shared/unique_by_show are stored as JSON text (see
-    claims.py); counted in Python rather than via SQLite JSON functions to
-    match how the rest of the codebase already handles these columns.
-    Read-only-connection-safe: topic_comparisons may not exist yet on a
-    database no `hark compare`/`load-comparisons` has ever run against —
-    same concern claims.count_pending_topics() already documents."""
-    try:
-        rows = conn.execute(
-            """
-            SELECT tc.topic_id, t.label, tc.shared, tc.unique_by_show,
-                   COALESCE(GROUP_CONCAT(DISTINCT tg.genre), '') AS genres
-            FROM topic_comparisons tc
-            JOIN topics t ON t.id = tc.topic_id
-            LEFT JOIN topic_genres tg ON tg.topic_id = tc.topic_id
-            GROUP BY tc.topic_id
-            """
-        ).fetchall()
-    except sqlite3.OperationalError:
-        return []
-    scored = []
-    for r in rows:
-        shared_count = len(json.loads(r["shared"]))
-        unique_count = sum(len(v) for v in json.loads(r["unique_by_show"]).values())
-        scored.append({
-            "topic_id": r["topic_id"], "label": r["label"],
-            "shared_count": shared_count, "unique_count": unique_count,
-            "genres": [g for g in r["genres"].split(",") if g],
-        })
-    scored.sort(key=lambda s: s["unique_count"], reverse=True)
-    return scored[:limit]
-
-
-def rare_genre_episodes(conn: sqlite3.Connection, limit: int = 15) -> tuple[list[str], list[sqlite3.Row]]:
-    """Episodes covering topics in hark's two least-common genres (by total
-    topic count) — a rarity signal the home page's popularity-sorted tables
-    don't surface. Returns the genre names picked (for the page's own
-    explanatory text) alongside the episode rows."""
-    genre_counts = conn.execute(
-        "SELECT genre, COUNT(DISTINCT topic_id) AS n FROM topic_genres GROUP BY genre ORDER BY n ASC"
-    ).fetchall()
-    if not genre_counts:
-        return [], []
-    rare_genres = [r["genre"] for r in genre_counts[:2]]
-    placeholders = ",".join("?" * len(rare_genres))
-    rows = conn.execute(
-        f"""
-        SELECT e.id, e.title, s.id AS show_id, COALESCE(s.title, s.query) AS show,
-               t.id AS topic_id, t.label, tg.genre
-        FROM topic_genres tg
-        JOIN topics t ON t.id = tg.topic_id
-        JOIN episode_topics et ON et.topic_id = t.id
-        JOIN episodes e ON e.id = et.episode_id
-        JOIN shows s ON s.id = e.show_id
-        WHERE tg.genre IN ({placeholders})
-        ORDER BY et.confidence DESC NULLS LAST, e.pubdate DESC
-        LIMIT ?
-        """,
-        (*rare_genres, limit),
-    ).fetchall()
-    return rare_genres, rows
-
-
-PAGE_SIZE = 50
-
-
-def paginate(params: dict) -> int:
-    """Parse ?page=N from query params, clamped to >= 1."""
-    try:
-        return max(1, int(params.get("page", ["1"])[0]))
-    except ValueError:
-        return 1
-
-
-def pagination_html(path: str, query: dict, page: int, total: int, label: str,
-                     page_size: int = PAGE_SIZE) -> str:
-    if total <= page_size:
-        return ""
-    last = (total - 1) // page_size + 1
-    page = min(page, last)
-
-    def link(p: int) -> str:
-        return f"{path}?{urllib.parse.urlencode({**query, 'page': p})}"
-
-    prev = f'<a href="{link(page - 1)}">&laquo; prev</a>' if page > 1 else '<span class="dim">&laquo; prev</span>'
-    nxt = f'<a href="{link(page + 1)}">next &raquo;</a>' if page < last else '<span class="dim">next &raquo;</span>'
-    return (f'<p class="dim">{prev} &nbsp; page {page} of {last} '
-            f'({total} {esc(label)}) &nbsp; {nxt}</p>')
-
-
-ACTIVE_WINDOW = timedelta(minutes=15)
-
-
-def index_status_html(pending_episodes: int, pending_canon: int, last_extracted_at: str | None) -> str:
-    """Banner on the home page showing whether extraction/canonicalization
-    is currently running, stalled, or done — so a background load run is
-    visible from the UI, not just inferrable from the raw counts."""
-    last_dt = parse_iso(last_extracted_at) if last_extracted_at else None
-    lines = []
-    if pending_episodes == 0:
-        if last_dt:
-            lines.append(f"<p>Fully indexed — last processed {relative_time(last_dt)}.</p>")
-        active = False
-    else:
-        active = last_dt is not None and utcnow() - last_dt < ACTIVE_WINDOW
-        if active:
-            assert last_dt is not None  # active can only be True per the line above
-            lines.append(
-                f"<p>Indexing in progress — {plural(pending_episodes, 'episode')} queued, "
-                f"last processed {relative_time(last_dt)}.</p>"
-            )
-        else:
-            when = f", last activity {relative_time(last_dt)}" if last_dt else ""
-            lines.append(f"<p>{plural(pending_episodes, 'episode')} not yet indexed{when}.</p>")
-    if pending_canon:
-        lines.append(
-            f"<p class=\"dim\">{plural(pending_canon, 'topic')} awaiting Wikidata canonicalization.</p>"
-        )
-    if not lines:
-        return ""
-    cls = "status active" if active else "status"
-    return f'<div class="{cls}">{"".join(lines)}</div>'
-
-
-def pipeline_status_html(transcribe_pending: int, detect_pending: int,
-                          cut_pending: int, compare_pending: int) -> str:
-    """Home page banner for the ad-stripping + claims-comparison pipeline —
-    same idea as index_status_html for extraction. Before this, checking
-    what the deployed transcribe/compare loop actually has left to do meant
-    querying hark.db directly instead of just looking at the dashboard."""
-    if not (transcribe_pending or detect_pending or cut_pending or compare_pending):
-        return ""
-    lines = []
-    if transcribe_pending:
-        lines.append(f"<p>{plural(transcribe_pending, 'episode')} awaiting transcription.</p>")
-    if detect_pending:
-        lines.append(f"<p>{plural(detect_pending, 'episode')} awaiting ad-span detection.</p>")
-    if cut_pending:
-        lines.append(f"<p>{plural(cut_pending, 'episode')} awaiting ad cutting.</p>")
-    if compare_pending:
-        lines.append(
-            f'<p class="pending">{plural(compare_pending, "topic")} ready for cross-show '
-            f'claims comparison.</p>'
-        )
-    return f'<div class="status">{"".join(lines)}</div>'
-
-
-def conf(value) -> str:
-    return f"{value:.2f}" if value is not None else "–"
-
-
-def episode_cell(row) -> str:
-    title = f'<a href="/episode/{row["id"]}">{esc(row["title"])}</a>'
-    url = row["audio_url"] or ""
-    # Enclosure URLs come from third-party feeds; only link plain http(s) so a
-    # hostile feed can't smuggle a javascript:/data: scheme into an href.
-    if urllib.parse.urlsplit(url).scheme in ("http", "https"):
-        return (f'{title} <a class="qid" href="{esc(url)}" rel="noreferrer" '
-                f'title="play episode audio">▶</a>')
-    return title
-
-
-def topic_pills(topics, extracted_at) -> str:
-    """Per-episode topic links for the show page, or a note when an episode
-    hasn't been indexed yet (as opposed to genuinely having no subject)."""
-    if not topics:
-        return "" if extracted_at else '<span class="dim">not yet indexed</span>'
-    return " ".join(f'<a class="pill" href="/topic/{t["topic_id"]}">{esc(t["label"])}</a>' for t in topics)
-
-
-def topic_table(rows, empty: str = "Nothing here yet.") -> str:
-    if not rows:
-        return f'<p class="dim">{esc(empty)}</p>'
-    body = "".join(
-        f"<tr><td><a href='/topic/{r['id']}'>{esc(r['label'])}</a></td>"
-        f"<td class='num'>{r['shows']}</td><td class='num'>{r['episodes']}</td>"
-        f"<td class='dim'>{esc(r['genres'].replace(',', ', '))}</td></tr>"
-        for r in rows
-    )
-    return ("<table><tr><th>topic</th><th>shows</th><th>episodes</th><th>genres</th></tr>"
-            f"{body}</table>")
-
-
-LOGIN_PAGE = """<div class="login-box">
-<h1>hark</h1>
-{err}
-<form method="post" action="/login">
-<label>User</label><input type="text" name="username" autofocus>
-<label>Password</label><input type="password" name="password">
-<button>Sign in</button>
-</form></div>"""
-
-INVITE_PAGE = """<div class="login-box">
-<h1>hark</h1>
-<p>You've been invited as <strong>{username}</strong>. Set a password to get started.</p>
-{err}
-<form method="post" action="/invite/{token}">
-<label>Password</label><input type="password" name="password" minlength="8" autofocus required>
-<label>Repeat</label><input type="password" name="password2" minlength="8" required>
-<button>Set password</button>
-</form></div>"""
-
-INVITE_INVALID_PAGE = """<div class="login-box">
-<h1>hark</h1>
-<p class="err">This invite link is invalid or has expired — ask whoever invited you for a new one.</p>
-</div>"""
 
 
 # ---------------------------------------------------------------------------
