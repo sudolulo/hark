@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS users (
     salt              TEXT,
     password_hash     TEXT,
     is_admin          INTEGER NOT NULL DEFAULT 0,
-    invite_token      TEXT UNIQUE,
+    invite_token      TEXT,
     invite_expires_at TEXT,
     created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 # executescript()'s CREATE-IF-NOT-EXISTS never touched existing tables).
 _AUTH_MIGRATIONS = (
     ("users", "is_admin", "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0"),
-    ("users", "invite_token", "ALTER TABLE users ADD COLUMN invite_token TEXT UNIQUE"),
+    ("users", "invite_token", "ALTER TABLE users ADD COLUMN invite_token TEXT"),
     ("users", "invite_expires_at", "ALTER TABLE users ADD COLUMN invite_expires_at TEXT"),
 )
 
@@ -135,6 +135,15 @@ class Auth:
                 cols = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
                 if column not in cols:
                     conn.execute(ddl)
+            # After the migrations above, not inside AUTH_SCHEMA/inline on the
+            # column: SQLite's ALTER TABLE ADD COLUMN can't add a UNIQUE
+            # column to an existing table (confirmed against a real
+            # pre-invite-links auth.db — it crashed here), and invite_token
+            # doesn't exist yet on an upgrading database until the loop above
+            # adds it, so this index can't be created any earlier either.
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_invite_token ON users (invite_token)"
+            )
             conn.execute("INSERT OR IGNORE INTO users (username, is_admin) VALUES (?, 1)", (admin_user,))
             # Covers the upgrade case too: an admin_user row created before
             # is_admin existed (INSERT OR IGNORE above is a no-op for it)

@@ -8,6 +8,7 @@ import base64
 import contextlib
 import http.client
 import json
+import sqlite3
 import threading
 import urllib.parse
 
@@ -1225,6 +1226,41 @@ def test_gpodder_episode_action_rejects_non_array_body(server):
 
 
 # --- Auth: user management (0.14.0) ---
+
+def test_auth_migrates_pre_invite_links_database(tmp_path):
+    """Regression: SQLite's ALTER TABLE ADD COLUMN can't add a UNIQUE column
+    to an existing table — the first cut of the invite_token migration tried
+    to anyway (`ALTER TABLE users ADD COLUMN invite_token TEXT UNIQUE`),
+    which would have thrown on every real pre-0.15.0 auth.db the moment the
+    deployed app restarted. Simulates that pre-migration schema directly
+    (users with just the 0.14.0 columns, no invite_token/invite_expires_at)
+    rather than relying on Auth() to have created it, since Auth() itself is
+    what's being tested here."""
+    path = tmp_path / "auth.db"
+    old = sqlite3.connect(path)
+    old.executescript("""
+        CREATE TABLE users (
+            id            INTEGER PRIMARY KEY,
+            username      TEXT NOT NULL UNIQUE,
+            salt          TEXT,
+            password_hash TEXT,
+            is_admin      INTEGER NOT NULL DEFAULT 0,
+            created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+        CREATE TABLE sessions (
+            token      TEXT PRIMARY KEY,
+            user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            expires_at TEXT NOT NULL
+        );
+    """)
+    old.execute("INSERT INTO users (username, is_admin) VALUES ('admin', 1)")
+    old.commit()
+    old.close()
+
+    auth = web.Auth(path, admin_token="t")  # must not raise
+    _, token = auth.create_invite("alice")  # and the new column must actually work
+    assert auth.find_by_invite_token(token) is not None
+
 
 def test_bootstrap_admin_is_admin(tmp_path):
     auth = web.Auth(tmp_path / "auth.db", admin_token="t")
