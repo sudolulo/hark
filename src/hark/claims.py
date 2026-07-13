@@ -182,9 +182,9 @@ def pending_topics(conn: sqlite3.Connection, limit: int | None = None) -> list[d
         episode_ids = sorted(e["episode_id"] for e in episodes)
         if existing.get(topic_id) == episode_ids:
             continue  # already compared against this exact episode set
+        if limit is not None and len(pending) >= limit:
+            break  # checked before appending, so limit=0 yields [] rather than one leftover item
         pending.append({"topic_id": topic_id, "episodes": episodes})
-        if limit and len(pending) >= limit:
-            break
     return pending
 
 

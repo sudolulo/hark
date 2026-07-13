@@ -119,6 +119,17 @@ def test_pending_topics_requires_two_distinct_shows(conn, tmp_path):
     assert {e["show"] for e in pending[0]["episodes"]} == {"Show A", "Show B"}
 
 
+def test_pending_topics_limit_zero_returns_nothing(conn, tmp_path):
+    """Regression: `if limit and ...` treated limit=0 as falsy and skipped
+    the cap entirely, silently returning every pending topic instead of
+    none — the classic falsy-zero footgun. pipeline.pending_episodes()
+    already gets this right via an explicit `is not None` check; this
+    module's own limit handling had drifted from that pattern."""
+    seed_topic(conn, tmp_path, {"Show A": "a", "Show B": "b"})
+    assert claims.pending_topics(conn, limit=0) == []
+    assert claims.pending_topics(conn, limit=None) == claims.pending_topics(conn)
+
+
 def test_pending_topics_skips_already_compared_same_set(conn, tmp_path):
     seed_topic(conn, tmp_path, {"Show A": "a", "Show B": "b"})
     claims.compare_pending(conn, claims.NullComparator())
