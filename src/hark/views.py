@@ -109,11 +109,21 @@ class App:
         show doesn't exist, False if it would push a non-admin account over
         MAX_SHOWS_PER_USER, True on success. Re-subscribing to a show
         already in the list is idempotent (checked before the quota count,
-        so it's never itself blocked by being at the limit)."""
+        so it's never itself blocked by being at the limit).
+
+        BEGIN IMMEDIATE takes the write lock up front, before the quota
+        count below — the same hazard _toggle_show_flag's own comment
+        already calls out, just spanning several statements instead of one
+        atomic UPDATE. Without it, two concurrent subscribe() calls for the
+        same user (double-click, two tabs — this server is threaded) can
+        each read a count under the cap before either has inserted, letting
+        both through and landing above MAX_SHOWS_PER_USER."""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
+            conn.execute("BEGIN IMMEDIATE")
             if conn.execute("SELECT 1 FROM shows WHERE id = ?", (show_id,)).fetchone() is None:
+                conn.rollback()
                 return None
             already_subscribed = conn.execute(
                 "SELECT 1 FROM user_shows WHERE user_id = ? AND show_id = ?", (user_id, show_id)
@@ -123,6 +133,7 @@ class App:
                     "SELECT COUNT(*) FROM user_shows WHERE user_id = ?", (user_id,)
                 ).fetchone()[0]
                 if count >= MAX_SHOWS_PER_USER:
+                    conn.rollback()
                     return False
             conn.execute(
                 "INSERT OR IGNORE INTO user_shows (user_id, show_id) VALUES (?, ?)",

@@ -60,7 +60,14 @@ def record_subscription_changes(
     rejected: the gpodder-sync protocol has no "partial success"/rejection
     signal, so logging it would make AntennaPod's next `since=` sync see it
     in the add list again and believe it's subscribed when hark never
-    actually added it."""
+    actually added it.
+
+    BEGIN IMMEDIATE takes the write lock up front rather than letting the
+    count SELECT below run under a deferred transaction — the same account
+    syncing from two AntennaPod installs at once could otherwise both read
+    a count under the cap before either commits, letting both batches
+    through and landing above MAX_SHOWS_PER_USER."""
+    conn.execute("BEGIN IMMEDIATE")
     now = int(time.time())
     count = 0 if is_admin else conn.execute(
         "SELECT COUNT(*) FROM user_shows WHERE user_id = ?", (user_id,)

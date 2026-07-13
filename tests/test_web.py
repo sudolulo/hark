@@ -1752,6 +1752,55 @@ def test_resubscribe_at_quota_is_still_idempotent(server, tmp_path):
     assert "err=quota" not in resp.getheader("Location")
 
 
+def test_subscribe_is_race_safe_at_the_quota_boundary(tmp_path):
+    """Regression: subscribe() used to SELECT the current count and then
+    conditionally INSERT as two separate statements with no lock held in
+    between — two concurrent calls for the same user near the cap could
+    each read a count under MAX_SHOWS_PER_USER before either committed,
+    letting both through and landing above it. The real server is
+    threaded (ThreadingHTTPServer), so this is a genuine race, not just a
+    theoretical one — exercised here directly against App.subscribe() with
+    two threads racing for the single remaining slot."""
+    auth = web.Auth(tmp_path / "auth.db", admin_token="letmein")
+    user_id = auth.create_user("alice")
+    conn = db.connect(tmp_path / "hark.db")
+    for i in range(9):
+        conn.execute(
+            "INSERT INTO shows (query, title, feed_url) VALUES (?, ?, ?)",
+            (f"q{i}", f"Show {i}", f"http://x/{i}"),
+        )
+        conn.execute("INSERT INTO user_shows (user_id, show_id) VALUES (?, ?)", (user_id, i + 1))
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('qA', 'Show A', 'http://x/A')")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('qB', 'Show B', 'http://x/B')")
+    conn.commit()
+    show_a = conn.execute("SELECT id FROM shows WHERE query = 'qA'").fetchone()[0]
+    show_b = conn.execute("SELECT id FROM shows WHERE query = 'qB'").fetchone()[0]
+    conn.close()
+
+    app = web.App(tmp_path / "hark.db", auth)
+    barrier = threading.Barrier(2)
+    results = {}
+
+    def go(name, show_id):
+        barrier.wait()
+        results[name] = app.subscribe(user_id, show_id)
+
+    t1 = threading.Thread(target=go, args=("a", show_a))
+    t2 = threading.Thread(target=go, args=("b", show_b))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    conn = db.connect(tmp_path / "hark.db")
+    total = conn.execute(
+        "SELECT COUNT(*) FROM user_shows WHERE user_id = ?", (user_id,)
+    ).fetchone()[0]
+    conn.close()
+    assert total == 10  # never allowed to exceed the cap despite the race
+    assert sorted(results.values()) == [False, True]
+
+
 def test_gpodder_sync_quota_enforced_for_non_admin(server, tmp_path):
     web.Auth(tmp_path / "auth.db", admin_token="letmein").create_user("alice")
     auth = ("alice", "letmein")

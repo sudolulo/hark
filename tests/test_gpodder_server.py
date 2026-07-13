@@ -1,3 +1,5 @@
+import sqlite3
+import threading
 import time
 
 from hark import db, gpodder_server
@@ -91,6 +93,51 @@ def test_record_subscription_changes_two_users_share_the_global_show(tmp_path):
     assert conn.execute(
         "SELECT COUNT(*) FROM user_shows WHERE show_id = ?", (show_id,)
     ).fetchone()[0] == 2
+
+
+def test_record_subscription_changes_is_race_safe_at_the_quota_boundary(tmp_path):
+    """Regression: same TOCTOU hazard as App.subscribe() in web.py (see
+    test_web.py's analogous test) — the count SELECT and the conditional
+    INSERTs used to run with no lock held between them. The same account
+    syncing from two AntennaPod installs at once, each on its own
+    connection (as web.py's handler actually opens one per request), could
+    each read a count under the cap before either commits, letting both
+    batches through and landing above MAX_SHOWS_PER_USER."""
+    conn = db.connect(tmp_path / "t.db")
+    for i in range(9):
+        conn.execute(
+            "INSERT INTO shows (query, feed_url) VALUES (?, ?)", (f"q{i}", f"http://x/{i}")
+        )
+        conn.execute("INSERT INTO user_shows (user_id, show_id) VALUES (5, ?)", (i + 1,))
+    conn.commit()
+    conn.close()
+
+    barrier = threading.Barrier(2)
+
+    def go(feed_url):
+        barrier.wait()
+        # A raw connection, matching what web.py's handler actually opens
+        # per gpodder-sync request — not db.connect(), whose own
+        # migration/backfill bookkeeping would introduce unrelated lock
+        # contention between the two threads and mask the thing under test.
+        c = sqlite3.connect(tmp_path / "t.db")
+        c.row_factory = sqlite3.Row
+        try:
+            gpodder_server.record_subscription_changes(c, 5, add=[feed_url], remove=[])
+        finally:
+            c.close()
+
+    t1 = threading.Thread(target=go, args=("https://race-a.example/feed",))
+    t2 = threading.Thread(target=go, args=("https://race-b.example/feed",))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    conn = db.connect(tmp_path / "t.db")
+    total = conn.execute("SELECT COUNT(*) FROM user_shows WHERE user_id = 5").fetchone()[0]
+    conn.close()
+    assert total == 10  # never allowed to exceed the cap despite the race
 
 
 def test_record_episode_actions_stores_play_fields(tmp_path):
