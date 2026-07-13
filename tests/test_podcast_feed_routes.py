@@ -89,6 +89,16 @@ def test_feed_route_points_cut_episode_at_local_audio(server):
     assert f'url="http://myhost:8710/audio/2/{TOKEN}.mp3"'.encode() in data
 
 
+def test_feed_route_uses_admin_base_url_override(server, tmp_path):
+    # App.base_url re-reads auth.db's settings row on every access (see its
+    # own docstring) — an admin-set override must be picked up by an
+    # already-running server, not just at the next process restart.
+    auth = web.Auth(tmp_path / "auth.db", admin_token="letmein")
+    auth.set_setting(web.BASE_URL_SETTING, "https://override.example")
+    _resp, data = request(server, f"/feed/1/{TOKEN}")
+    assert f'url="https://override.example/audio/2/{TOKEN}.mp3"'.encode() in data
+
+
 def test_audio_route_serves_cut_file_with_correct_token(server):
     resp, data = request(server, f"/audio/2/{TOKEN}.mp3")
     assert resp.status == 200

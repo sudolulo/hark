@@ -48,6 +48,7 @@ from pathlib import Path
 
 from . import __version__, gpodder_server, podcast_feed
 from .auth import (  # noqa: F401 — Auth/iso/utcnow/INVITE_EXPIRES_DAYS re-exported for callers
+    BASE_URL_SETTING,
     INVITE_EXPIRES_DAYS,
     SESSION_DAYS,
     Auth,
@@ -516,6 +517,23 @@ class Handler(BaseHTTPRequestHandler):
                         400, app.view_admin_users(user, {}, msg="Can't remove your own account.")
                     )
                 app.auth.delete_user(username)
+                return self.redirect("/admin/users")
+            if route == "/admin/users/base-url":
+                if not user["is_admin"]:
+                    return self.forbidden(user)
+                value = form.get("base_url", "").strip()
+                parsed = urllib.parse.urlsplit(value)
+                if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                    return self.respond(400, app.view_admin_users(
+                        user, {},
+                        msg="Base URL must start with http:// or https:// and include a host.",
+                    ))
+                app.auth.set_setting(BASE_URL_SETTING, value.rstrip("/"))
+                return self.redirect("/admin/users")
+            if route == "/admin/users/base-url/reset":
+                if not user["is_admin"]:
+                    return self.forbidden(user)
+                app.auth.clear_setting(BASE_URL_SETTING)
                 return self.redirect("/admin/users")
             if route.startswith("/show/") and route.endswith("/adblock"):
                 if not user["is_admin"]:

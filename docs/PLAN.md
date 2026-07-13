@@ -403,6 +403,66 @@ could add, "make sure users can't add too many podcasts" being an explicit ask h
   acceptance, which calls `set_password()` immediately before creating the new
   account's own first session.
 
+## Codebase audit + admin-editable base URL (done, 0.16.0)
+
+A systematic file-by-file audit pass ("audit to zero then refactor to zero then audit
+to zero again," on explicit request) found and fixed six real bugs, none caught by the
+existing test suite until this pass added regression tests for each:
+
+- `ingest_show()` only wrapped the HTTP fetch step in its own error isolation —
+  `parse_feed()`/`upsert_episodes()` running outside that try/except meant one show's
+  parse/upsert failure could propagate uncaught out of `ingest_all()`'s list
+  comprehension, aborting every show still queued after it. Worse, since `ingest_all()`
+  reuses one connection across every show, a partial write left uncommitted here would
+  still be pending when some *later* show's own `conn.commit()` ran, silently
+  persisting a broken write alongside an unrelated show's good one. Fixed by wrapping
+  the whole parse+upsert+update block with an explicit `conn.rollback()` on failure.
+- `pipeline.upsert_topic()` could silently merge two distinct Wikidata entities that
+  happen to share a display label (`Canonicalizer` just returns the raw
+  `wbsearchentities` hit label, no disambiguation — e.g. "Mercury" the planet vs. the
+  element). `recanonicalize()` already had a guard against exactly this collision;
+  `upsert_topic()` — the normal extraction hot path, hit on every real run, not just
+  the offline recovery pass — didn't, so a topic could get attributed to the wrong
+  entity with its own real QID silently discarded. Now disambiguates the label
+  (matching `recanonicalize()`'s own `(QID)` suffix convention) instead of merging.
+- A quota-bypass race: `subscribe()` (web UI) and `record_subscription_changes()`
+  (AntennaPod sync) each read the current per-user show count, then conditionally
+  inserted, as separate statements with no lock held between them. The web server is
+  threaded (`ThreadingHTTPServer`) and gpodder-sync opens a fresh connection per
+  request, so two concurrent calls for the same user near the cap — a double-click, two
+  tabs, or the same account syncing from two AntennaPod installs at once — could each
+  read a count under `MAX_SHOWS_PER_USER` before either committed, letting both through
+  and landing above it. Fixed with `BEGIN IMMEDIATE` on both, taking the write lock up
+  front so a second concurrent call blocks until the first resolves; verified against
+  the actual race with two real threads and a barrier (fails reliably without the fix,
+  passes reliably with it — not just a plausible-sounding theory).
+- The same falsy-zero bug (`if limit:` treating `limit=0` as "no limit" instead of
+  "zero results") independently in three places: `claims.pending_topics()`,
+  `cli._filter_enabled()`, and `queries.topics_query()` — the third one found during
+  the refactor pass specifically *because* the first two made the pattern recognizable,
+  underscoring the value of the "audit again" pass rather than stopping after one.
+  Reachable via `hark compare/transcribe/detect-ads/cut/topics --limit 0`.
+
+The refactor-to-zero pass itself found no further simplification worth making — the
+codebase, group by group, was already at a reasonable clarity/duplication equilibrium
+(the web.py module split earlier in 0.15.0 already having been the refactor this
+project actually needed). A couple of tempting-looking "unify this repeated retry-loop
+shape" candidates in `cli.py` turned out to have deliberately different exception
+handling per call site, confirmed against `adscrub`'s own upstream CLI precedent, so
+left alone rather than flattened into a leakier abstraction.
+
+**Admin-editable base URL**, a direct follow-up: `--base-url`/`$HARK_BASE_URL` was
+previously the *only* way to set the public URL invite links and the podcast
+feed/audio routes get built from — a redeploy just to fix a wrong hostname. Now
+`/admin/users` has a "Server settings" section to set (or reset) an override live,
+stored in `auth.db`'s new generic `settings` key/value table — deliberately not
+`hark.db`, for the same reason accounts/sessions live there: a pipeline-pushed data
+snapshot replaces `hark.db` wholesale and must never wipe server config any more than
+it should wipe accounts. `App.base_url` became a property that re-reads the override on
+every access (not cached) so an edit from one request is visible on the very next one,
+no restart needed. `hark user invite` (CLI) checks the same override; an explicit
+`--base-url` flag still wins outright over it.
+
 ## M4 — episode scoring (tiltmeter-style)
 
 - Defined interestingness metrics, calibration loop against owner ratings.

@@ -35,7 +35,21 @@ CREATE TABLE IF NOT EXISTS sessions (
     user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     expires_at TEXT NOT NULL
 );
+
+-- Small admin-editable server config that must survive a hark.db snapshot
+-- swap (same reasoning as users/sessions living here rather than in
+-- hark.db) — currently just BASE_URL_SETTING below, but a generic
+-- key/value shape rather than a dedicated column since more admin-facing
+-- settings are the expected direction, not a one-off.
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
+
+# Overrides --base-url/$HARK_BASE_URL at runtime, admin-editable from
+# /admin/users without a redeploy — see App.base_url in views.py.
+BASE_URL_SETTING = "base_url"
 
 # Columns added after 0.13.0 — same bolt-on idiom as db.py's _MIGRATIONS,
 # scoped to auth.db instead (it had no migration path at all before this;
@@ -268,4 +282,25 @@ class Auth:
                 (salt, stretch(salt, password), user_id),
             )
             conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+            conn.commit()
+
+    def get_setting(self, key: str) -> str | None:
+        with contextlib.closing(self._connect()) as conn:
+            row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+            return row["value"] if row is not None else None
+
+    def set_setting(self, key: str, value: str) -> None:
+        with contextlib.closing(self._connect()) as conn:
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?)"
+                " ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+            conn.commit()
+
+    def clear_setting(self, key: str) -> None:
+        """Removes the override, falling back to whatever default the
+        caller uses when get_setting() returns None."""
+        with contextlib.closing(self._connect()) as conn:
+            conn.execute("DELETE FROM settings WHERE key = ?", (key,))
             conn.commit()

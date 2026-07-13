@@ -1380,6 +1380,39 @@ def test_set_password_only_revokes_that_accounts_sessions(tmp_path):
     assert auth.session_user(admin_session) is not None
 
 
+# --- Admin-editable settings (0.16.0) ---
+
+def test_get_setting_unset_returns_none(tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="t")
+    assert auth.get_setting("base_url") is None
+
+
+def test_set_setting_then_get_setting_round_trips(tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="t")
+    auth.set_setting("base_url", "https://hark.example.com")
+    assert auth.get_setting("base_url") == "https://hark.example.com"
+
+
+def test_set_setting_overwrites_previous_value(tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="t")
+    auth.set_setting("base_url", "https://first.example.com")
+    auth.set_setting("base_url", "https://second.example.com")
+    assert auth.get_setting("base_url") == "https://second.example.com"
+
+
+def test_clear_setting_removes_override(tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="t")
+    auth.set_setting("base_url", "https://hark.example.com")
+    auth.clear_setting("base_url")
+    assert auth.get_setting("base_url") is None
+
+
+def test_clear_setting_on_unset_key_is_a_noop(tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="t")
+    auth.clear_setting("base_url")  # must not raise
+    assert auth.get_setting("base_url") is None
+
+
 # --- Invite links (0.14.0) ---
 
 def test_create_invite_returns_working_token(tmp_path):
@@ -1688,6 +1721,91 @@ def test_admin_cannot_remove_own_account(server):
     resp, body = request(server, "POST", "/admin/users/remove", body={"username": "admin"}, cookie=cookie)
     assert resp.status == 400
     assert "own account" in body
+
+
+# --- Admin-editable base URL (0.16.0) ---
+
+def test_admin_can_set_base_url_override(server, tmp_path):
+    cookie = login(server)
+    resp, _ = request(server, "POST", "/admin/users/base-url",
+                      body={"base_url": "https://hark.example.com"}, cookie=cookie)
+    assert resp.status == 303
+    resp, body = request(server, "GET", "/admin/users", cookie=cookie)
+    assert "https://hark.example.com" in body
+    assert "admin override" in body
+
+    auth = web.Auth(tmp_path / "auth.db", admin_token="letmein")
+    assert auth.get_setting("base_url") == "https://hark.example.com"
+
+
+def test_admin_base_url_strips_trailing_slash(server, tmp_path):
+    cookie = login(server)
+    request(server, "POST", "/admin/users/base-url",
+           body={"base_url": "https://hark.example.com/"}, cookie=cookie)
+    auth = web.Auth(tmp_path / "auth.db", admin_token="letmein")
+    assert auth.get_setting("base_url") == "https://hark.example.com"
+
+
+def test_admin_base_url_rejects_invalid_url(server, tmp_path):
+    cookie = login(server)
+    resp, body = request(server, "POST", "/admin/users/base-url",
+                         body={"base_url": "not-a-url"}, cookie=cookie)
+    assert resp.status == 400
+    assert "http://" in body
+    auth = web.Auth(tmp_path / "auth.db", admin_token="letmein")
+    assert auth.get_setting("base_url") is None
+
+
+def test_admin_base_url_requires_admin(server, tmp_path):
+    web.Auth(tmp_path / "auth.db", admin_token="letmein").create_user("viewer")
+    resp, _ = request(server, "POST", "/login", body={"username": "viewer", "password": "letmein"})
+    cookie = resp.getheader("Set-Cookie").split(";")[0]
+    resp, _ = request(server, "POST", "/admin/users/base-url",
+                      body={"base_url": "https://hark.example.com"}, cookie=cookie)
+    assert resp.status == 403
+
+
+def test_admin_can_reset_base_url_to_default(server, tmp_path):
+    cookie = login(server)
+    request(server, "POST", "/admin/users/base-url",
+           body={"base_url": "https://hark.example.com"}, cookie=cookie)
+    resp, _ = request(server, "POST", "/admin/users/base-url/reset", body={}, cookie=cookie)
+    assert resp.status == 303
+    auth = web.Auth(tmp_path / "auth.db", admin_token="letmein")
+    assert auth.get_setting("base_url") is None
+    resp, body = request(server, "GET", "/admin/users", cookie=cookie)
+    assert "default from --base-url" in body
+
+
+def test_admin_reset_base_url_requires_admin(server, tmp_path):
+    web.Auth(tmp_path / "auth.db", admin_token="letmein").create_user("viewer")
+    resp, _ = request(server, "POST", "/login", body={"username": "viewer", "password": "letmein"})
+    cookie = resp.getheader("Set-Cookie").split(";")[0]
+    resp, _ = request(server, "POST", "/admin/users/base-url/reset", body={}, cookie=cookie)
+    assert resp.status == 403
+
+
+def test_base_url_override_used_for_new_invite_links(server, tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="letmein")
+    auth.set_setting("base_url", "https://hark.example.com")
+    cookie = login(server)
+    resp, _ = request(server, "POST", "/admin/users/invite",
+                      body={"username": "bob"}, cookie=cookie)
+    location = urllib.parse.unquote(resp.getheader("Location"))
+    assert "invite_link=https://hark.example.com/invite/" in location
+
+
+def test_app_base_url_property_falls_back_to_startup_default(tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="t")
+    app = web.App(tmp_path / "hark.db", auth, base_url="http://localhost:8710")
+    assert app.base_url == "http://localhost:8710"
+
+
+def test_app_base_url_property_prefers_db_override(tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="t")
+    app = web.App(tmp_path / "hark.db", auth, base_url="http://localhost:8710")
+    auth.set_setting("base_url", "https://hark.example.com")
+    assert app.base_url == "https://hark.example.com"
 
 
 # --- Per-user show quota (0.14.0) ---

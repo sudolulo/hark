@@ -936,6 +936,30 @@ def test_user_invite_prepends_base_url(tmp_path, capsys):
     assert "https://hark.example/invite/" in out
 
 
+def test_user_invite_uses_admin_configured_base_url_override(tmp_path, capsys):
+    auth_db = tmp_path / "auth.db"
+    from hark import web
+    web.Auth(auth_db, admin_token=None).set_setting(
+        web.BASE_URL_SETTING, "https://admin-configured.example"
+    )
+    cli.main(["user", "invite", "alice", "--auth-db", str(auth_db)])
+    out = capsys.readouterr().out
+    assert "https://admin-configured.example/invite/" in out
+
+
+def test_user_invite_explicit_flag_wins_over_base_url_override(tmp_path, capsys):
+    auth_db = tmp_path / "auth.db"
+    from hark import web
+    web.Auth(auth_db, admin_token=None).set_setting(
+        web.BASE_URL_SETTING, "https://admin-configured.example"
+    )
+    cli.main(["user", "invite", "alice", "--base-url", "https://explicit.example",
+              "--auth-db", str(auth_db)])
+    out = capsys.readouterr().out
+    assert "https://explicit.example/invite/" in out
+    assert "admin-configured" not in out
+
+
 def test_user_invite_duplicate_fails(tmp_path, capsys):
     auth_db = tmp_path / "auth.db"
     cli.main(["user", "invite", "alice", "--auth-db", str(auth_db)])

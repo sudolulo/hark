@@ -10,7 +10,7 @@ import urllib.parse
 from pathlib import Path
 
 from . import claims, gpodder_server, podcast_feed
-from .auth import Auth, parse_iso
+from .auth import BASE_URL_SETTING, Auth, parse_iso
 from .extract import GENRES as GENRES_FILTER
 from .queries import (
     PAGE_SIZE,
@@ -54,9 +54,20 @@ class App:
         base_url: str = "http://localhost:8710",
     ):
         self.db_path = str(db_path)
-        self.base_url = base_url.rstrip("/")
+        self._default_base_url = base_url.rstrip("/")
         self.auth = auth
         self.cookie_secure = cookie_secure
+
+    @property
+    def base_url(self) -> str:
+        """--base-url/$HARK_BASE_URL at startup is only the fallback now —
+        an admin can override it live from /admin/users (BASE_URL_SETTING
+        in auth.db, so it survives a hark.db snapshot swap same as
+        accounts/sessions do) without a redeploy. Re-read on every access
+        rather than cached, since the whole point is picking up an edit
+        made from a different request/process without restarting this one."""
+        override = self.auth.get_setting(BASE_URL_SETTING)
+        return (override or self._default_base_url).rstrip("/")
 
     def db(self) -> sqlite3.Connection:
         conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
@@ -751,6 +762,27 @@ class App:
         ) if invite_link else ""
         note = f"<p>{esc(msg)}</p>" if msg else ""
 
+        base_url_override = self.auth.get_setting(BASE_URL_SETTING)
+        source_note = "admin override" if base_url_override else "default from --base-url/$HARK_BASE_URL"
+        reset_form = (
+            '<form method="post" action="/admin/users/base-url/reset">'
+            '<button class="ghost">Reset to default</button></form>'
+            if base_url_override else ""
+        )
+        settings_section = f"""<h2>Server settings</h2>
+<div class="status">
+<p>Public base URL: <code>{esc(self.base_url)}</code> ({source_note})</p>
+<p class="dim">Used to build invite links and the podcast feed/audio URLs embedded in generated
+feeds — must be reachable from wherever invite links get clicked or a podcast player runs, not
+just from this host.</p>
+<form method="post" action="/admin/users/base-url" class="login-box">
+<label>New base URL</label>
+<input type="text" name="base_url" placeholder="https://hark.example.com" required>
+<button>Save</button>
+</form>
+{reset_form}
+</div>"""
+
         def status_cell(a) -> str:
             if not a["invite_pending"]:
                 return "" if a["has_password"] else "no password"
@@ -776,6 +808,8 @@ class App:
             for a in accounts
         )
         body = f"""<h1>users</h1>{link_note}{note}
+{settings_section}
+<h2>Accounts</h2>
 <table><tr><th>account</th><th>role</th><th>podcasts</th><th>status</th><th></th></tr>
 {rows}</table>
 <h2>Invite someone</h2>

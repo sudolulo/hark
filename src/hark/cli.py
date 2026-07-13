@@ -774,10 +774,16 @@ def cmd_user_invite(args: argparse.Namespace) -> int:
         print(f"cannot invite {args.username!r}: {exc}", file=sys.stderr)
         return 1
     path = f"/invite/{token}"
-    base = args.base_url or os.environ.get("HARK_BASE_URL", "")
+    from . import web
+
+    # Precedence: an explicit --base-url is deliberate intent and wins
+    # outright; otherwise prefer whatever an admin has set from
+    # /admin/users (auth.get_setting), since this command doesn't run
+    # against a live App instance that would already resolve that itself;
+    # $HARK_BASE_URL is the last, deploy-time fallback.
+    base = args.base_url or auth.get_setting(web.BASE_URL_SETTING) or os.environ.get("HARK_BASE_URL", "")
     link = f"{base.rstrip('/')}{path}" if base else path
 
-    from . import web
     print(f"invited {args.username!r}{' (admin)' if args.admin else ''} — send them this link"
           f" (expires in {web.INVITE_EXPIRES_DAYS} days):")
     print(f"  {link}")

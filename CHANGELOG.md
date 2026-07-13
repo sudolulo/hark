@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-07-13
+
 ### Added
 
 - `pyright` in CI (`src/` only — see `pyproject.toml`'s `[tool.pyright]` for why
@@ -16,6 +18,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Handler.log_message`/`log_error` had a parameter renamed (`fmt` vs.
   `BaseHTTPRequestHandler`'s own `format`) that broke Liskov substitution
   without changing runtime behavior.
+- **Admin-editable base URL.** `/admin/users` now has a "Server settings"
+  section where an admin can set (and reset) the public base URL — used to
+  build invite links and the podcast feed/audio URLs embedded in generated
+  feeds — without editing `$HARK_BASE_URL`/`--base-url` and redeploying. Stored
+  in `auth.db` (a new generic `settings` key/value table, so it survives a
+  `hark.db` snapshot swap the same way accounts/sessions already do) and takes
+  effect immediately on the running server. `hark user invite` picks up the
+  same override; an explicit `--base-url` flag still takes precedence over it.
+
+### Fixed
+
+A systematic audit pass over the whole codebase, file by file, turned up and
+fixed six real bugs:
+
+- `ingest_show()` only isolated failures in the HTTP fetch step — an exception
+  from parsing or upserting one show's episodes could abort the rest of the
+  ingest batch, and since `ingest_all()` reuses one connection across every
+  show, a partial write could get silently swept into some *later* show's own
+  commit. Now the whole per-show body is isolated with an explicit rollback.
+- `pipeline.upsert_topic()` could silently merge two distinct Wikidata entities
+  that happen to share a display label (e.g. "Mercury" the planet vs. the
+  element), discarding the new topic's real QID and misattributing it to the
+  wrong entity. `recanonicalize()` already guarded against this; the normal
+  extraction hot path now does too.
+- A quota-bypass race: `subscribe()` and `record_subscription_changes()` each
+  read the current per-user show count, then conditionally inserted, as
+  separate statements with no lock held between them — two concurrent requests
+  for the same user near the cap (a double-click, two tabs, or the same
+  account syncing from two AntennaPod installs at once) could both slip
+  through and land above `MAX_SHOWS_PER_USER`. Both now open with `BEGIN
+  IMMEDIATE`; verified against the actual race with real threads.
+- Three separate instances of the same falsy-zero bug — `if limit:` (or
+  equivalent) treating `limit=0` as "no limit" instead of "zero results" — in
+  `claims.pending_topics()`, `cli._filter_enabled()`, and `queries.
+  topics_query()`. Reachable via `hark compare/transcribe/detect-ads/cut/topics
+  --limit 0`.
 
 ## [0.15.0] - 2026-07-13
 
