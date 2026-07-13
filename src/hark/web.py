@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS users (
     username      TEXT NOT NULL UNIQUE,
     salt          TEXT,
     password_hash TEXT,
+    is_admin      INTEGER NOT NULL DEFAULT 0,
     created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 CREATE TABLE IF NOT EXISTS sessions (
@@ -68,6 +69,13 @@ CREATE TABLE IF NOT EXISTS sessions (
     expires_at TEXT NOT NULL
 );
 """
+
+# Columns added after 0.13.0 — same bolt-on idiom as db.py's _MIGRATIONS,
+# scoped to auth.db instead (it had no migration path at all before this;
+# executescript()'s CREATE-IF-NOT-EXISTS never touched existing tables).
+_AUTH_MIGRATIONS = (
+    ("users", "is_admin", "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0"),
+)
 
 
 def stretch(salt: str, password: str) -> str:
@@ -112,13 +120,52 @@ class Auth:
         self.admin_token = admin_token or None
         with contextlib.closing(self._connect()) as conn:
             conn.executescript(AUTH_SCHEMA)
-            conn.execute("INSERT OR IGNORE INTO users (username) VALUES (?)", (admin_user,))
+            for table, column, ddl in _AUTH_MIGRATIONS:
+                cols = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+                if column not in cols:
+                    conn.execute(ddl)
+            conn.execute("INSERT OR IGNORE INTO users (username, is_admin) VALUES (?, 1)", (admin_user,))
+            # Covers the upgrade case too: an admin_user row created before
+            # is_admin existed (INSERT OR IGNORE above is a no-op for it)
+            # still needs to actually become an admin, not just default to 0.
+            conn.execute("UPDATE users SET is_admin = 1 WHERE username = ?", (admin_user,))
             conn.commit()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path)
         conn.row_factory = sqlite3.Row
+        # foreign_keys is a per-connection pragma, not a schema property — it
+        # was never actually being turned on here, so sessions.user_id's own
+        # ON DELETE CASCADE has never really been enforced. Matters now that
+        # delete_user() relies on it to clean up sessions on account removal.
+        conn.execute("PRAGMA foreign_keys = ON")
         return conn
+
+    def create_user(self, username: str, is_admin: bool = False) -> int:
+        """Register a new account with no password set — same bootstrap-token
+        login path verify() already gives any passwordless row, so a fresh
+        account logs in with the shared HARK_ADMIN_TOKEN once and sets its
+        own password at /account, same flow the original admin account uses."""
+        with contextlib.closing(self._connect()) as conn:
+            cur = conn.execute(
+                "INSERT INTO users (username, is_admin) VALUES (?, ?)", (username, int(is_admin))
+            )
+            conn.commit()
+            return cur.lastrowid
+
+    def list_users(self) -> list[sqlite3.Row]:
+        with contextlib.closing(self._connect()) as conn:
+            return conn.execute(
+                "SELECT id, username, is_admin, password_hash IS NOT NULL AS has_password,"
+                " created_at FROM users ORDER BY id"
+            ).fetchall()
+
+    def delete_user(self, username: str) -> bool:
+        """Returns False if no such user. Sessions cascade via the FK."""
+        with contextlib.closing(self._connect()) as conn:
+            cur = conn.execute("DELETE FROM users WHERE username = ?", (username,))
+            conn.commit()
+            return cur.rowcount > 0
 
     def verify(self, username: str, password: str) -> int | None:
         """Return user id on success. Fail-closed: an account with no stored
@@ -155,7 +202,7 @@ class Auth:
         with contextlib.closing(self._connect()) as conn:
             return conn.execute(
                 """
-                SELECT u.id, u.username FROM sessions s JOIN users u ON u.id = s.user_id
+                SELECT u.id, u.username, u.is_admin FROM sessions s JOIN users u ON u.id = s.user_id
                 WHERE s.token = ? AND s.expires_at > ?
                 """,
                 (token, iso(utcnow())),
@@ -286,13 +333,14 @@ class App:
         literals below — never user input — so building the UPDATE with an
         f-string here doesn't open a SQL-injection surface.
 
-        Deliberately the only write path from web.py into hark.db (every
-        other mutation here lives in auth.db instead — see module docstring:
-        data snapshots pushed from the pipeline replace hark.db wholesale).
-        A toggle set here will be lost on the next such re-sync unless the
-        source-side hark.db (wherever the pipeline actually runs) is updated
-        to match — same caveat as any other hark.db value set outside the
-        pipeline host.
+        Admin-only (gated at the route, not here) — these are global,
+        shared-across-every-account settings, unlike subscribe/unsubscribe
+        below which are per-user. Both write into hark.db, not auth.db (see
+        module docstring: data snapshots pushed from the pipeline replace
+        hark.db wholesale) — a toggle or subscription set here will be lost
+        on the next such re-sync unless the source-side hark.db (wherever
+        the pipeline actually runs) is updated to match — same caveat as any
+        other hark.db value set outside the pipeline host.
         """
         # A single atomic UPDATE (flip computed in SQL, not read-then-write in
         # Python) so two concurrent toggles can't both read the same starting
@@ -318,6 +366,37 @@ class App:
 
     def toggle_topic_index(self, show_id: int) -> bool | None:
         return self._toggle_show_flag(show_id, "topic_index_enabled")
+
+    def subscribe(self, user_id: int, show_id: int) -> bool | None:
+        """Add a show to one account's personal list. Returns None if the
+        show doesn't exist, True on success — never False (idempotent, same
+        as an AntennaPod re-sync of an already-added feed)."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            if conn.execute("SELECT 1 FROM shows WHERE id = ?", (show_id,)).fetchone() is None:
+                return None
+            conn.execute(
+                "INSERT OR IGNORE INTO user_shows (user_id, show_id) VALUES (?, ?)",
+                (user_id, show_id),
+            )
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
+    def unsubscribe(self, user_id: int, show_id: int) -> None:
+        """Remove a show from one account's personal list. Never touches the
+        global `shows` row — same never-delete-the-show stance gpodder_server
+        already has for AntennaPod-driven unsubscribes."""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                "DELETE FROM user_shows WHERE user_id = ? AND show_id = ?", (user_id, show_id)
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     def cookie_attrs(self, token: str, max_age: int) -> str:
         secure = "; Secure" if self.cookie_secure else ""
@@ -609,18 +688,23 @@ class App:
             body += f"<h2>{plural(episode_total, 'episode title match', 'episode title matches')}</h2>{eps_table}{note}"
         return page("search", body, user["username"])
 
-    def view_shows(self, user) -> str:
+    def view_shows(self, user, params: dict) -> str:
+        show_all = bool(params.get("all", ["0"])[0] == "1")
         conn = self.db()
         try:
             rows = conn.execute(
-                """
+                f"""
                 SELECT s.id, COALESCE(s.title, s.query) AS name, s.topic_index_enabled,
                        COUNT(e.id) AS episodes,
                        COALESCE(SUM(e.extracted_at IS NOT NULL), 0) AS extracted,
-                       MAX(e.pubdate) AS latest
+                       MAX(e.pubdate) AS latest,
+                       us.user_id IS NOT NULL AS subscribed
                 FROM shows s LEFT JOIN episodes e ON e.show_id = s.id
+                LEFT JOIN user_shows us ON us.show_id = s.id AND us.user_id = ?
+                {"" if show_all else "WHERE us.user_id IS NOT NULL"}
                 GROUP BY s.id ORDER BY name
-                """
+                """,
+                (user["id"],),
             ).fetchall()
         finally:
             conn.close()
@@ -629,17 +713,24 @@ class App:
             f'<p class="pending">{plural(unreviewed, "show")} not yet reviewed for the topic '
             "index — open one to enable it there.</p>"
         ) if unreviewed else ""
+        toggle_link = ('<a href="/shows">« just my shows</a>' if show_all
+                        else '<a href="/shows?all=1">browse every show »</a>')
         table = "".join(
             f"<tr><td><a href='/show/{r['id']}'>{esc(r['name'])}</a>"
-            + ('' if r["topic_index_enabled"] else ' <span class="pill">unreviewed</span>') +
+            + ('' if r["topic_index_enabled"] else ' <span class="pill">unreviewed</span>')
+            + ('' if r["subscribed"] else ' <span class="pill">not in my list</span>') +
             "</td>"
             f"<td class='num'>{r['episodes']}</td>"
             f"<td class='num{'' if r['extracted'] == r['episodes'] else ' pending'}'>{r['extracted']}</td>"
             f"<td class='dim'>{esc((r['latest'] or '')[:10])}</td></tr>"
             for r in rows
         )
-        body = ("<h1>shows</h1>" + note + "<table><tr><th>show</th><th>episodes</th>"
-                f"<th>indexed</th><th>latest</th></tr>{table}</table>")
+        empty = ('<p class="dim">Nothing in your list yet — browse every show and subscribe, '
+                 "or point AntennaPod's gpodder sync at hark and it'll fill in from there.</p>"
+                 if not rows and not show_all else "")
+        body = (f"<h1>shows</h1><p>{toggle_link}</p>" + note + empty +
+                ("<table><tr><th>show</th><th>episodes</th>"
+                 f"<th>indexed</th><th>latest</th></tr>{table}</table>" if rows else ""))
         return page("shows", body, user["username"])
 
     def view_show(self, user, show_id: int, params) -> str | None:
@@ -701,6 +792,9 @@ class App:
                 (show_id,),
             ).fetchone()[0]
             related = related_shows(conn, show_id)
+            subscribed = conn.execute(
+                "SELECT 1 FROM user_shows WHERE user_id = ? AND show_id = ?", (user["id"], show_id)
+            ).fetchone() is not None
         finally:
             conn.close()
         topics_by_episode: dict[int, list] = {}
@@ -714,6 +808,14 @@ class App:
         )
         pager = pagination_html(f"/show/{show_id}", {}, page_num, total_episodes, "episodes")
         feed_url = podcast_feed.feed_url(show, self.base_url)
+        subscribe_section = (
+            '<div class="status">'
+            f'<p>{"In your list." if subscribed else "Not in your list yet."}</p>'
+            f'<form method="post" action="/show/{show_id}/'
+            f'{"unsubscribe" if subscribed else "subscribe"}">'
+            f'<button class="ghost">{"Remove from my list" if subscribed else "Add to my list"}'
+            "</button></form></div>"
+        )
         enabled = bool(show["ad_stripping_enabled"])
         toggle_label = "Disable ad-stripping" if enabled else "Enable ad-stripping"
         adblock_section = (
@@ -757,8 +859,11 @@ class App:
         body = (
             f"<h1>{esc(show['name'])}</h1>"
             f"<h2>{plural(total_episodes, 'episode')}, {plural(topic_count, 'topic')} covered</h2>"
-            f"{adblock_section}"
-            f"{topic_index_section}"
+            f"{subscribe_section}"
+            # Global, shared-across-every-account settings — admin only (see
+            # _toggle_show_flag); hidden here to match the route's own 403,
+            # rather than showing a button that just fails when clicked.
+            + (f"{adblock_section}{topic_index_section}" if user["is_admin"] else "") +
             f"{related_html}"
             f"<table><tr><th>episode</th><th>date</th><th>topics</th></tr>{rows_html}</table>{pager}"
         )
@@ -1209,6 +1314,11 @@ class Handler(BaseHTTPRequestHandler):
     def not_found(self, user) -> None:
         return self.respond(404, page("404", "<h1>Not found</h1>", user["username"]))
 
+    def forbidden(self, user) -> None:
+        return self.respond(403, page(
+            "forbidden", "<h1>Forbidden</h1><p>Admin only.</p>", user["username"]
+        ))
+
     def db_unavailable(self, user) -> None:
         return self.respond(503, page(
             "unavailable",
@@ -1287,16 +1397,21 @@ class Handler(BaseHTTPRequestHandler):
     # (Auth.verify) — a session cookie makes no sense for this client, but
     # reusing the account avoids a second credential to manage.
 
-    def _basic_auth_ok(self) -> bool:
+    def _basic_auth_user_id(self) -> int | None:
+        """Multi-user (0.14.0): the gpodder-sync endpoints used to just check
+        Basic Auth was valid for *some* account and scope everything to the
+        global tables. Now every account's AntennaPod install syncs against
+        its own subscription list/listen history, so callers need the actual
+        authenticated user_id, not a bool."""
         header = self.headers.get("Authorization", "")
         if not header.startswith("Basic "):
-            return False
+            return None
         try:
             decoded = base64.b64decode(header[6:]).decode("utf-8")
         except (ValueError, UnicodeDecodeError):
-            return False
+            return None
         username, _, password = decoded.partition(":")
-        return self.app.auth.verify(username, password) is not None
+        return self.app.auth.verify(username, password)
 
     def _gpodder_unauthorized(self) -> None:
         self.respond_bytes(
@@ -1319,12 +1434,13 @@ class Handler(BaseHTTPRequestHandler):
             return None
 
     def _gpodder_get_subscriptions(self, params: dict) -> None:
-        if not self._basic_auth_ok():
+        user_id = self._basic_auth_user_id()
+        if user_id is None:
             return self._gpodder_unauthorized()
         since = int(params.get("since", ["0"])[0] or 0)
         conn = self.app.db()
         try:
-            add, remove, ts = gpodder_server.subscription_changes_since(conn, since)
+            add, remove, ts = gpodder_server.subscription_changes_since(conn, user_id, since)
         finally:
             conn.close()
         self.respond(200, json.dumps({"add": add, "remove": remove, "timestamp": ts}),
@@ -1337,7 +1453,8 @@ class Handler(BaseHTTPRequestHandler):
         # request on a kept-alive HTTP/1.1 connection misparsing those
         # leftover bytes as its own request line.
         body = self._json_body()
-        if not self._basic_auth_ok():
+        user_id = self._basic_auth_user_id()
+        if user_id is None:
             return self._gpodder_unauthorized()
         if not isinstance(body, dict):
             return self.respond(400, "bad request", "text/plain; charset=utf-8")
@@ -1346,25 +1463,27 @@ class Handler(BaseHTTPRequestHandler):
         conn = sqlite3.connect(self.app.db_path)
         conn.row_factory = sqlite3.Row
         try:
-            ts = gpodder_server.record_subscription_changes(conn, add, remove)
+            ts = gpodder_server.record_subscription_changes(conn, user_id, add, remove)
         finally:
             conn.close()
         self.respond(200, json.dumps({"timestamp": ts}), "application/json")
 
     def _gpodder_get_episode_actions(self, params: dict) -> None:
-        if not self._basic_auth_ok():
+        user_id = self._basic_auth_user_id()
+        if user_id is None:
             return self._gpodder_unauthorized()
         since = int(params.get("since", ["0"])[0] or 0)
         conn = self.app.db()
         try:
-            actions, ts = gpodder_server.episode_actions_since(conn, since)
+            actions, ts = gpodder_server.episode_actions_since(conn, user_id, since)
         finally:
             conn.close()
         self.respond(200, json.dumps({"actions": actions, "timestamp": ts}), "application/json")
 
     def _gpodder_post_episode_actions(self) -> None:
         body = self._json_body()  # drain before auth check — see the sibling method's comment
-        if not self._basic_auth_ok():
+        user_id = self._basic_auth_user_id()
+        if user_id is None:
             return self._gpodder_unauthorized()
         if not isinstance(body, list):
             return self.respond(400, "bad request", "text/plain; charset=utf-8")
@@ -1372,7 +1491,7 @@ class Handler(BaseHTTPRequestHandler):
         conn = sqlite3.connect(self.app.db_path)
         conn.row_factory = sqlite3.Row
         try:
-            gpodder_server.record_episode_actions(conn, actions)
+            gpodder_server.record_episode_actions(conn, user_id, actions)
         finally:
             conn.close()
         self.respond(200, json.dumps({"timestamp": int(time.time())}), "application/json")
@@ -1423,7 +1542,7 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/search":
                 return self.respond(200, app.view_search(user, params))
             if route == "/shows":
-                return self.respond(200, app.view_shows(user))
+                return self.respond(200, app.view_shows(user, params))
             if route.startswith("/show/"):
                 try:
                     show_id = int(route.rsplit("/", 1)[1])
@@ -1488,6 +1607,8 @@ class Handler(BaseHTTPRequestHandler):
                 app.auth.set_password(user["id"], pw)
                 return self.redirect("/login", {"Set-Cookie": app.cookie_attrs("", 0)})
             if route.startswith("/show/") and route.endswith("/adblock"):
+                if not user["is_admin"]:
+                    return self.forbidden(user)
                 try:
                     show_id = int(route.removeprefix("/show/").removesuffix("/adblock"))
                 except ValueError:
@@ -1496,12 +1617,29 @@ class Handler(BaseHTTPRequestHandler):
                     return self.not_found(user)
                 return self.redirect(f"/show/{show_id}")
             if route.startswith("/show/") and route.endswith("/topic-index"):
+                if not user["is_admin"]:
+                    return self.forbidden(user)
                 try:
                     show_id = int(route.removeprefix("/show/").removesuffix("/topic-index"))
                 except ValueError:
                     return self.not_found(user)
                 if app.toggle_topic_index(show_id) is None:
                     return self.not_found(user)
+                return self.redirect(f"/show/{show_id}")
+            if route.startswith("/show/") and route.endswith("/subscribe"):
+                try:
+                    show_id = int(route.removeprefix("/show/").removesuffix("/subscribe"))
+                except ValueError:
+                    return self.not_found(user)
+                if app.subscribe(user["id"], show_id) is None:
+                    return self.not_found(user)
+                return self.redirect(f"/show/{show_id}")
+            if route.startswith("/show/") and route.endswith("/unsubscribe"):
+                try:
+                    show_id = int(route.removeprefix("/show/").removesuffix("/unsubscribe"))
+                except ValueError:
+                    return self.not_found(user)
+                app.unsubscribe(user["id"], show_id)
                 return self.redirect(f"/show/{show_id}")
         except sqlite3.OperationalError:
             return self.db_unavailable(user)

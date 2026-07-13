@@ -21,6 +21,17 @@ transcription step), hark can also compare what each show actually claimed —
 shared facts vs. claims unique to one show's telling — shown on every
 episode's own page.
 
+hark is multi-user: each account has its own subscription list and listen
+history, but the show catalog and everything the pipeline produces
+(transcripts, ad spans, topic extraction) stay global and shared — a show two
+accounts both subscribe to only gets processed once, not once per subscriber.
+Point each person's AntennaPod at hark's gpodder-sync endpoint with their own
+login and they see only their own subscriptions/history. `hark user
+add/list/remove` manages accounts (CLI-only, `--auth-db`); the bootstrap
+admin account can also toggle the two settings that are genuinely
+shared — ad-stripping and topic-index enablement per show — everyone else
+just curates their own list from `/shows` or AntennaPod.
+
 The deployed instance runs its own pipeline unattended: subscription sync, ingest,
 canonicalization, chapter-scanning, transcription, and ad-cutting all run on a
 schedule with no manual steps. Topic extraction, claims comparison, and ad-span
@@ -30,7 +41,7 @@ run the same way but as a scheduled Claude agent instead of a paid API call
 `$ANTHROPIC_API_KEY` and isn't starting now. See docs/PLAN.md's "Deployed pipeline
 automation" section.
 
-See `docs/PLAN.md` for milestones. Current state (0.13.0): feed resolution,
+See `docs/PLAN.md` for milestones. Current state (0.14.0): feed resolution,
 episode ingest, LLM topic extraction with Wikidata canonicalization, the
 cross-show topic index, a full web UI, adscrub-backed ad-stripping (with a
 per-show on/off toggle and feed URL, both from the show page; ad-span
@@ -39,10 +50,11 @@ scanning), cross-show claims comparison, M2 discovery (related shows/topics
 by co-occurrence, candidate-show search, and an interim notable-episodes
 page), M3's AntennaPod loop (Nextcloud gpodder subscription + listen-history
 sync, OPML import fallback, and hark speaking the gpodder-sync protocol
-itself so AntennaPod can point directly at it — no app fork needed), and a
+itself so AntennaPod can point directly at it — no app fork needed), a
 per-show topic-index toggle (new shows start excluded from extraction until
-reviewed — most subscriptions aren't subject-per-episode genre shows) —
-deployed live.
+reviewed — most subscriptions aren't subject-per-episode genre shows), and
+multi-user accounts (per-user subscription lists + listen history, shared
+processing) — deployed live.
 
 ## Demo
 
@@ -100,6 +112,12 @@ uv run hark fsck --fix         # clear transcript_path pointers whose file no lo
 # cross-show claims comparison — once a topic has 2+ shows' transcripts
 uv run hark compare                    # live, needs $ANTHROPIC_API_KEY
 uv run hark load-comparisons out.jsonl # pre-computed (batch runs, no API key needed)
+
+# multi-user accounts (auth.db only — no --db)
+uv run hark user add alice [--admin]   # no password yet: log in once with $HARK_ADMIN_TOKEN,
+                                        # then set a real password at /account
+uv run hark user list
+uv run hark user remove alice
 ```
 
 The database defaults to `./hark.db`; override with `--db` or `$HARK_DB`.
@@ -127,18 +145,26 @@ section for the full story.
 
 `hark web` serves the topic index (default `0.0.0.0:8710`): a home dashboard
 (coverage stats, genre breakdown, live indexing status, ad-stripping/claims-
-comparison pipeline status, recently-indexed feed), topic pages ("who
-covered X"), per-show pages (episode list, ad-stripping toggle + feed URL,
-topic-index toggle, per-show pipeline progress, related shows), a `/shows`
-list flagging any not yet reviewed for the topic index, genre-filtered and
-paginated topic browsing, an interim `/notable` page (most-contested claims
-comparisons, rarest-genre episodes), and search. The whole site is behind a
-session login wall; only `/login`, `/logout` and `/healthz` are open.
-Bootstrap: set `HARK_ADMIN_TOKEN`, sign in as `admin` with that token, then set
-a real password at `/account` (the token stops working once a password exists;
-with neither set, login is impossible — fail-closed). Sessions live in a
-separate `auth.db` (`--auth-db` / `$HARK_AUTH_DB`) so replacing `hark.db` with
-a fresh data snapshot never logs anyone out. Set `HARK_COOKIE_SECURE=1` when
+comparison pipeline status, recently-indexed feed — shared, same for every
+account), topic pages ("who covered X"), per-show pages (episode list,
+subscribe/unsubscribe, per-show pipeline progress, related shows — the
+ad-stripping and topic-index toggles are admin-only, since those are global
+settings shared across every account, not personal preference), a `/shows`
+list defaulting to your own subscriptions (`?all=1` browses the full
+catalog) and flagging any not yet reviewed for the topic index,
+genre-filtered and paginated topic browsing, an interim `/notable` page
+(most-contested claims comparisons, rarest-genre episodes), and search. The
+whole site is behind a session login wall; only `/login`, `/logout` and
+`/healthz` are open. Bootstrap: set `HARK_ADMIN_TOKEN`, sign in as `admin`
+with that token, then set a real password at `/account` (the token stops
+working once a password exists; with neither set, login is impossible —
+fail-closed). Multi-user: `hark user add` creates further accounts (CLI
+only — see Usage above); each logs in with the same shared
+`HARK_ADMIN_TOKEN` once, then sets its own password. Sessions live in a
+separate `auth.db` (`--auth-db` / `$HARK_AUTH_DB`) so replacing `hark.db`
+with a fresh data snapshot never logs anyone out — but note that per-account
+subscription lists (`user_shows`) live in *hark.db*, not auth.db, so they
+follow hark.db's own data, not the account. Set `HARK_COOKIE_SECURE=1` when
 serving behind a TLS-terminating proxy.
 
 The same server also answers `GET /feed/<show_id>/<token>` (the cleaned RSS
@@ -152,11 +178,14 @@ every generated audio link, and `web` warns if left at the unreachable
 `localhost` default.
 
 It also answers the gpodder-sync protocol AntennaPod's own "Nextcloud" sync
-setting speaks (`/index.php/apps/gpoddersync/...`, HTTP Basic Auth against the
-same account as the web UI) — point AntennaPod at hark's base URL as if it
-were a Nextcloud instance and subscriptions/listen-history sync directly,
-no Nextcloud (or app fork) required. See `gpodder_server.py` and
-`docs/PLAN.md`'s M3 section for the protocol details.
+setting speaks (`/index.php/apps/gpoddersync/...`, HTTP Basic Auth) — point
+AntennaPod at hark's base URL as if it were a Nextcloud instance and
+subscriptions/listen-history sync directly, no Nextcloud (or app fork)
+required. Multi-user: each person's AntennaPod authenticates as their own
+hark account and only ever sees that account's own subscriptions/history —
+the show catalog itself stays shared, so two accounts subscribed to the same
+show still only cause it to be processed once. See `gpodder_server.py` and
+`docs/PLAN.md`'s M3 and multi-user sections for the protocol/schema details.
 
 In Docker: `docker compose up -d` (mounts `./data`, serves :8710); pipeline
 stages run as one-shots, e.g. `docker compose run --rm hark ingest`.
