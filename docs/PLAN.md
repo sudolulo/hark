@@ -303,6 +303,62 @@ now default to excluded from extraction until reviewed from the show page; hand-
 existing genre-filtered search is the fast path for finding shows that likely *should*
 be enabled without reviewing all 67 by hand.
 
+## Multi-user accounts (done, 0.14.0)
+
+Not in the original milestone list — added on explicit request, after the gpodder-sync
+server (M3) made it obvious more than one person could point AntennaPod at hark.
+
+- **The core design call: what stays global vs. what becomes per-user.** `shows`,
+  `episodes`, transcripts, `ad_segments` all stay global and shared across every
+  account — a show two people both subscribe to still gets transcribed/ad-detected
+  exactly once, not once per subscriber. Only what's inherently *personal* moved to a
+  per-account scope: the subscription list itself (new `user_shows` table — current
+  state, same relationship to `subscription_changes`' event log that `shows` has to
+  `episodes`) and listen history (`listen_actions` gained `user_id`, including in its
+  own UNIQUE constraint — two accounts playing the same episode at the same timestamp
+  must not collide the way two AntennaPod installs on *one* account correctly do).
+- **No FK from user_shows/subscription_changes/listen_actions to `users`.** `users`
+  lives in the separate auth.db (see web.py's module docstring for why: sessions must
+  survive a hark.db data-snapshot restore) — `user_id` here is a soft cross-database
+  reference by convention, same category as `feed_token`/the ad-stripping toggles
+  already being hark.db-resident config that doesn't travel with a snapshot swap.
+- **gpodder-sync is now genuinely multi-tenant.** `gpodder_server.py`'s four functions
+  and `web.py`'s four HTTP handlers thread the Basic-Auth-resolved user_id through
+  instead of operating on the global tables unscoped — each account's AntennaPod syncs
+  against its own subscription list and listen history, invisibly to every other
+  account. `record_subscription_changes` still calls `resolve.add_show_by_feed_url`
+  (global catalog, unchanged) and layers a `user_shows` upsert/delete on top.
+- **`is_admin` (auth.db), added alongside multi-user rather than deferred**: without
+  it, any new account could flip the global ad-stripping/topic-index toggles for a
+  show every other account also depends on — those are genuinely shared settings, not
+  personal preference, so they're gated to admin accounts (403 on the route, hidden in
+  the UI) once more than one account can exist. The bootstrap account becomes admin
+  automatically; `hark user add --admin` grants it going forward.
+- **User management is CLI-only for now** (`hark user add/list/remove`, operating on
+  `--auth-db`) — a web admin page is a plausible fast-follow but wasn't asked for, and
+  shell access is already the trust boundary every other admin-only action in this
+  project assumes (same category as running `hark resolve`/`discover --add` directly).
+  A new account has no password yet; it logs in once with `$HARK_ADMIN_TOKEN` (same
+  shared bootstrap token, works for any passwordless row, not just literally "admin")
+  and sets a real password at `/account` — no new bootstrap mechanism needed.
+- **`/shows` defaults to "my list"** (`?all=1` browses the full catalog) and the show
+  page gained subscribe/unsubscribe — the web-UI equivalent of what AntennaPod's own
+  gpodder sync already does, for browsing/subscribing without a podcast app open.
+  Dashboard/topic index/claims comparison stay global and unfiltered — those are about
+  real-world content, not personal curation, so every account sees the same one.
+- **Found and fixed along the way:** `auth.db` never actually turned on `PRAGMA
+  foreign_keys` (it's a per-connection setting, not a schema property, and was never
+  set on the connections `Auth`'s own methods open) — so `sessions.user_id`'s `ON
+  DELETE CASCADE` had silently never been enforced. `hark user remove` needing that
+  cascade to actually clean up a deleted account's sessions is what surfaced it.
+- **Migration for existing single-account databases:** `user_shows` backfills the
+  bootstrap account (auth.db id 1, always the first row `Auth.__init__` inserts) with
+  every show that already existed before the table did, so upgrading doesn't blank out
+  the one real account's dashboard. `subscription_changes`/`listen_actions` rows from
+  before `user_id` existed attribute to that same id 1. `listen_actions` needed a full
+  table rebuild (rename/create/copy/drop), not a plain `ALTER TABLE ADD COLUMN` — a new
+  UNIQUE constraint can't be bolted onto an existing table any other way in SQLite.
+
 ## M4 — episode scoring (tiltmeter-style)
 
 - Defined interestingness metrics, calibration loop against owner ratings.

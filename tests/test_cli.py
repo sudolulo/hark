@@ -791,3 +791,85 @@ def test_discover_genre_restricts_seed_terms(tmp_path, monkeypatch):
     monkeypatch.setattr(discover, "search_candidates", spy)
     cli.main(["--db", str(tmp_path / "t.db"), "discover", "--genre", "cult"])
     assert seen_terms == [list(discover.SEED_TERMS["cult"])]
+
+
+# --- hark user (0.14.0) ---
+
+def test_user_add_creates_account(tmp_path, capsys):
+    auth_db = tmp_path / "auth.db"
+    rc = cli.main(["user", "add", "alice", "--auth-db", str(auth_db)])
+    assert rc == 0
+    assert "created 'alice'" in capsys.readouterr().out
+
+    from hark import web
+    auth = web.Auth(auth_db, admin_token=None)
+    usernames = [u["username"] for u in auth.list_users()]
+    assert "alice" in usernames
+
+
+def test_user_add_admin_flag(tmp_path, capsys):
+    auth_db = tmp_path / "auth.db"
+    cli.main(["user", "add", "bob", "--admin", "--auth-db", str(auth_db)])
+    assert "(admin)" in capsys.readouterr().out
+
+    from hark import web
+    auth = web.Auth(auth_db, admin_token=None)
+    row = [u for u in auth.list_users() if u["username"] == "bob"][0]
+    assert row["is_admin"] == 1
+
+
+def test_user_add_duplicate_fails(tmp_path, capsys):
+    auth_db = tmp_path / "auth.db"
+    cli.main(["user", "add", "alice", "--auth-db", str(auth_db)])
+    rc = cli.main(["user", "add", "alice", "--auth-db", str(auth_db)])
+    assert rc == 1
+    assert "cannot create" in capsys.readouterr().err
+
+
+def test_user_list_shows_accounts(tmp_path, capsys):
+    auth_db = tmp_path / "auth.db"
+    cli.main(["user", "add", "alice", "--auth-db", str(auth_db)])
+    rc = cli.main(["user", "list", "--auth-db", str(auth_db)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "admin" in out and "alice" in out
+
+
+def test_user_remove_deletes_account(tmp_path, capsys):
+    auth_db = tmp_path / "auth.db"
+    cli.main(["user", "add", "alice", "--auth-db", str(auth_db)])
+    rc = cli.main(["user", "remove", "alice", "--auth-db", str(auth_db)])
+    assert rc == 0
+    assert "removed 'alice'" in capsys.readouterr().out
+
+    rc = cli.main(["user", "list", "--auth-db", str(auth_db)])
+    out = capsys.readouterr().out
+    assert "alice" not in out
+
+
+def test_user_remove_unknown_fails(tmp_path, capsys):
+    auth_db = tmp_path / "auth.db"
+    rc = cli.main(["user", "remove", "nope", "--auth-db", str(auth_db)])
+    assert rc == 1
+    assert "no such user" in capsys.readouterr().err
+
+
+def test_sync_subscriptions_populates_user_shows_for_admin(tmp_path, monkeypatch):
+    from hark import nextcloud as nc
+
+    monkeypatch.setattr(
+        nc, "current_subscriptions", lambda client, url, auth: ["https://a.example/feed"]
+    )
+    path = tmp_path / "t.db"
+    rc = cli.main([
+        "--db", str(path), "sync-subscriptions",
+        "--nextcloud-url", "https://nc.example", "--nextcloud-user", "u",
+        "--nextcloud-password", "p",
+    ])
+    assert rc == 0
+    conn = db.connect(path)
+    show_id = conn.execute("SELECT id FROM shows WHERE feed_url = ?",
+                           ("https://a.example/feed",)).fetchone()["id"]
+    assert conn.execute(
+        "SELECT 1 FROM user_shows WHERE user_id = 1 AND show_id = ?", (show_id,)
+    ).fetchone() is not None

@@ -72,6 +72,16 @@ beats fingerprinting/crowdsourcing) is in adscrub's own repo history.
   repo alone can't provide. Resolved via `scripts/build-image.sh` (stages git-archive-clean
   copies of both repos into a temp directory, builds against that) — use it instead of
   `docker build .` directly. See docs/PLAN.md's ad-stripping section for the full story.
+- **Multi-user (added 2026-07-13): shows/episodes/transcripts/ad_segments stay global,
+  never per-user.** Only the subscription list (`user_shows`) and listen history
+  (`listen_actions.user_id`) are per-account — that's the whole mechanism that keeps a
+  show two accounts both subscribe to from being transcribed/ad-detected twice. Don't
+  add a `user_id` to `shows`/`episodes`/`ad_segments` to "make it more multi-user" —
+  that would defeat the entire point. `users` lives in auth.db, not hark.db (same
+  session-survives-a-snapshot-restore reasoning as everything else in this file); `user_id`
+  columns in hark.db are a soft cross-database reference, not an enforced FK. User
+  management is CLI-only (`hark user add/list/remove`) — no web admin page, deliberately
+  minimal; add one only if actually asked for. See docs/PLAN.md's multi-user section.
 
 ## Conventions
 

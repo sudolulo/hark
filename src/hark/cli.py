@@ -161,6 +161,16 @@ def cmd_sync_subscriptions(args: argparse.Namespace) -> int:
         if resolve.add_show_by_feed_url(conn, feed_url):
             added += 1
             print(f"  ok    {feed_url}")
+        # Nextcloud-client sync is inherently single-account (one set of
+        # HARK_NEXTCLOUD_* creds, unlike the multi-account gpodder *server*
+        # path in gpodder_server.py) — attribute to user 1, the bootstrap
+        # account, same as this repo's other user_id-1 backfills.
+        show = conn.execute("SELECT id FROM shows WHERE feed_url = ?", (feed_url,)).fetchone()
+        if show is not None:
+            conn.execute(
+                "INSERT OR IGNORE INTO user_shows (user_id, show_id) VALUES (1, ?)", (show["id"],)
+            )
+    conn.commit()
     print(f"synced {len(feed_urls)} subscription(s), {added} new "
           f"(run `hark ingest` to fetch episodes and titles)")
     return 0
@@ -188,8 +198,9 @@ def cmd_sync_history(args: argparse.Namespace) -> int:
             return 1
     # Same storage path gpodder_server.py uses for actions AntennaPod posts
     # to hark directly — one place validates/inserts into listen_actions
-    # regardless of which direction the data arrived from.
-    inserted = gpodder_server.record_episode_actions(conn, actions)
+    # regardless of which direction the data arrived from. user_id 1: see
+    # the single-account note in cmd_sync_subscriptions above.
+    inserted = gpodder_server.record_episode_actions(conn, 1, actions)
     conn.execute(
         """
         INSERT INTO sync_state (key, value) VALUES ('gpodder_episode_action_since', ?)
@@ -699,6 +710,49 @@ def cmd_web(args: argparse.Namespace) -> int:
     return 0
 
 
+def _open_auth(args: argparse.Namespace):
+    from . import web  # deferred: most commands don't need the web module at all
+
+    # admin_token=None: these commands only touch the users table directly,
+    # never verify()'s bootstrap-token login path, so there's nothing for a
+    # token to gate here.
+    return web.Auth(args.auth_db, admin_token=None)
+
+
+def cmd_user_add(args: argparse.Namespace) -> int:
+    auth = _open_auth(args)
+    try:
+        auth.create_user(args.username, is_admin=args.admin)
+    except Exception as exc:  # noqa: BLE001 — surfaces e.g. UNIQUE violation on a dup username
+        print(f"cannot create {args.username!r}: {exc}", file=sys.stderr)
+        return 1
+    print(f"created {args.username!r}{' (admin)' if args.admin else ''} — "
+          f"no password set yet; log in once with $HARK_ADMIN_TOKEN and set one at /account")
+    return 0
+
+
+def cmd_user_list(args: argparse.Namespace) -> int:
+    auth = _open_auth(args)
+    users = auth.list_users()
+    if not users:
+        print("no users", file=sys.stderr)
+        return 1
+    for u in users:
+        flags = " ".join(f for f, on in (("admin", u["is_admin"]), ("has-password", u["has_password"])) if on)
+        print(f"  {u['id']:<4} {u['username']:<20} {flags}")
+    return 0
+
+
+def cmd_user_remove(args: argparse.Namespace) -> int:
+    auth = _open_auth(args)
+    if not auth.delete_user(args.username):
+        print(f"no such user {args.username!r}", file=sys.stderr)
+        return 1
+    print(f"removed {args.username!r} (sessions revoked; their show subscriptions are untouched"
+          f" in hark.db — see docs/PLAN.md if you want those cleared too)")
+    return 0
+
+
 def cmd_stats(args: argparse.Namespace) -> int:
     conn = db.connect(args.db)
     shows = conn.execute(
@@ -897,6 +951,29 @@ def main(argv: list[str] | None = None) -> int:
                         "wherever the podcast player runs, not just from this host "
                         "(default: $HARK_BASE_URL or http://localhost:8710)")
     p.set_defaults(func=cmd_web)
+
+    def _add_auth_db_arg(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--auth-db", default=os.environ.get("HARK_AUTH_DB", "auth.db"),
+                       help="auth database path (default: $HARK_AUTH_DB or auth.db)")
+
+    p_user = sub.add_parser("user", help="manage accounts (auth.db) — multi-user subscriptions")
+    user_sub = p_user.add_subparsers(dest="user_command", required=True)
+
+    p = user_sub.add_parser("add", help="create an account with no password set yet")
+    p.add_argument("username")
+    p.add_argument("--admin", action="store_true",
+                   help="grant admin (global show toggles, user management via the web UI later)")
+    _add_auth_db_arg(p)
+    p.set_defaults(func=cmd_user_add)
+
+    p = user_sub.add_parser("list", help="list accounts")
+    _add_auth_db_arg(p)
+    p.set_defaults(func=cmd_user_list)
+
+    p = user_sub.add_parser("remove", help="delete an account (revokes its sessions)")
+    p.add_argument("username")
+    _add_auth_db_arg(p)
+    p.set_defaults(func=cmd_user_remove)
 
     p = sub.add_parser("topics", help="list topics by cross-show coverage")
     p.add_argument("--limit", type=int, default=25, help="rows to show (default: 25)")

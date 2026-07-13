@@ -129,8 +129,13 @@ CREATE INDEX IF NOT EXISTS idx_episode_topics_topic ON episode_topics (topic_id)
 -- ingested that episode (or for a show hark doesn't track at all) —
 -- resolving to episode_id is a query-time join, not a storage-time one.
 -- Consumed by M4's scoring calibration; nothing reads this table yet.
+-- user_id (multi-user, 0.14.0) is part of the UNIQUE constraint, not just a
+-- tag column: play position is inherently personal, so two accounts playing
+-- the same episode at the same occurred_at must not collide/dedupe against
+-- each other the way two AntennaPod installs on ONE account correctly do.
 CREATE TABLE IF NOT EXISTS listen_actions (
     id           INTEGER PRIMARY KEY,
+    user_id      INTEGER NOT NULL DEFAULT 1,
     podcast_url  TEXT NOT NULL,
     episode_url  TEXT NOT NULL,
     episode_guid TEXT,
@@ -140,7 +145,7 @@ CREATE TABLE IF NOT EXISTS listen_actions (
     total        INTEGER,
     occurred_at  TEXT,
     created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    UNIQUE (podcast_url, episode_url, action, occurred_at)
+    UNIQUE (user_id, podcast_url, episode_url, action, occurred_at)
 );
 CREATE INDEX IF NOT EXISTS idx_listen_actions_episode_url ON listen_actions (episode_url);
 
@@ -149,14 +154,34 @@ CREATE INDEX IF NOT EXISTS idx_listen_actions_episode_url ON listen_actions (epi
 -- replay (subscription_changes_since) can return only what changed after a
 -- given point, matching the protocol AntennaPod's client expects. Distinct
 -- from `shows` itself, which only holds current state — this is the event
--- log a repeat sync needs to stay incremental.
+-- log a repeat sync needs to stay incremental. user_id scopes it per account
+-- (multi-user, 0.14.0) — see user_shows below for *why* a separate table.
 CREATE TABLE IF NOT EXISTS subscription_changes (
     id          INTEGER PRIMARY KEY,
+    user_id     INTEGER NOT NULL DEFAULT 1,
     feed_url    TEXT NOT NULL,
     action      TEXT NOT NULL,
     occurred_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_subscription_changes_occurred ON subscription_changes (occurred_at);
+
+-- Multi-user (0.14.0): a user's personal subscription list — current state,
+-- same relationship to subscription_changes' event log that `shows` has to
+-- `episodes`' ingest history. Deliberately NOT a user_id column on `shows`
+-- itself: shows/episodes/transcripts/ad_segments all stay global and shared
+-- across every account, which is what avoids re-transcribing/re-detecting
+-- the same episode once per subscriber. user_id has no FK — `users` lives in
+-- the separate auth.db (see web.py), by the same design that keeps sessions
+-- surviving a hark.db data-snapshot restore; this is a soft cross-database
+-- reference by convention, same category as feed_token/toggles already
+-- being hark.db-resident config that doesn't travel with a snapshot swap.
+CREATE TABLE IF NOT EXISTS user_shows (
+    user_id  INTEGER NOT NULL,
+    show_id  INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+    added_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    PRIMARY KEY (user_id, show_id)
+);
+CREATE INDEX IF NOT EXISTS idx_user_shows_user ON user_shows (user_id);
 
 -- Generic small key/value store for sync cursors — currently just the
 -- GPodder Sync episode_action `since` timestamp (subscriptions are cheap
@@ -183,6 +208,8 @@ _MIGRATIONS = (
     ("shows", "topic_index_enabled",
      "ALTER TABLE shows ADD COLUMN topic_index_enabled INTEGER NOT NULL DEFAULT 1"),
     ("listen_actions", "started", "ALTER TABLE listen_actions ADD COLUMN started INTEGER"),
+    ("subscription_changes", "user_id",
+     "ALTER TABLE subscription_changes ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1"),
 )
 
 
@@ -193,6 +220,53 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute(ddl)
             if (table, column) == ("shows", "topic_index_enabled"):
                 _backfill_topic_index_enabled(conn)
+    # Run after the loop above (not folded into _MIGRATIONS): this needs a full
+    # rebuild (new UNIQUE constraint), not a plain ADD COLUMN, and it depends on
+    # the "started" column already existing (added by the loop, if missing) so
+    # the copy-into-new-table SELECT below has something to select.
+    _migrate_listen_actions_user_scoped(conn)
+
+
+def _migrate_listen_actions_user_scoped(conn: sqlite3.Connection) -> None:
+    """One-time rebuild: adds user_id to listen_actions AND to its UNIQUE
+    constraint (multi-user, 0.14.0) — a plain ALTER TABLE ADD COLUMN can't
+    change a UNIQUE constraint, so this does the rename/create/copy/drop
+    dance instead. Existing rows backfill to user_id 1, the pre-existing
+    bootstrap account (auth.db's Auth.__init__ always inserts it first) —
+    see user_shows' own backfill in connect() for the same reasoning."""
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(listen_actions)")}
+    if "user_id" in cols:
+        return
+    conn.execute("ALTER TABLE listen_actions RENAME TO listen_actions_old")
+    conn.execute(
+        """
+        CREATE TABLE listen_actions (
+            id           INTEGER PRIMARY KEY,
+            user_id      INTEGER NOT NULL DEFAULT 1,
+            podcast_url  TEXT NOT NULL,
+            episode_url  TEXT NOT NULL,
+            episode_guid TEXT,
+            action       TEXT NOT NULL,
+            started      INTEGER,
+            position     INTEGER,
+            total        INTEGER,
+            occurred_at  TEXT,
+            created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            UNIQUE (user_id, podcast_url, episode_url, action, occurred_at)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO listen_actions (id, user_id, podcast_url, episode_url, episode_guid,
+                                     action, started, position, total, occurred_at, created_at)
+        SELECT id, 1, podcast_url, episode_url, episode_guid, action, started, position,
+               total, occurred_at, created_at
+        FROM listen_actions_old
+        """
+    )
+    conn.execute("DROP TABLE listen_actions_old")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_listen_actions_episode_url ON listen_actions (episode_url)")
 
 
 def _backfill_topic_index_enabled(conn: sqlite3.Connection) -> None:
@@ -219,11 +293,30 @@ def _backfill_feed_tokens(conn: sqlite3.Connection) -> None:
         )
 
 
+def _backfill_user_shows(conn: sqlite3.Connection) -> None:
+    """One-time only, for databases that had shows before per-user
+    subscription lists existed (multi-user, 0.14.0): gives the pre-existing
+    bootstrap account (auth.db user id 1 — always the first row Auth.__init__
+    inserts) visibility into every show that already existed, so upgrading
+    doesn't blank out the one real account's dashboard. New shows only enter
+    user_shows going forward via an explicit subscribe (gpodder sync or the
+    web UI) — this never runs again once user_shows exists, so it can't stomp
+    anyone's later unsubscribe."""
+    conn.execute("INSERT OR IGNORE INTO user_shows (user_id, show_id) SELECT 1, id FROM shows")
+
+
 def connect(path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
+    # Checked BEFORE executescript() creates it (CREATE TABLE IF NOT EXISTS
+    # below would otherwise make this always true) — see _backfill_user_shows.
+    user_shows_is_new = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'user_shows'"
+    ).fetchone() is None
     conn.executescript(SCHEMA)
     _migrate(conn)
+    if user_shows_is_new:
+        _backfill_user_shows(conn)
     _backfill_feed_tokens(conn)
     conn.commit()
     return conn

@@ -34,53 +34,74 @@ def _format_ts(epoch: float) -> str:
 
 
 def record_subscription_changes(
-    conn: sqlite3.Connection, add: list[str], remove: list[str]
+    conn: sqlite3.Connection, user_id: int, add: list[str], remove: list[str]
 ) -> int:
     """Store a subscription_change/create upload and register any new feed
     URL (resolve.add_show_by_feed_url — same unreviewed-by-default path as
-    sync-subscriptions/import-opml/discover). Never removes a show for a
-    "remove" entry, matching hark's existing never-delete-on-unsubscribe
-    stance — only the change event itself is recorded, for since= replay.
-    Returns the epoch-second cursor to report back to the client."""
+    sync-subscriptions/import-opml/discover). That call is show-global (the
+    show catalog is shared across every account — see user_shows' own schema
+    comment for why); this function's own job is the per-user overlay on top
+    of it: "add" upserts (user_id, show_id) into user_shows, "remove" deletes
+    just that row. The show itself is never deleted on remove — hark's
+    existing never-delete-on-unsubscribe stance for the global catalog,
+    unaffected by any one account unsubscribing. Returns the epoch-second
+    cursor to report back to the client."""
     now = int(time.time())
     for feed_url in add:
         conn.execute(
-            "INSERT INTO subscription_changes (feed_url, action, occurred_at) VALUES (?, 'add', ?)",
-            (feed_url, now),
+            "INSERT INTO subscription_changes (user_id, feed_url, action, occurred_at)"
+            " VALUES (?, ?, 'add', ?)",
+            (user_id, feed_url, now),
         )
         resolve.add_show_by_feed_url(conn, feed_url)
+        show = conn.execute("SELECT id FROM shows WHERE feed_url = ?", (feed_url,)).fetchone()
+        if show is not None:
+            conn.execute(
+                "INSERT OR IGNORE INTO user_shows (user_id, show_id) VALUES (?, ?)",
+                (user_id, show["id"]),
+            )
     for feed_url in remove:
         conn.execute(
-            "INSERT INTO subscription_changes (feed_url, action, occurred_at) VALUES (?, 'remove', ?)",
-            (feed_url, now),
+            "INSERT INTO subscription_changes (user_id, feed_url, action, occurred_at)"
+            " VALUES (?, ?, 'remove', ?)",
+            (user_id, feed_url, now),
         )
+        show = conn.execute("SELECT id FROM shows WHERE feed_url = ?", (feed_url,)).fetchone()
+        if show is not None:
+            conn.execute(
+                "DELETE FROM user_shows WHERE user_id = ? AND show_id = ?", (user_id, show["id"])
+            )
     conn.commit()
     return now
 
 
 def subscription_changes_since(
-    conn: sqlite3.Connection, since: int
+    conn: sqlite3.Connection, user_id: int, since: int
 ) -> tuple[list[str], list[str], int]:
-    """add/remove feed URLs changed after `since` (epoch seconds), plus the
-    cursor to report as this response's own `timestamp`. `since=0` naturally
-    returns the full history, matching a first-ever sync."""
+    """add/remove feed URLs changed after `since` (epoch seconds) for this
+    user, plus the cursor to report as this response's own `timestamp`.
+    `since=0` naturally returns the full history, matching a first-ever
+    sync."""
     rows = conn.execute(
-        "SELECT feed_url, action FROM subscription_changes WHERE occurred_at > ? ORDER BY id",
-        (since,),
+        "SELECT feed_url, action FROM subscription_changes"
+        " WHERE user_id = ? AND occurred_at > ? ORDER BY id",
+        (user_id, since),
     ).fetchall()
     add = [r["feed_url"] for r in rows if r["action"] == "add"]
     remove = [r["feed_url"] for r in rows if r["action"] == "remove"]
     return add, remove, int(time.time())
 
 
-def record_episode_actions(conn: sqlite3.Connection, actions: list[dict]) -> int:
+def record_episode_actions(conn: sqlite3.Connection, user_id: int, actions: list[dict]) -> int:
     """Store an episode_action/create upload into listen_actions — same
     table nextcloud-sync's sync-history populates, so both directions feed
     the same M4-bound data. Mandatory fields per AntennaPod's own
     EpisodeAction.readFromJsonObject: podcast, episode, action (one of
     VALID_ACTIONS); anything missing those is silently dropped, matching
     that method's own null-return-means-skip behavior rather than erroring
-    the whole batch."""
+    the whole batch. user_id is part of listen_actions' own UNIQUE
+    constraint (see db.py) — play position is personal, two accounts acting
+    on the same episode at the same occurred_at must not collide."""
     inserted = 0
     for a in actions:
         podcast, episode = a.get("podcast"), a.get("episode")
@@ -91,29 +112,32 @@ def record_episode_actions(conn: sqlite3.Connection, actions: list[dict]) -> int
         cur = conn.execute(
             """
             INSERT OR IGNORE INTO listen_actions
-                (podcast_url, episode_url, episode_guid, action, started, position, total, occurred_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (user_id, podcast_url, episode_url, episode_guid, action, started, position,
+                 total, occurred_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (podcast, episode, a.get("guid"), action, a.get("started"), a.get("position"),
-             a.get("total"), occurred_at),
+            (user_id, podcast, episode, a.get("guid"), action, a.get("started"),
+             a.get("position"), a.get("total"), occurred_at),
         )
         inserted += cur.rowcount
     conn.commit()
     return inserted
 
 
-def episode_actions_since(conn: sqlite3.Connection, since: int) -> tuple[list[dict], int]:
-    """Actions recorded after `since` (epoch seconds), shaped exactly as
-    AntennaPod's EpisodeAction.readFromJsonObject expects, plus the cursor
-    to report as this response's own `timestamp`."""
+def episode_actions_since(
+    conn: sqlite3.Connection, user_id: int, since: int
+) -> tuple[list[dict], int]:
+    """Actions recorded after `since` (epoch seconds) for this user, shaped
+    exactly as AntennaPod's EpisodeAction.readFromJsonObject expects, plus
+    the cursor to report as this response's own `timestamp`."""
     rows = conn.execute(
         """
         SELECT podcast_url, episode_url, episode_guid, action, started, position, total, occurred_at
         FROM listen_actions
-        WHERE CAST(strftime('%s', occurred_at) AS INTEGER) > ?
+        WHERE user_id = ? AND CAST(strftime('%s', occurred_at) AS INTEGER) > ?
         ORDER BY id
         """,
-        (since,),
+        (user_id, since),
     ).fetchall()
     actions = []
     for r in rows:

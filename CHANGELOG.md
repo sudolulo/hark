@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-07-13
+
+### Added
+
+- **Multi-user accounts.** Each account gets its own subscription list and
+  listen history; the show catalog, episodes, transcripts, and ad_segments
+  stay global and shared across every account — that's what keeps
+  transcription/ad-detection from running twice for a show two people both
+  subscribe to. New `user_shows` table (per-user current subscription
+  state, same relationship to `subscription_changes`' event log that `shows`
+  has to `episodes`); `subscription_changes` and `listen_actions` both gained
+  a `user_id` column (`listen_actions`' own UNIQUE constraint now includes it
+  too — two accounts playing the same episode at the same timestamp must not
+  collide). Each account's AntennaPod install syncs against hark's
+  gpodder-sync endpoints with its own login and only ever sees its own
+  subscriptions/history — `gpodder_server.py`'s functions and the HTTP
+  handlers in `web.py` now thread the authenticated user_id through instead
+  of operating on the global tables unscoped.
+- `hark user add/list/remove` — account management (auth.db only, no
+  `--db`). A new account has no password set, same bootstrap flow the
+  original admin account already used: log in once with
+  `$HARK_ADMIN_TOKEN`, then set a real password at `/account`.
+- `users.is_admin` (auth.db): the pre-existing bootstrap account becomes
+  admin automatically; `hark user add --admin` grants it to a new one.
+  Gates the two *global* show-level toggles (ad-stripping, topic-index) —
+  settings shared across every account, unlike a personal subscription list.
+  Non-admin accounts get a 403 on those routes and don't see the buttons.
+- `/shows` now defaults to the logged-in account's own subscriptions
+  (`?all=1` browses the full catalog); the show page gained an "add to my
+  list"/"remove from my list" button, the personal-list equivalent of
+  gpodder sync's subscribe/unsubscribe for someone using the web UI
+  directly instead of (or alongside) AntennaPod.
+
+### Fixed
+
+- `auth.db` never actually turned on `PRAGMA foreign_keys` — a per-connection
+  setting, not a schema property — so `sessions.user_id`'s own `ON DELETE
+  CASCADE` was never enforced. Found while building `hark user remove`,
+  which depends on it to actually clean up a deleted account's sessions.
+
 ## [0.13.0] - 2026-07-12
 
 ### Added

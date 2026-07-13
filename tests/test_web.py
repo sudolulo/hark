@@ -34,6 +34,11 @@ def server(tmp_path):
     conn.execute(
         "INSERT INTO episode_topics (episode_id, topic_id, confidence, source) VALUES (1, 1, 0.9, 't')"
     )
+    # user_shows' own backfill only covers shows that existed before the
+    # table did — this fixture inserts "Show A" on the same connect() call
+    # that creates the (still-empty) table, so it needs this explicit row to
+    # show up in the admin account's own default "my shows" view.
+    conn.execute("INSERT INTO user_shows (user_id, show_id) VALUES (1, 1)")
     conn.commit()
     conn.close()
 
@@ -833,7 +838,7 @@ def test_shows_page_flags_unreviewed_shows(tmp_path):
     try:
         resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
         cookie = resp.getheader("Set-Cookie").split(";")[0]
-        resp, body = request(srv, "GET", "/shows", cookie=cookie)
+        resp, body = request(srv, "GET", "/shows?all=1", cookie=cookie)
         assert resp.status == 200
         assert "1 show not yet reviewed for the topic index" in body
         unreviewed_row = body.split("Unreviewed")[1].split("</tr>")[0]
@@ -1216,3 +1221,196 @@ def test_gpodder_episode_action_rejects_non_array_body(server):
     resp, _ = request(server, "POST", "/index.php/apps/gpoddersync/episode_action/create",
                       auth=("admin", "letmein"), json_body={"not": "an array"})
     assert resp.status == 400
+
+
+# --- Auth: user management (0.14.0) ---
+
+def test_bootstrap_admin_is_admin(tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="t")
+    row = auth.list_users()[0]
+    assert row["username"] == "admin" and row["is_admin"] == 1
+
+
+def test_create_user_defaults_to_non_admin(tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="t")
+    auth.create_user("alice")
+    row = [u for u in auth.list_users() if u["username"] == "alice"][0]
+    assert row["is_admin"] == 0
+    assert row["has_password"] == 0
+
+
+def test_create_user_can_grant_admin(tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="t")
+    auth.create_user("bob", is_admin=True)
+    row = [u for u in auth.list_users() if u["username"] == "bob"][0]
+    assert row["is_admin"] == 1
+
+
+def test_create_user_rejects_duplicate_username(tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="t")
+    auth.create_user("alice")
+    with pytest.raises(Exception):
+        auth.create_user("alice")
+
+
+def test_new_user_can_log_in_with_bootstrap_token(tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="t")
+    user_id = auth.create_user("alice")
+    assert auth.verify("alice", "t") == user_id
+
+
+def test_delete_user_removes_account(tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="t")
+    auth.create_user("alice")
+    assert auth.delete_user("alice") is True
+    assert "alice" not in [u["username"] for u in auth.list_users()]
+
+
+def test_delete_user_returns_false_for_unknown_user(tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="t")
+    assert auth.delete_user("nope") is False
+
+
+def test_delete_user_revokes_sessions(tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="t")
+    user_id = auth.create_user("alice")
+    token = auth.create_session(user_id)
+    auth.delete_user("alice")
+    assert auth.session_user(token) is None
+
+
+# --- Multi-user: web UI + gpodder-sync isolation (0.14.0) ---
+
+def test_shows_page_defaults_to_my_list_only(server, tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('r', 'Not Mine', 'http://z')")
+    conn.commit()
+    conn.close()
+    cookie = login(server)
+    resp, body = request(server, "GET", "/shows", cookie=cookie)
+    assert resp.status == 200
+    assert "Show A" in body  # subscribed via the fixture's user_shows row
+    assert "Not Mine" not in body
+
+
+def test_shows_page_all_param_shows_everything(server, tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('r', 'Not Mine', 'http://z')")
+    conn.commit()
+    conn.close()
+    cookie = login(server)
+    resp, body = request(server, "GET", "/shows?all=1", cookie=cookie)
+    assert resp.status == 200
+    assert "Show A" in body and "Not Mine" in body
+    assert "not in my list" in body  # pill on the unsubscribed one
+
+
+def test_subscribe_adds_show_to_my_list(server, tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('r', 'Other Show', 'http://z')")
+    conn.commit()
+    conn.close()
+    cookie = login(server)
+    resp, _ = request(server, "POST", "/show/2/subscribe", body={}, cookie=cookie)
+    assert resp.status == 303
+    resp, body = request(server, "GET", "/shows", cookie=cookie)
+    assert "Other Show" in body
+
+
+def test_unsubscribe_removes_show_from_my_list(server):
+    cookie = login(server)
+    resp, _ = request(server, "POST", "/show/1/unsubscribe", body={}, cookie=cookie)
+    assert resp.status == 303
+    resp, body = request(server, "GET", "/shows", cookie=cookie)
+    assert "Show A" not in body
+
+
+def test_unsubscribe_never_deletes_the_global_show(server, tmp_path):
+    cookie = login(server)
+    request(server, "POST", "/show/1/unsubscribe", body={}, cookie=cookie)
+    conn = db.connect(tmp_path / "hark.db")
+    assert conn.execute("SELECT COUNT(*) FROM shows WHERE id = 1").fetchone()[0] == 1
+
+
+def test_subscribe_unknown_show_404s(server):
+    cookie = login(server)
+    resp, _ = request(server, "POST", "/show/999/subscribe", body={}, cookie=cookie)
+    assert resp.status == 404
+
+
+def test_show_page_offers_subscribe_toggle(server):
+    cookie = login(server)
+    resp, body = request(server, "GET", "/show/1", cookie=cookie)
+    assert "In your list." in body
+    assert 'action="/show/1/unsubscribe"' in body
+
+
+def test_non_admin_cannot_toggle_ad_stripping(server, tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="letmein")
+    auth.create_user("viewer")
+    resp, _ = request(server, "POST", "/login", body={"username": "viewer", "password": "letmein"})
+    cookie = resp.getheader("Set-Cookie").split(";")[0]
+    resp, _ = request(server, "POST", "/show/1/adblock", body={}, cookie=cookie)
+    assert resp.status == 403
+
+
+def test_non_admin_cannot_toggle_topic_index(server, tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="letmein")
+    auth.create_user("viewer")
+    resp, _ = request(server, "POST", "/login", body={"username": "viewer", "password": "letmein"})
+    cookie = resp.getheader("Set-Cookie").split(";")[0]
+    resp, _ = request(server, "POST", "/show/1/topic-index", body={}, cookie=cookie)
+    assert resp.status == 403
+
+
+def test_non_admin_does_not_see_global_toggle_buttons(server, tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="letmein")
+    auth.create_user("viewer")
+    resp, _ = request(server, "POST", "/login", body={"username": "viewer", "password": "letmein"})
+    cookie = resp.getheader("Set-Cookie").split(";")[0]
+    resp, body = request(server, "GET", "/show/1", cookie=cookie)
+    assert "Disable ad-stripping" not in body and "Enable ad-stripping" not in body
+
+
+def test_admin_can_still_toggle_ad_stripping(server):
+    cookie = login(server)
+    resp, _ = request(server, "POST", "/show/1/adblock", body={}, cookie=cookie)
+    assert resp.status == 303
+
+
+def test_gpodder_sync_isolated_between_two_accounts(server, tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="letmein")
+    auth.create_user("alice")
+    # alice sets her own password so she isn't sharing admin's bootstrap token
+    # (irrelevant to the isolation this test checks, just closer to real use)
+    admin_auth = ("admin", "letmein")
+    alice_auth = ("alice", "letmein")
+
+    request(server, "POST", "/index.php/apps/gpoddersync/subscription_change/create",
+            auth=admin_auth, json_body={"add": ["https://admin-only.example/feed"], "remove": []})
+    request(server, "POST", "/index.php/apps/gpoddersync/subscription_change/create",
+            auth=alice_auth, json_body={"add": ["https://alice-only.example/feed"], "remove": []})
+
+    resp, body = request(server, "GET", "/index.php/apps/gpoddersync/subscriptions",
+                         auth=admin_auth, json_body=None)
+    admin_add = json.loads(body)["add"]
+    resp, body = request(server, "GET", "/index.php/apps/gpoddersync/subscriptions",
+                         auth=alice_auth, json_body=None)
+    alice_add = json.loads(body)["add"]
+
+    assert "https://admin-only.example/feed" in admin_add
+    assert "https://alice-only.example/feed" not in admin_add
+    assert "https://alice-only.example/feed" in alice_add
+    assert "https://admin-only.example/feed" not in alice_add
+
+
+def test_gpodder_sync_both_accounts_share_one_global_show_row(server, tmp_path):
+    auth = web.Auth(tmp_path / "auth.db", admin_token="letmein")
+    auth.create_user("alice")
+    for creds in (("admin", "letmein"), ("alice", "letmein")):
+        request(server, "POST", "/index.php/apps/gpoddersync/subscription_change/create",
+                auth=creds, json_body={"add": ["https://shared.example/feed"], "remove": []})
+    conn = db.connect(tmp_path / "hark.db")
+    assert conn.execute(
+        "SELECT COUNT(*) FROM shows WHERE feed_url = ?", ("https://shared.example/feed",)
+    ).fetchone()[0] == 1
