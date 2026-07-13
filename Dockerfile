@@ -10,16 +10,21 @@
 #   docker compose run --rm hark detect-ads
 #   docker compose run --rm hark cut
 #
-# hark depends on adscrub as a local path dependency (../adscrub, editable —
-# see pyproject.toml [tool.uv.sources] and uv.lock's `source = { editable =
-# "../adscrub" }`). That path is resolved relative to /app (this image's
-# WORKDIR, where hark's own pyproject.toml/uv.lock land), so adscrub's source
-# needs to exist at /adscrub in this image. The build context is NOT this
-# repo alone — it's a staging directory containing both `hark/` and
-# `adscrub/` (git-archive-clean, no .venv/data/.git), assembled by
-# scripts/build-image.sh. Building this Dockerfile directly against just this
-# repo's own directory will fail to resolve the dependency; use that script
-# instead of `docker build .` here.
+# hark depends on adscrub via a git source (see pyproject.toml
+# [tool.uv.sources]) — the `uv sync --frozen` calls below fetch it from
+# GitHub at the commit pinned in uv.lock, needing `git` on PATH in this
+# build stage. The build context is still NOT this repo alone, though: it's
+# a staging directory containing both `hark/` and `adscrub/`
+# (git-archive-clean, no .venv/data/.git), assembled by
+# scripts/build-image.sh — the *last* install step below overrides adscrub
+# specifically with an editable install of that staged local copy
+# (`uv pip install -e /adscrub`, same override the README's own
+# side-by-side-dev instructions use), so a build always reflects the
+# adscrub commit actually checked out locally, not just whatever uv.lock
+# has pinned — the entire reason build-image.sh stages both repos instead
+# of just running `docker build .` here. If you build this Dockerfile
+# directly (skipping the script), you still get a working image, just
+# pinned to uv.lock's adscrub commit instead of your local one.
 #
 # Build with --build-arg GPU=1 (or `docker compose -f compose.yaml -f compose.gpu.yaml
 # build`) to pull in the cuBLAS/cuDNN extra for faster-whisper's CUDA path — only
@@ -29,14 +34,21 @@ FROM python:3.13-slim
 
 COPY --from=ghcr.io/astral-sh/uv:0.7 /uv /uvx /bin/
 
+# git: needed for uv to fetch adscrub's pinned commit from its git source
+# (see pyproject.toml [tool.uv.sources]) during the frozen sync below.
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 ENV UV_LINK_MODE=copy UV_COMPILE_BYTECODE=1
 ARG GPU=0
 
-# adscrub's source first — the editable path dependency needs it present
-# before the very first `uv sync` (which installs dependencies, including
-# this one, even with --no-install-project), and changes to adscrub's source
-# should invalidate this layer same as changes to hark's own lockfile do.
+# adscrub's staged source, present before the very first `uv sync` so this
+# layer's cache invalidates on local adscrub changes too, not just hark's own
+# lockfile — the actual editable-override install happens last, below, after
+# both `uv sync --frozen` calls (each of which re-resolves the full
+# dependency set per uv.lock, including adscrub's git source — doing the
+# override any earlier would just get overwritten by the second sync).
 COPY adscrub /adscrub
 COPY hark/pyproject.toml hark/uv.lock hark/README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -47,6 +59,8 @@ COPY hark/src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$GPU" = "1" ]; then uv sync --frozen --no-dev --extra gpu; \
     else uv sync --frozen --no-dev; fi
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --no-deps -e /adscrub
 
 ENV PATH="/app/.venv/bin:$PATH" \
     HARK_DB=/app/data/hark.db \
