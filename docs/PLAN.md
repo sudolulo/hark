@@ -500,7 +500,19 @@ of this page"); this pass upgrades it rather than adding a new page.
   be hit on every page view anyway. A row is written even on a miss (same "mark it
   processed regardless" idiom `pipeline._store()` already uses for a zero-topic
   episode) so an unmatched show isn't re-queried against the request budget every
-  run — `hark rate-shows` (new CLI command) only re-attempts rows older than 30 days.
+  run — `hark rate-shows` (new CLI command).
+  - **Deliberately conservative with the 500/month budget.** Re-checks use two
+    separate stale windows, not one: `RATINGS_STALE_DAYS` (90 days) for a show
+    already matched — a coarse popularity *tier* doesn't move fast enough to justify
+    checking monthly — and the much longer `RATINGS_MISS_STALE_DAYS` (180 days) for a
+    confirmed "Taddy doesn't have this show," even less likely to change soon. More
+    importantly: any show already matched to a known Taddy uuid gets batched through
+    `getMultiplePodcastSeries` (`fetch_many()`, up to `MAX_BATCH_SIZE`=25 per request)
+    instead of one `getPodcastSeries` lookup each — the steady-state case once the
+    catalog's initial backfill is done, so this is the optimization that actually
+    matters for long-run consumption. A batch failure fails that whole batch (retried,
+    re-batched, next run) rather than falling back to per-show requests, which would
+    defeat the point of batching.
   - **Podchaser was the original pick, abandoned before ever deploying it.** Its
     free-tier docs read as having exactly the star-rating data wanted
     (`ratingAverage`/`ratingCount`), and its `podcast` query even supports the same

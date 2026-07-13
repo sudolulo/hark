@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -131,19 +132,33 @@ def test_fetch_raises_on_http_error_status():
 
 
 class FakeSource:
-    """Deterministic RatingsSource for refresh_ratings() tests — keyed by
-    feed_url, raises for feed_urls mapped to an Exception instance."""
+    """Deterministic RatingsSource for refresh_ratings() tests. fetch() is
+    keyed by feed_url, fetch_many() by external_id — both raise for a key
+    mapped to an Exception instance."""
 
-    def __init__(self, by_feed_url):
-        self.by_feed_url = by_feed_url
-        self.calls = []
+    def __init__(self, by_feed_url=None, by_external_id=None):
+        self.by_feed_url = by_feed_url or {}
+        self.by_external_id = by_external_id or {}
+        self.fetch_calls = []
+        self.fetch_many_calls = []
 
     def fetch(self, feed_url, itunes_id):
-        self.calls.append(feed_url)
+        self.fetch_calls.append(feed_url)
         result = self.by_feed_url.get(feed_url)
         if isinstance(result, Exception):
             raise result
         return result
+
+    def fetch_many(self, external_ids):
+        self.fetch_many_calls.append(list(external_ids))
+        out = {}
+        for external_id in external_ids:
+            result = self.by_external_id.get(external_id)
+            if isinstance(result, Exception):
+                raise result
+            if result is not None:
+                out[external_id] = result
+        return out
 
 
 def seed_show(conn, feed_url, itunes_id=None):
@@ -178,7 +193,7 @@ def test_refresh_ratings_records_a_miss_so_it_is_not_requeried(tmp_path):
 
     # a fresh call within the stale window must not re-query this show
     ratings.refresh_ratings(conn, source)
-    assert source.calls == ["https://feeds.example.com/a"]
+    assert source.fetch_calls == ["https://feeds.example.com/a"]
 
 
 def test_refresh_ratings_reattempts_stale_rows(tmp_path):
@@ -227,3 +242,90 @@ def test_refresh_ratings_respects_limit(tmp_path):
     })
     results = ratings.refresh_ratings(conn, source, limit=1)
     assert len(results) == 1
+
+
+# --- refresh_ratings: request-conservative behavior ---
+
+
+def seed_existing_rating(conn, feed_url, external_id, fetched_at, rating_avg=None):
+    show_id = seed_show(conn, feed_url)
+    conn.execute(
+        "INSERT INTO show_ratings (show_id, source, external_id, rating_avg, fetched_at)"
+        " VALUES (?, 'taddy', ?, ?, ?)",
+        (show_id, external_id, rating_avg, fetched_at),
+    )
+    conn.commit()
+    return show_id
+
+
+def test_refresh_ratings_uses_fetch_many_for_a_known_external_id(tmp_path):
+    conn = db.connect(tmp_path / "t.db")
+    show_id = seed_existing_rating(conn, "https://feeds.example.com/a", "uuid-a",
+                                   "2020-01-01T00:00:00Z", rating_avg=4.0)
+    source = FakeSource(by_external_id={"uuid-a": ratings.ShowRating("uuid-a", 4.8, 50)})
+    results = ratings.refresh_ratings(conn, source)
+    assert len(results) == 1
+    assert results[0].rating.rating_avg == 4.8
+    assert source.fetch_calls == []
+    assert source.fetch_many_calls == [["uuid-a"]]
+    row = conn.execute("SELECT rating_avg FROM show_ratings WHERE show_id = ?", (show_id,)).fetchone()
+    assert row["rating_avg"] == 4.8
+
+
+def test_refresh_ratings_chunks_known_shows_at_max_batch_size(tmp_path, monkeypatch):
+    monkeypatch.setattr(ratings, "MAX_BATCH_SIZE", 2)
+    conn = db.connect(tmp_path / "t.db")
+    by_external_id = {}
+    for i in range(5):
+        uuid = f"uuid-{i}"
+        seed_existing_rating(conn, f"https://feeds.example.com/{i}", uuid, "2020-01-01T00:00:00Z")
+        by_external_id[uuid] = ratings.ShowRating(uuid, 4.0, 50)
+    source = FakeSource(by_external_id=by_external_id)
+    results = ratings.refresh_ratings(conn, source)
+    assert len(results) == 5
+    assert [len(batch) for batch in source.fetch_many_calls] == [2, 2, 1]
+
+
+def test_refresh_ratings_known_match_uses_shorter_stale_window_than_a_miss(tmp_path):
+    conn = db.connect(tmp_path / "t.db")
+    # 100 days old: stale for a known match (90-day window) but not yet due
+    # for a confirmed miss (180-day window).
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=100)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    known_id = seed_existing_rating(conn, "https://feeds.example.com/known", "uuid-known", cutoff, 4.0)
+    seed_existing_rating(conn, "https://feeds.example.com/miss", None, cutoff)
+
+    source = FakeSource(by_external_id={"uuid-known": ratings.ShowRating("uuid-known", 4.5, 50)})
+    results = ratings.refresh_ratings(conn, source)
+    assert [r.show_id for r in results] == [known_id]
+
+
+def test_refresh_ratings_batch_failure_fails_the_whole_batch_not_just_one_show(tmp_path):
+    conn = db.connect(tmp_path / "t.db")
+    a_id = seed_existing_rating(conn, "https://feeds.example.com/a", "uuid-a", "2020-01-01T00:00:00Z")
+    b_id = seed_existing_rating(conn, "https://feeds.example.com/b", "uuid-b", "2020-01-01T00:00:00Z")
+
+    class BoomSource:
+        def fetch(self, feed_url, itunes_id):
+            raise AssertionError("known shows must go through fetch_many, not fetch")
+
+        def fetch_many(self, external_ids):
+            raise httpx.ConnectError("simulated failure")
+
+    results = ratings.refresh_ratings(conn, BoomSource())
+    assert {r.show_id for r in results} == {a_id, b_id}
+    assert all(r.error is not None for r in results)
+
+
+def test_refresh_ratings_one_bad_batch_does_not_block_other_batches(tmp_path, monkeypatch):
+    monkeypatch.setattr(ratings, "MAX_BATCH_SIZE", 1)
+    conn = db.connect(tmp_path / "t.db")
+    ok_id = seed_existing_rating(conn, "https://feeds.example.com/ok", "uuid-ok", "2020-01-01T00:00:00Z")
+    boom_id = seed_existing_rating(conn, "https://feeds.example.com/boom", "uuid-boom", "2020-01-01T00:00:00Z")
+    source = FakeSource(by_external_id={
+        "uuid-ok": ratings.ShowRating("uuid-ok", 4.0, 50),
+        "uuid-boom": httpx.ConnectError("simulated failure"),
+    })
+    results = ratings.refresh_ratings(conn, source)
+    by_id = {r.show_id: r for r in results}
+    assert by_id[ok_id].rating is not None and by_id[ok_id].error is None
+    assert by_id[boom_id].rating is None and by_id[boom_id].error is not None

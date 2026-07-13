@@ -31,7 +31,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     Bayesian-shrinkage machinery as personal affinity. (Podchaser was the
     original pick — free-tier docs looked to have exactly the star-rating
     data wanted — but turned out to need a paid tier for the rating fields
-    themselves; swapped before ever deploying it.)
+    themselves; swapped before ever deploying it.) Deliberately conservative
+    with the free tier's 500 requests/month: two separate stale windows (90
+    days for a known match, 180 for a confirmed miss — both far less
+    aggressive than the tier data actually needs), and any show already
+    matched to a known Taddy id gets batched up to 25-at-a-time through
+    `getMultiplePodcastSeries` instead of one request each, the case that
+    actually dominates long-run consumption once a catalog's initial
+    backfill is done.
   - Every score shown alongside its own raw component numbers (topic
     affinity, genre affinity, external rating), not collapsed into one
     opaque blend. A user with no listening history at all collapses
