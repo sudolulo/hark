@@ -984,23 +984,39 @@ def _fake_backfill(conn, client, limit=None):
     return [resolve.BackfillResult(show_id=1, query="q", itunes_id=42)]
 
 
-def test_rate_shows_without_podchaser_key_only_runs_backfill(tmp_path, capsys, monkeypatch):
-    monkeypatch.delenv("HARK_PODCHASER_API_KEY", raising=False)
+def test_rate_shows_without_podchaser_credentials_only_runs_backfill(tmp_path, capsys, monkeypatch):
+    monkeypatch.delenv("HARK_PODCHASER_CLIENT_ID", raising=False)
+    monkeypatch.delenv("HARK_PODCHASER_CLIENT_SECRET", raising=False)
     monkeypatch.setattr(resolve, "backfill_itunes_ids", _fake_backfill)
 
     def boom(*a, **k):
-        raise AssertionError("refresh_ratings should not be called without an API key")
+        raise AssertionError("refresh_ratings should not be called without credentials")
 
     monkeypatch.setattr(ratings, "refresh_ratings", boom)
     rc = cli.main(["--db", str(tmp_path / "t.db"), "rate-shows"])
     assert rc == 0
     out = capsys.readouterr()
     assert "itunes_id backfill: 1/1 newly matched" in out.out
-    assert "HARK_PODCHASER_API_KEY" in out.err
+    assert "HARK_PODCHASER_CLIENT_ID" in out.err
+    assert "HARK_PODCHASER_CLIENT_SECRET" in out.err
 
 
-def test_rate_shows_with_podchaser_key_runs_both_steps(tmp_path, capsys, monkeypatch):
-    monkeypatch.setenv("HARK_PODCHASER_API_KEY", "test-key")
+def test_rate_shows_with_only_one_podchaser_var_set_only_runs_backfill(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("HARK_PODCHASER_CLIENT_ID", "test-id")
+    monkeypatch.delenv("HARK_PODCHASER_CLIENT_SECRET", raising=False)
+    monkeypatch.setattr(resolve, "backfill_itunes_ids", _fake_backfill)
+
+    def boom(*a, **k):
+        raise AssertionError("refresh_ratings should not be called with only one of the two vars set")
+
+    monkeypatch.setattr(ratings, "refresh_ratings", boom)
+    rc = cli.main(["--db", str(tmp_path / "t.db"), "rate-shows"])
+    assert rc == 0
+
+
+def test_rate_shows_with_podchaser_credentials_runs_both_steps(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("HARK_PODCHASER_CLIENT_ID", "test-id")
+    monkeypatch.setenv("HARK_PODCHASER_CLIENT_SECRET", "test-secret")
     monkeypatch.setattr(resolve, "backfill_itunes_ids", _fake_backfill)
 
     def fake_refresh(conn, source, limit=None):
@@ -1017,7 +1033,8 @@ def test_rate_shows_with_podchaser_key_runs_both_steps(tmp_path, capsys, monkeyp
 
 
 def test_rate_shows_reports_rating_failures(tmp_path, capsys, monkeypatch):
-    monkeypatch.setenv("HARK_PODCHASER_API_KEY", "test-key")
+    monkeypatch.setenv("HARK_PODCHASER_CLIENT_ID", "test-id")
+    monkeypatch.setenv("HARK_PODCHASER_CLIENT_SECRET", "test-secret")
     monkeypatch.setattr(resolve, "backfill_itunes_ids", _fake_backfill)
     monkeypatch.setattr(
         ratings, "refresh_ratings",
@@ -1029,7 +1046,8 @@ def test_rate_shows_reports_rating_failures(tmp_path, capsys, monkeypatch):
 
 
 def test_rate_shows_passes_limit_to_both_steps(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARK_PODCHASER_API_KEY", "test-key")
+    monkeypatch.setenv("HARK_PODCHASER_CLIENT_ID", "test-id")
+    monkeypatch.setenv("HARK_PODCHASER_CLIENT_SECRET", "test-secret")
     seen = {}
 
     def fake_backfill(conn, client, limit=None):

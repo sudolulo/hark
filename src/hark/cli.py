@@ -654,24 +654,26 @@ def cmd_rate_shows(args: argparse.Namespace) -> int:
     """M4: enrich shows with data scoring.py's recommendations (see
     /notable) draw on. Two independent steps, each isolated per-show:
     itunes_id backfill (resolve.py — free, keyless, runs regardless) then
-    external show ratings (ratings.py — needs $HARK_PODCHASER_API_KEY; runs
-    with a NullRatingsSource, a no-op, if unset). --limit caps each step
-    independently, not a combined total."""
+    external show ratings (ratings.py — needs $HARK_PODCHASER_CLIENT_ID and
+    $HARK_PODCHASER_CLIENT_SECRET; runs with a NullRatingsSource, a no-op,
+    if either is unset). --limit caps each step independently, not a
+    combined total."""
     conn = db.connect(args.db)
     with make_client() as client:
         backfilled = resolve.backfill_itunes_ids(conn, client, limit=args.limit)
     matched = sum(1 for r in backfilled if r.itunes_id is not None)
     print(f"itunes_id backfill: {matched}/{len(backfilled)} newly matched")
 
-    api_key = os.environ.get("HARK_PODCHASER_API_KEY")
-    if not api_key:
-        print("hint: set $HARK_PODCHASER_API_KEY to fetch external show ratings "
-              "(free tier — see podchaser.com/api) — skipping the ratings refresh",
-              file=sys.stderr)
+    client_id = os.environ.get("HARK_PODCHASER_CLIENT_ID")
+    client_secret = os.environ.get("HARK_PODCHASER_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        print("hint: set $HARK_PODCHASER_CLIENT_ID and $HARK_PODCHASER_CLIENT_SECRET to fetch "
+              "external show ratings (free — register an app from your account's API settings "
+              "at podchaser.com) — skipping the ratings refresh", file=sys.stderr)
         return 0
 
     with make_client() as client:
-        source = ratings.PodchaserRatingsSource(client, api_key)
+        source = ratings.PodchaserRatingsSource(client, client_id, client_secret)
         results = ratings.refresh_ratings(conn, source, limit=args.limit)
     errors = 0
     for r in results:

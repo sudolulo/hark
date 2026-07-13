@@ -59,12 +59,22 @@ class RatingsSource(Protocol):
 
 class NullRatingsSource:
     """Placeholder that finds nothing — used by tests, dry paths, and
-    whenever $HARK_PODCHASER_API_KEY isn't set (hark rate-shows still runs
-    the itunes_id backfill in that case; only the ratings half is skipped)."""
+    whenever $HARK_PODCHASER_CLIENT_ID/$HARK_PODCHASER_CLIENT_SECRET aren't
+    set (hark rate-shows still runs the itunes_id backfill in that case;
+    only the ratings half is skipped)."""
 
     def fetch(self, feed_url: str, itunes_id: int | None) -> ShowRating | None:
         return None
 
+
+_ACCESS_TOKEN_MUTATION = """
+mutation($input: AccessTokenRequest!) {
+  requestAccessToken(input: $input) {
+    access_token
+    token_type
+  }
+}
+"""
 
 _PODCAST_QUERY = """
 query($identifier: PodcastIdentifier!) {
@@ -83,32 +93,67 @@ class PodchaserRatingsSource:
     so there's no risk of matching the wrong show (same reasoning
     resolve.backfill_itunes_ids applies to verifying its own matches).
 
-    Query shape is best-effort against Podchaser's own docs
-    (api-docs.podchaser.com) as of 2026-07 — their interactive docs pages
-    returned 403s to direct fetching during development, so this couldn't be
-    verified against a live schema browser, only search-indexed doc
-    fragments. If fetch() raises PodchaserError for every show once a real
-    API key is in use, check the current `podcast` query and
-    `PodcastIdentifier` input shape at api-docs.podchaser.com first — the
-    identifier `type` enum values (`RSS`, `APPLE_PODCASTS`) are the most
-    likely thing to have drifted.
+    Auth is OAuth2 client-credentials, not a bare API key: client_id (the
+    account's "API Key") and client_secret (its "API secret"), both from the
+    API tab of the account's settings page, are exchanged for a Bearer
+    access token via a requestAccessToken *mutation* — there's no separate
+    REST token endpoint, it's GraphQL end to end. The token is requested
+    once per PodchaserRatingsSource instance, lazily on first fetch() (not
+    eagerly in __init__, so a batch with nothing to refresh never
+    authenticates for no reason) and reused for every query after that —
+    Podchaser's own docs state access tokens are valid for about a year, far
+    longer than any single hark rate-shows run.
+
+    Query/mutation shapes here are corroborated across several independent
+    sources (support articles, schema reference pages, a third-party
+    integration example) as of 2026-07, since Podchaser's own interactive
+    docs site (api-docs.podchaser.com) blocked direct fetching with a 403
+    during development — reasonably confident, but not verified against a
+    live schema browser. If fetch() raises PodchaserError for every show,
+    check requestAccessToken's exact input/response shape and the
+    `PodcastIdentifier` type enum (`RSS`, `APPLE_PODCASTS`) at
+    api-docs.podchaser.com first.
     """
 
-    def __init__(self, client: httpx.Client, api_key: str):
+    def __init__(self, client: httpx.Client, client_id: str, client_secret: str):
         self.client = client
-        self.api_key = api_key
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self._access_token: str | None = None
 
-    def _query(self, identifier: dict) -> ShowRating | None:
+    def _post(self, query: str, variables: dict, authenticated: bool) -> dict:
+        headers = {"Authorization": f"Bearer {self._access_token}"} if authenticated else {}
         resp = self.client.post(
-            PODCHASER_GRAPHQL_URL,
-            json={"query": _PODCAST_QUERY, "variables": {"identifier": identifier}},
-            headers={"Authorization": f"Bearer {self.api_key}"},
+            PODCHASER_GRAPHQL_URL, json={"query": query, "variables": variables}, headers=headers
         )
         resp.raise_for_status()
         body = resp.json()
         if body.get("errors"):
             raise PodchaserError(str(body["errors"]))
-        podcast = (body.get("data") or {}).get("podcast")
+        return body.get("data") or {}
+
+    def _authenticate(self) -> str:
+        if self._access_token is not None:
+            return self._access_token
+        data = self._post(
+            _ACCESS_TOKEN_MUTATION,
+            {"input": {
+                "grant_type": "CLIENT_CREDENTIALS",
+                "client_id": self.client_id,
+                "client_secret": self.client_secret,
+            }},
+            authenticated=False,
+        )
+        token = (data.get("requestAccessToken") or {}).get("access_token")
+        if not token:
+            raise PodchaserError("requestAccessToken returned no access_token")
+        self._access_token = token
+        return token
+
+    def _query(self, identifier: dict) -> ShowRating | None:
+        self._authenticate()
+        data = self._post(_PODCAST_QUERY, {"identifier": identifier}, authenticated=True)
+        podcast = data.get("podcast")
         if not podcast:
             return None
         return ShowRating(

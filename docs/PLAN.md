@@ -501,9 +501,16 @@ of this page"); this pass upgrades it rather than adding a new page.
   (new CLI command) only re-attempts rows older than 30 days. Bayesian-shrunk toward
   the mean rating across all rated shows, same formula shape as personal affinity, so
   a show with 2 five-star reviews doesn't outrank one with 10,000 averaging 4.3.
-  Needs `$HARK_PODCHASER_API_KEY` (free signup at podchaser.com/api) — `hark
-  rate-shows` no-ops the ratings half and prints a hint if it's unset; personal
-  affinity works standalone with zero external dependency.
+  Auth is OAuth2 client-credentials, not a bare key: `$HARK_PODCHASER_CLIENT_ID` +
+  `$HARK_PODCHASER_CLIENT_SECRET` (register a free app from the account's own API
+  settings page at podchaser.com — both the client_id/client_secret naming and the
+  "exchange them for a Bearer token via a `requestAccessToken` mutation, not a REST
+  endpoint" mechanics only got confirmed *after* first shipping this against a bare
+  api_key assumption that turned out wrong; see the ratings.py module docstring for
+  the corroborating sources, since api-docs.podchaser.com itself 403'd every direct
+  fetch attempt during development). `hark rate-shows` no-ops the ratings half and
+  prints a hint if either var is unset; personal affinity works standalone with zero
+  external dependency.
 - **`itunes_id` backfill** (`resolve.py`, new `backfill_itunes_ids()`): only
   `resolve_show()`'s hand-curated path ever set `itunes_id` — `add_show_by_feed_url()`
   (gpodder sync, OPML import, `discover --add`), how most of a real catalog actually

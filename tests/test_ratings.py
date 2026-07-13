@@ -6,14 +6,35 @@ import pytest
 from hark import db, ratings
 
 
-def graphql_client(handler):
+FAKE_TOKEN_RESPONSE = httpx.Response(
+    200, json={"data": {"requestAccessToken": {"access_token": "test-access-token", "token_type": "Bearer"}}}
+)
+
+
+def graphql_client(handler, token_response=None):
+    """Auto-answers the requestAccessToken mutation (verifying client_id/
+    client_secret and the absence of an auth header on that specific call),
+    then delegates the podcast query to handler(identifier) — tests only
+    need to care about the query behavior they're actually exercising."""
     def wrapped(request):
         assert str(request.url) == ratings.PODCHASER_GRAPHQL_URL
-        assert request.headers["authorization"] == "Bearer test-key"
         body = json.loads(request.content)
+        if "requestAccessToken" in body["query"]:
+            assert "authorization" not in request.headers
+            assert body["variables"]["input"] == {
+                "grant_type": "CLIENT_CREDENTIALS",
+                "client_id": "test-client-id",
+                "client_secret": "test-client-secret",
+            }
+            return token_response or FAKE_TOKEN_RESPONSE
+        assert request.headers["authorization"] == "Bearer test-access-token"
         return handler(body["variables"]["identifier"])
 
     return httpx.Client(transport=httpx.MockTransport(wrapped))
+
+
+def make_source(client):
+    return ratings.PodchaserRatingsSource(client, "test-client-id", "test-client-secret")
 
 
 def podcast_response(id=None, rating_average=None, rating_count=None):
@@ -39,7 +60,7 @@ def test_fetch_matches_by_feed_url():
         return podcast_response(id="42", rating_average=4.7, rating_count=1200)
 
     with graphql_client(handler) as client:
-        rating = ratings.PodchaserRatingsSource(client, "test-key").fetch(
+        rating = make_source(client).fetch(
             "https://feeds.example.com/casefile", 998568017
         )
     assert rating == ratings.ShowRating(external_id="42", rating_avg=4.7, rating_count=1200)
@@ -55,7 +76,7 @@ def test_fetch_falls_back_to_itunes_id_when_feed_url_misses():
         return podcast_response(id="42", rating_average=4.2, rating_count=50)
 
     with graphql_client(handler) as client:
-        rating = ratings.PodchaserRatingsSource(client, "test-key").fetch(
+        rating = make_source(client).fetch(
             "https://feeds.example.com/moved", 998568017
         )
     assert rating == ratings.ShowRating(external_id="42", rating_avg=4.2, rating_count=50)
@@ -64,7 +85,7 @@ def test_fetch_falls_back_to_itunes_id_when_feed_url_misses():
 
 def test_fetch_returns_none_when_no_itunes_id_and_feed_url_misses():
     with graphql_client(lambda identifier: podcast_response()) as client:
-        rating = ratings.PodchaserRatingsSource(client, "test-key").fetch(
+        rating = make_source(client).fetch(
             "https://feeds.example.com/unknown", None
         )
     assert rating is None
@@ -72,7 +93,7 @@ def test_fetch_returns_none_when_no_itunes_id_and_feed_url_misses():
 
 def test_fetch_returns_none_when_both_identifiers_miss():
     with graphql_client(lambda identifier: podcast_response()) as client:
-        rating = ratings.PodchaserRatingsSource(client, "test-key").fetch(
+        rating = make_source(client).fetch(
             "https://feeds.example.com/unknown", 998568017
         )
     assert rating is None
@@ -84,7 +105,7 @@ def test_fetch_raises_podchaser_error_on_graphql_error_body():
 
     with graphql_client(handler) as client:
         with pytest.raises(ratings.PodchaserError):
-            ratings.PodchaserRatingsSource(client, "test-key").fetch(
+            make_source(client).fetch(
                 "https://feeds.example.com/x", None
             )
 
@@ -95,9 +116,34 @@ def test_fetch_raises_on_http_error_status():
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(httpx.HTTPStatusError):
-            ratings.PodchaserRatingsSource(client, "bad-key").fetch(
-                "https://feeds.example.com/x", None
-            )
+            make_source(client).fetch("https://feeds.example.com/x", None)
+
+
+def test_authenticates_once_and_reuses_the_token_across_fetches():
+    token_calls = []
+
+    def wrapped(request):
+        body = json.loads(request.content)
+        if "requestAccessToken" in body["query"]:
+            token_calls.append(body)
+            return FAKE_TOKEN_RESPONSE
+        assert request.headers["authorization"] == "Bearer test-access-token"
+        return podcast_response(id="42", rating_average=4.5, rating_count=10)
+
+    with httpx.Client(transport=httpx.MockTransport(wrapped)) as client:
+        source = make_source(client)
+        source.fetch("https://feeds.example.com/a", None)
+        source.fetch("https://feeds.example.com/b", None)
+    assert len(token_calls) == 1  # not re-requested for the second show
+
+
+def test_fetch_raises_podchaser_error_when_token_response_has_no_access_token():
+    def wrapped(request):
+        return httpx.Response(200, json={"data": {"requestAccessToken": {"token_type": "Bearer"}}})
+
+    with httpx.Client(transport=httpx.MockTransport(wrapped)) as client:
+        with pytest.raises(ratings.PodchaserError):
+            make_source(client).fetch("https://feeds.example.com/x", None)
 
 
 # --- refresh_ratings ---
