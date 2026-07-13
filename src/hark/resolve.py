@@ -86,14 +86,24 @@ def upsert_show(conn: sqlite3.Connection, show: ResolvedShow) -> None:
 def resolve_all(
     conn: sqlite3.Connection, client: httpx.Client, names: list[str]
 ) -> list[tuple[str, ResolvedShow | None]]:
-    """Resolve each name and upsert hits into shows. Misses are reported, not stored."""
+    """Resolve each name and upsert hits into shows. Misses (including a
+    network/API failure for that one name) are reported as (name, None), not
+    stored. Commits after every hit — every other batch command in this
+    codebase (extract, transcribe, detect-ads, compare) isolates failures per
+    item so one bad item doesn't lose prior progress; this used to commit
+    only once at the very end, so a single feeds.txt entry raising partway
+    through a real run (a network blip against the iTunes Search API) would
+    silently roll back every show already resolved before it."""
     results = []
     for name in names:
-        show = resolve_show(client, name)
+        try:
+            show = resolve_show(client, name)
+        except httpx.HTTPError:
+            show = None
         if show is not None:
             upsert_show(conn, show)
+            conn.commit()
         results.append((name, show))
-    conn.commit()
     return results
 
 

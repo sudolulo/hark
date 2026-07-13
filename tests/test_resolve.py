@@ -78,6 +78,32 @@ def test_resolve_all_reports_misses_without_storing(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM shows").fetchone()[0] == 0
 
 
+def test_resolve_all_isolates_a_failure_and_keeps_prior_progress(tmp_path, search_payload):
+    """Regression: resolve_all() used to call conn.commit() only once, after
+    the whole loop — an exception partway through (a network blip against
+    the iTunes Search API for one name) would propagate uncaught and roll
+    back every show already resolved earlier in the same run, unlike every
+    other batch command in this codebase (extract/transcribe/detect-ads/
+    compare), which all isolate failures per item."""
+    conn = db.connect(tmp_path / "test.db")
+
+    def handler(request):
+        term = request.url.params["term"]
+        if term == "Boom Show":
+            raise httpx.ConnectError("simulated network failure", request=request)
+        return httpx.Response(200, json=search_payload)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        results = resolve.resolve_all(conn, client, ["Casefile True Crime", "Boom Show"])
+
+    assert results[0][0] == "Casefile True Crime" and results[0][1] is not None
+    assert results[1] == ("Boom Show", None)
+    # The first show's upsert must have survived the second name's failure.
+    rows = conn.execute("SELECT * FROM shows").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["query"] == "Casefile True Crime"
+
+
 def test_add_show_by_feed_url_inserts_with_feed_url_as_query(tmp_path):
     conn = db.connect(tmp_path / "test.db")
     added = resolve.add_show_by_feed_url(conn, "https://feeds.example.com/new-show", title="New Show")
