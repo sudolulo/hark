@@ -44,8 +44,12 @@ beats fingerprinting/crowdsourcing) is in adscrub's own repo history.
 - Topics can belong to multiple genres (Titanic = history + disaster); never force one bucket.
 - **adscrub is a dependency, not a merge — this is deliberate and non-negotiable.**
   `flan/adscrub` is its own product: own repo, own schema, own CLI, deployable and useful
-  standalone. hark depends on it (`[tool.uv.sources]` path dependency, editable — see
-  pyproject.toml) and calls its functions directly. hark's `episodes`/`shows`/`ad_segments`
+  standalone. hark depends on it via a git source (`[tool.uv.sources]`, pinned commit in
+  uv.lock — see pyproject.toml; was a local `../adscrub` path dependency until 2026-07-13,
+  changed because a path dependency made a fresh clone/CI unbuildable for anyone but the
+  author once the repo went public) and calls its functions directly. For side-by-side
+  local dev, override with `uv pip install -e ../adscrub` after `uv sync`. hark's
+  `episodes`/`shows`/`ad_segments`
   schema is deliberately shaped to match adscrub's own column names *specifically so*
   adscrub's schema-coupled functions (`pending_episodes`, `scan_episode`,
   `transcribe_episode`, `detect_pending`, `cut_pending`, ...) work unchanged against hark's
@@ -96,6 +100,12 @@ beats fingerprinting/crowdsourcing) is in adscrub's own repo history.
 
 - Python 3.12+, `uv` + `pyproject.toml`, src layout. SQLite for storage. Keep dependencies
   minimal (feedparser/httpx-level, no frameworks until the API milestone).
+- **`pyright` runs in CI, scoped to `src/` only** (`[tool.pyright]` in pyproject.toml) —
+  `tests/` isn't included, deliberately: `http.client`'s own stubs type
+  `getheader()` as `Optional[str]`, and dozens of test call sites use its result
+  without an assert, each one harmless (the test already asserted `resp.status
+  == 200` first). Keep `src/` itself clean at "basic" strictness — that's where a
+  `None` actually reaching somewhere unexpected matters.
 - CHANGELOG.md in Keep a Changelog format; SemVer.
 - **No AI/Claude attribution in commit messages** (no Co-Authored-By). Disclose AI use in the
   README instead. Commit messages describe actual changes, concise; never reference prompts

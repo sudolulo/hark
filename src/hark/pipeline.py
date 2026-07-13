@@ -69,6 +69,7 @@ def upsert_topic(
         cur = conn.execute(
             "INSERT INTO topics (label, wikidata_id) VALUES (?, ?)", (label, wikidata_id)
         )
+        assert cur.lastrowid is not None  # always set after a real INSERT
         topic_id = cur.lastrowid
     else:
         topic_id = row["id"]

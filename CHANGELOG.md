@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `pyright` in CI (`src/` only — see `pyproject.toml`'s `[tool.pyright]` for why
+  `tests/` is excluded). Caught real gaps on first run: `sqlite3.Cursor.lastrowid`
+  is typed `int | None` and several callers assumed it's always set after an
+  INSERT (true in practice, now asserted explicitly rather than just assumed);
+  `Handler.log_message`/`log_error` had a parameter renamed (`fmt` vs.
+  `BaseHTTPRequestHandler`'s own `format`) that broke Liskov substitution
+  without changing runtime behavior.
+
 ## [0.15.0] - 2026-07-13
 
 ### Added

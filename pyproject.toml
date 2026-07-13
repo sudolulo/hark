@@ -39,6 +39,7 @@ gpu = [
 [dependency-groups]
 dev = [
     "pytest>=8.3",
+    "pyright>=1.1.400",
 ]
 
 [build-system]
@@ -47,3 +48,13 @@ build-backend = "hatchling.build"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.pyright]
+# src/ only, not tests/: pyright's basic mode flags every resp.getheader(...)
+# (typed Optional[str] by http.client's own stubs) that a test then calls
+# .split()/uses `in` on without an assert — dozens of instances, each one
+# harmless (a test that already asserted resp.status == 200 knows the header
+# is there). Asserting it explicitly at every call site would be pure
+# boilerplate, not a real safety gain; src/ itself is where a None slipping
+# through actually matters, and it's already clean at "basic" strictness.
+include = ["src"]

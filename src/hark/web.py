@@ -171,6 +171,7 @@ class Auth:
                 "INSERT INTO users (username, is_admin) VALUES (?, ?)", (username, int(is_admin))
             )
             conn.commit()
+            assert cur.lastrowid is not None  # always set after a real INSERT
             return cur.lastrowid
 
     def list_users(self) -> list[sqlite3.Row]:
@@ -214,6 +215,7 @@ class Auth:
                 (username, int(is_admin), token, expires),
             )
             conn.commit()
+            assert cur.lastrowid is not None  # always set after a real INSERT
             return cur.lastrowid, token
 
     def find_by_invite_token(self, token: str) -> sqlite3.Row | None:
@@ -1320,6 +1322,7 @@ def index_status_html(pending_episodes: int, pending_canon: int, last_extracted_
     else:
         active = last_dt is not None and utcnow() - last_dt < ACTIVE_WINDOW
         if active:
+            assert last_dt is not None  # active can only be True per the line above
             lines.append(
                 f"<p>Indexing in progress — {plural(pending_episodes, 'episode')} queued, "
                 f"last processed {relative_time(last_dt)}.</p>"
@@ -1430,11 +1433,11 @@ class Handler(BaseHTTPRequestHandler):
     server_version = f"hark/{__version__}"
     protocol_version = "HTTP/1.1"
 
-    def log_message(self, fmt, *args):  # quiet access log
+    def log_message(self, format, *args):  # quiet access log
         pass
 
-    def log_error(self, fmt, *args):  # bypass log_message so errors still surface
-        BaseHTTPRequestHandler.log_message(self, fmt, *args)
+    def log_error(self, format, *args):  # bypass log_message so errors still surface
+        BaseHTTPRequestHandler.log_message(self, format, *args)
 
     # -- helpers -------------------------------------------------------------
 

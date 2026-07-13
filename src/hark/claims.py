@@ -365,6 +365,11 @@ def load_comparisons(
                 on_result(result)
             continue
         try:
+            # topic being non-None (checked above) only happens when
+            # topic_id is non-None too (line 358's own ternary) — narrowing
+            # a dict.get() result through that early-return isn't something
+            # the type checker can see on its own.
+            assert topic_id is not None
             episode_ids = sorted(
                 r["id"] for r in conn.execute(
                     """
