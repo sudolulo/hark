@@ -71,9 +71,14 @@ def _filter_enabled(episodes, enabled_ids: set[int], limit: int | None = None) -
     adscrub's own pending_episodes() so hark's per-show toggle doesn't need
     any adscrub code change beyond exposing per-episode functions. Callers
     compute `enabled_ids` once per command (via _enabled_show_ids) rather
-    than re-querying it on every one of a command's 2-3 call sites."""
+    than re-querying it on every one of a command's 2-3 call sites.
+
+    A slice, not a truthy check, on purpose: `filtered[:None]` already means
+    "no limit" in Python, so this handles limit=0 correctly too (an empty
+    result, matching `--limit 0`'s meaning everywhere else in this codebase)
+    instead of a truthy `if limit else filtered` treating 0 as "unlimited"."""
     filtered = [e for e in episodes if e["show_id"] in enabled_ids]
-    return filtered[:limit] if limit else filtered
+    return filtered[:limit]
 
 
 def make_reporter() -> tuple[Callable[[pipeline.ExtractResult], None], dict[str, int]]:

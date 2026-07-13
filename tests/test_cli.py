@@ -132,6 +132,20 @@ def test_topics_empty_db(tmp_path, capsys):
 # --- ad-stripping pipeline (calls straight into the adscrub package) ---
 
 
+def test_filter_enabled_limit_zero_returns_nothing():
+    """Regression: `filtered[:limit] if limit else filtered` treated a
+    truthy check as the limit test — limit=0 is falsy, so it fell through
+    to the unfiltered `else filtered` branch and returned everything,
+    exactly the same falsy-zero footgun already fixed in
+    claims.pending_topics(). `--limit 0` is used by cmd_transcribe,
+    cmd_detect_ads, and cmd_cut, all via this helper."""
+    episodes = [{"show_id": 1}, {"show_id": 1}, {"show_id": 2}]
+    enabled = {1}
+    assert cli._filter_enabled(episodes, enabled, limit=0) == []
+    assert cli._filter_enabled(episodes, enabled, limit=1) == [{"show_id": 1}]
+    assert cli._filter_enabled(episodes, enabled, limit=None) == [{"show_id": 1}, {"show_id": 1}]
+
+
 def test_chapters_with_nothing_to_scan_fails(tmp_path, capsys):
     rc = cli.main(["--db", str(tmp_path / "t.db"), "chapters"])
     assert rc == 1
