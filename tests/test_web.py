@@ -1671,6 +1671,37 @@ def test_invite_accept_cannot_be_reused(server, tmp_path):
 
 # --- /admin/users (0.14.0) ---
 
+def test_admin_sees_admin_nav_link_on_every_page(server):
+    # Regression: /admin/users was only ever reachable by typing the URL —
+    # the header showed the logged-in username but never linked anywhere
+    # admin-only, despite the header otherwise being the one place every
+    # page should be reachable from. Checked on an unrelated page (home),
+    # not /admin/users itself, since the point is site-wide navigability.
+    cookie = login(server)
+    resp, body = request(server, "GET", "/", cookie=cookie)
+    assert resp.status == 200
+    assert '<a href="/admin/users">users</a>' in body
+
+
+def test_non_admin_does_not_see_admin_nav_link(server, tmp_path):
+    web.Auth(tmp_path / "auth.db", admin_token="letmein").create_user("viewer")
+    resp, _ = request(server, "POST", "/login", body={"username": "viewer", "password": "letmein"})
+    cookie = resp.getheader("Set-Cookie").split(";")[0]
+    resp, body = request(server, "GET", "/", cookie=cookie)
+    assert resp.status == 200
+    assert 'href="/admin/users"' not in body
+
+
+def test_admin_nav_link_present_even_on_error_pages(server):
+    # not_found/forbidden/db_unavailable build their own page() calls,
+    # separate from the view_* methods — easy to forget the is_admin arg
+    # on one of them and silently lose the link on just those pages.
+    cookie = login(server)
+    resp, body = request(server, "GET", "/nonexistent-route", cookie=cookie)
+    assert resp.status == 404
+    assert '<a href="/admin/users">users</a>' in body
+
+
 def test_admin_users_page_requires_admin(server, tmp_path):
     web.Auth(tmp_path / "auth.db", admin_token="letmein").create_user("viewer")
     resp, _ = request(server, "POST", "/login", body={"username": "viewer", "password": "letmein"})

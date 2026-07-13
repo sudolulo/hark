@@ -71,7 +71,7 @@ HEADER = """<header>
 <a class="brand" href="/">HARK</a>
 <nav><a href="/topics">topics</a> <a href="/shows">shows</a> <a href="/notable">notable</a> <a href="/search">search</a></nav>
 <span class="spacer"></span>
-<nav><span class="dim">{user}</span> <a href="/account">account</a></nav>
+<nav><span class="dim">{user}</span> {admin_link}<a href="/account">account</a></nav>
 </header>"""
 
 LOGIN_PAGE = """<div class="login-box">
@@ -111,8 +111,15 @@ def plural(n: int, word: str, plural_word: str | None = None) -> str:
     return f"{n} {word}" if n == 1 else f"{n} {plural_word or word + 's'}"
 
 
-def page(title: str, body: str, user: str | None = None) -> str:
-    header = HEADER.format(user=esc(user)) if user else ""
+def page(title: str, body: str, user: str | None = None, is_admin: bool = False) -> str:
+    # No route for this link was navigable before — /admin/users only ever
+    # showed up if you already knew to type it, despite the header otherwise
+    # trying to be the single place every page is reachable from. Labeled
+    # "users" (matching that page's own <h1>), not "admin" — the default
+    # bootstrap account is itself named "admin", so "admin admin account"
+    # would otherwise read as a stutter in the common case.
+    admin_link = '<a href="/admin/users">users</a> ' if is_admin else ""
+    header = HEADER.format(user=esc(user), admin_link=admin_link) if user else ""
     return PAGE.format(title=esc(title), header=header, body=body)
 
 

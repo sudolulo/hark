@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-07-13
+
+### Fixed
+
+- The admin-only `/admin/users` page was reachable only by typing the URL — the
+  header showed the logged-in username but never linked anywhere admin-only,
+  despite otherwise trying to be the one place every page is reachable from.
+  Admins now get a "users" nav link on every page (including error pages),
+  gated the same way the page itself already is. Labeled "users" (matching
+  that page's own heading) rather than "admin", since the default bootstrap
+  account is itself named "admin" and "admin admin account" read as a
+  stutter in the header for that (common) case.
+
 ## [0.16.0] - 2026-07-13
 
 ### Added

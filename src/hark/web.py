@@ -159,11 +159,14 @@ class Handler(BaseHTTPRequestHandler):
         return {k: v[0] for k, v in urllib.parse.parse_qs(raw).items()}
 
     def not_found(self, user) -> None:
-        return self.respond(404, page("404", "<h1>Not found</h1>", user["username"]))
+        return self.respond(404, page(
+            "404", "<h1>Not found</h1>", user["username"], bool(user["is_admin"])
+        ))
 
     def forbidden(self, user) -> None:
         return self.respond(403, page(
-            "forbidden", "<h1>Forbidden</h1><p>Admin only.</p>", user["username"]
+            "forbidden", "<h1>Forbidden</h1><p>Admin only.</p>",
+            user["username"], bool(user["is_admin"]),
         ))
 
     def db_unavailable(self, user) -> None:
@@ -172,7 +175,7 @@ class Handler(BaseHTTPRequestHandler):
             "<h1>Not ready</h1><p>The topic database hasn't been created yet — "
             "run <code>hark ingest</code> and <code>hark extract</code> "
             "(or <code>hark load</code>) first.</p>",
-            user["username"],
+            user["username"], bool(user["is_admin"]),
         ))
 
     # -- ad-stripped podcast feed/audio (unauthenticated, token-gated) --------

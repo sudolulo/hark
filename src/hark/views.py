@@ -265,7 +265,7 @@ class App:
             "<h2>Recently indexed</h2>"
             f"<table><tr><th>when</th><th>show</th><th>episode</th></tr>{recent_html}</table>"
         )
-        return page("index", body, user["username"])
+        return page("index", body, user["username"], bool(user["is_admin"]))
 
     def view_topics(self, user, params) -> str:
         genre = params.get("genre", [""])[0]
@@ -287,7 +287,7 @@ class App:
         query = {"genre": genre} if genre else {}
         pager = pagination_html("/topics", query, page_num, total, "topics")
         body = f"<h1>{esc(title)}</h1><p>{pills}</p>" + topic_table(rows) + pager
-        return page(title, body, user["username"])
+        return page(title, body, user["username"], bool(user["is_admin"]))
 
     def view_notable(self, user) -> str:
         """Two interim "notable" signals, distinct from the home page's
@@ -331,7 +331,7 @@ class App:
              f'<table><tr><th>episode</th><th>show</th><th>topic</th><th>genre</th></tr>'
              f'{rare_html}</table>' if rare else '<p class="dim">Nothing yet.</p>')
         )
-        return page("notable", body, user["username"])
+        return page("notable", body, user["username"], bool(user["is_admin"]))
 
     def view_topic(self, user, topic_id: int) -> str | None:
         conn = self.db()
@@ -401,7 +401,7 @@ class App:
             f'<th title="extractor\'s confidence this episode is really about this topic">conf</th></tr>'
             f"{rows_html}</table>"
         )
-        return page(topic["label"], body, user["username"])
+        return page(topic["label"], body, user["username"], bool(user["is_admin"]))
 
     def view_search(self, user, params) -> str:
         q = params.get("q", [""])[0].strip()
@@ -456,7 +456,7 @@ class App:
             note = (f'<p class="dim">showing the 50 most recent of {episode_total} — '
                     f"narrow your search to see the rest.</p>") if episode_total > 50 else ""
             body += f"<h2>{plural(episode_total, 'episode title match', 'episode title matches')}</h2>{eps_table}{note}"
-        return page("search", body, user["username"])
+        return page("search", body, user["username"], bool(user["is_admin"]))
 
     def view_shows(self, user, params: dict) -> str:
         show_all = bool(params.get("all", ["0"])[0] == "1")
@@ -501,7 +501,7 @@ class App:
         body = (f"<h1>shows</h1><p>{toggle_link}</p>" + note + empty +
                 ("<table><tr><th>show</th><th>episodes</th>"
                  f"<th>indexed</th><th>latest</th></tr>{table}</table>" if rows else ""))
-        return page("shows", body, user["username"])
+        return page("shows", body, user["username"], bool(user["is_admin"]))
 
     def view_show(self, user, show_id: int, params) -> str | None:
         page_num = paginate(params)
@@ -644,7 +644,7 @@ class App:
             f"{related_html}"
             f"<table><tr><th>episode</th><th>date</th><th>topics</th></tr>{rows_html}</table>{pager}"
         )
-        return page(show["name"], body, user["username"])
+        return page(show["name"], body, user["username"], bool(user["is_admin"]))
 
     def view_episode(self, user, episode_id: int) -> str | None:
         conn = self.db()
@@ -724,7 +724,7 @@ class App:
                 body += '<p class="dim">Transcribed by 2+ shows but not compared yet.</p>'
             else:
                 body += '<p class="dim">Only this show has covered this topic so far.</p>'
-        return page(episode["title"], body, user["username"])
+        return page(episode["title"], body, user["username"], bool(user["is_admin"]))
 
     def view_account(self, user, msg: str = "", err: str = "") -> str:
         note = f'<p class="err">{esc(err)}</p>' if err else (f"<p>{esc(msg)}</p>" if msg else "")
@@ -738,7 +738,7 @@ class App:
 </form>
 <form method="post" action="/logout"><button class="ghost">Log out</button></form>
 </div>"""
-        return page("account", body, user["username"])
+        return page("account", body, user["username"], bool(user["is_admin"]))
 
     def view_admin_users(self, user, params: dict, msg: str = "") -> str:
         """Admin-only. Web-UI equivalent of `hark user add/invite/remove` —
@@ -818,6 +818,6 @@ just from this host.</p>
 <label><input type="checkbox" name="is_admin" value="1"> Admin</label>
 <button>Create invite link</button>
 </form>"""
-        return page("users", body, user["username"])
+        return page("users", body, user["username"], bool(user["is_admin"]))
 
 
