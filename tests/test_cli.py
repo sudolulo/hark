@@ -123,6 +123,20 @@ def test_topics_ranks_by_cross_show_coverage(tmp_path, capsys):
     assert "true_crime" in out
 
 
+def test_topics_limit_zero_reports_nothing(tmp_path, capsys):
+    """Regression: topics_query()'s `if limit:` treated limit=0 as "no
+    limit" (SQL LIMIT clause never added) rather than "zero rows" — the
+    same falsy-zero class already fixed in claims.pending_topics() and
+    cli._filter_enabled(). Reachable via `hark topics --limit 0`."""
+    path = tmp_path / "t.db"
+    seed_extracted(path)
+    rc = cli.main(["--db", str(path), "topics", "--limit", "0"])
+    assert rc == 1  # "no topics" branch: an empty result looks like an empty db to cmd_topics
+    out = capsys.readouterr()
+    assert "Dennis Rader" not in out.out
+    assert "no topics yet" in out.err
+
+
 def test_topics_empty_db(tmp_path, capsys):
     rc = cli.main(["--db", str(tmp_path / "t.db"), "topics"])
     assert rc == 1

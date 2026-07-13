@@ -35,7 +35,11 @@ def topics_query(genre: str = "", q: str = "", limit: int | None = None,
     """
     where, params = _topics_filter(genre, q)
     sql += where + " GROUP BY t.id ORDER BY shows DESC, episodes DESC, t.label"
-    if limit:
+    # is not None, not a truthy check: limit=0 must mean "zero rows" (SQL's
+    # own LIMIT 0 semantics), not "no limit" — reachable via `hark topics
+    # --limit 0`, the same falsy-zero class of bug already fixed in
+    # claims.pending_topics() and cli._filter_enabled().
+    if limit is not None:
         sql += " LIMIT ? OFFSET ?"
         params.extend([limit, offset])
     return sql, tuple(params)
