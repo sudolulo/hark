@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-07-13
+
+### Added
+
+- **M4: episode scoring ("recommended for you").** `/notable` now leads with a
+  personalized ranked list of not-yet-played episodes, plus a "your genres"
+  mirror — the page's own docstring had reserved itself for this since M4 was
+  first sketched in PLAN.md. Two signals, no LLM calls anywhere in the
+  computation (pure SQL/Python arithmetic — the cheapest and most auditable
+  answer available):
+  - **Personal affinity**, from your own listening history
+    (`listen_actions`, populated by M3's AntennaPod sync): completion ratio
+    per genre and per real-world topic you've actually played, Bayesian-
+    shrunk toward your own overall average so a single play doesn't swing a
+    genre's score to 0 or 1. New `scoring.py` — pure computation, no
+    persisted table; recomputed live per page view.
+  - **External rating**, from Podchaser's free-tier API (`hark rate-shows`,
+    new CLI command) — cached in a new `show_ratings` table (`(show_id,
+    source)`, room for more sources later without a migration), similarly
+    shrunk toward the mean rating across all rated shows so a show with 2
+    five-star reviews doesn't outrank one with 10,000 averaging 4.3.
+  - Every score shown alongside its own raw component numbers (topic
+    affinity, genre affinity, external rating), not collapsed into one
+    opaque blend. A user with no listening history at all collapses
+    cleanly to pure external-rating ranking — no special-cased "new user"
+    branch, just every component returning `None` and the weighted average
+    renormalizing to whatever's present.
+  - `resolve.backfill_itunes_ids()` (new, runs as part of `hark rate-shows`):
+    fills in `itunes_id` for shows registered via `add_show_by_feed_url()`
+    (gpodder sync, OPML import — most of a real catalog), which never set it
+    the way `resolve_show()`'s hand-curated path does. A second, URL-drift-
+    proof match key for Podchaser lookups, verified by exact feed-URL
+    equality against the search candidate (never a bare title-similarity
+    guess, which could misattribute the wrong show's id).
+  - Explicitly not part of this pass: per-topic treatment comparison
+    (depth/sensationalism) — PLAN.md's other M4 bullet, needs transcripts
+    and real LLM judgment, unlike the rest of this feature.
+
 ## [0.16.1] - 2026-07-13
 
 ### Fixed

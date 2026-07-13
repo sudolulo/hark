@@ -23,6 +23,14 @@ class ResolvedShow:
     image_url: str | None = None
 
 
+@dataclass
+class BackfillResult:
+    show_id: int
+    query: str
+    itunes_id: int | None = None
+    error: str | None = None
+
+
 def read_feeds_file(path: str | Path) -> list[str]:
     """Return show names from feeds.txt, skipping blanks and # comments."""
     names = []
@@ -104,6 +112,50 @@ def resolve_all(
             upsert_show(conn, show)
             conn.commit()
         results.append((name, show))
+    return results
+
+
+def backfill_itunes_ids(
+    conn: sqlite3.Connection, client: httpx.Client, limit: int | None = None
+) -> list[BackfillResult]:
+    """Fill in itunes_id for shows that don't have one yet. itunes_id is only
+    ever set by resolve_show()'s hand-curated path — add_show_by_feed_url()
+    (gpodder sync, OPML import, discover --add) never sets it, and that's how
+    a large fraction of a real catalog actually gets registered. It's worth
+    having as a second, URL-drift-proof match key beyond feed_url alone: a
+    feed can move, and an external service (e.g. a ratings source) may have
+    indexed a different canonical URL than the one hark has stored.
+
+    Searches by title/query as a candidate generator only — a result is
+    accepted ONLY when its own feedUrl exactly matches the show's stored
+    feed_url, which is what actually verifies the match. A bare
+    title-similarity accept could misattribute the wrong show's id entirely;
+    exact feed URL equality can't. No match found this run just leaves
+    itunes_id NULL to retry next time — this is the keyless iTunes Search API,
+    so unlike the ratings source there's no query budget to conserve."""
+    sql = "SELECT id, query, title, feed_url FROM shows WHERE itunes_id IS NULL AND feed_url IS NOT NULL ORDER BY id"
+    if limit is not None:
+        sql += " LIMIT ?"
+        rows = conn.execute(sql, (limit,)).fetchall()
+    else:
+        rows = conn.execute(sql).fetchall()
+
+    results = []
+    for row in rows:
+        result = BackfillResult(show_id=row["id"], query=row["query"])
+        try:
+            hits = search_podcasts(client, row["title"] or row["query"])
+        except httpx.HTTPError as exc:
+            result.error = str(exc)
+            results.append(result)
+            continue
+        match = next((h for h in hits if h.get("feedUrl") == row["feed_url"]), None)
+        itunes_id = match.get("collectionId") if match else None
+        if itunes_id:
+            conn.execute("UPDATE shows SET itunes_id = ? WHERE id = ?", (itunes_id, row["id"]))
+            conn.commit()
+            result.itunes_id = itunes_id
+        results.append(result)
     return results
 
 

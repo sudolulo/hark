@@ -9,7 +9,7 @@ import sqlite3
 import urllib.parse
 from pathlib import Path
 
-from . import claims, gpodder_server, podcast_feed
+from . import claims, gpodder_server, podcast_feed, scoring
 from .auth import BASE_URL_SETTING, Auth, parse_iso
 from .extract import GENRES as GENRES_FILTER
 from .queries import (
@@ -290,18 +290,51 @@ class App:
         return page(title, body, user["username"], bool(user["is_admin"]))
 
     def view_notable(self, user) -> str:
-        """Two interim "notable" signals, distinct from the home page's
-        cross-show-coverage ranking (which already surfaces "most covered" —
-        repeating that here would just be the same table twice). Both are
-        explicitly provisional: PLAN.md's M4 (interestingness scoring,
-        calibrated against real listening) is the eventual real version of
-        this page; these are what's derivable without it."""
+        """"Recommended for you" (scoring.py, M4) — this page's own docstring
+        used to reserve itself for exactly this ("PLAN.md's M4 ... is the
+        eventual real version of this page"). Two older, still-useful
+        signals stay below it: most-contested topics (where shows' tellings
+        diverge) and rare-genre coverage — distinct from the home page's
+        cross-show-coverage ranking, not superseded by the new section."""
         conn = self.db()
         try:
+            m4 = scoring.recommendations_for_user(conn, user["id"], limit=15)
+            topic_labels = {}
+            if m4["topic_affinity"]:
+                placeholders = ",".join("?" * len(m4["topic_affinity"]))
+                topic_labels = {
+                    r["id"]: r["label"]
+                    for r in conn.execute(
+                        f"SELECT id, label FROM topics WHERE id IN ({placeholders})",
+                        list(m4["topic_affinity"]),
+                    )
+                }
             contested = contested_topics(conn, limit=15)
             rare_genres, rare = rare_genre_episodes(conn, limit=15)
         finally:
             conn.close()
+
+        recommended_html = "".join(
+            f"<tr><td><a href='/show/{r['show_id']}'>{esc(r['show'])}</a></td>"
+            f"<td><a href='/episode/{r['episode_id']}'>{esc(r['title'])}</a></td>"
+            f"<td class='num dim'>{conf(r['topic_affinity'])}</td>"
+            f"<td class='num dim'>{conf(r['genre_affinity'])}</td>"
+            f"<td class='num dim'>{conf(r['external_rating'])}</td></tr>"
+            for r in m4["recommended"]
+        )
+        genre_pills = " ".join(
+            f'<span class="pill">{esc(genre)} ({conf(affinity)})</span>'
+            for genre, affinity in sorted(
+                (m4["genre_affinity"] or {}).items(), key=lambda kv: kv[1], reverse=True
+            )
+        )
+        topic_pills_html = " ".join(
+            f'<a class="pill" href="/topic/{topic_id}">{esc(topic_labels.get(topic_id, "?"))} '
+            f'({conf(affinity)})</a>'
+            for topic_id, affinity in sorted(
+                (m4["topic_affinity"] or {}).items(), key=lambda kv: kv[1], reverse=True
+            )[:10]
+        )
         contested_html = "".join(
             f"<tr><td><a href='/topic/{r['topic_id']}'>{esc(r['label'])}</a></td>"
             f"<td class='num'>{r['shared_count']}</td><td class='num'>{r['unique_count']}</td>"
@@ -317,8 +350,29 @@ class App:
         )
         body = (
             "<h1>Notable</h1>"
-            '<p class="dim">Interim signals, not M4\'s real interestingness scoring yet — '
-            "just what's derivable from what hark already has.</p>"
+            "<h2>Recommended for you</h2>" +
+            (
+                '<p class="dim">Ranked by your own listening history (which genres/topics '
+                "you finish) and external show ratings, wherever either or both are "
+                "available — see the columns below for the actual numbers behind each "
+                "score, not just one blended figure.</p>"
+                '<table><tr><th>show</th><th>episode</th>'
+                '<th title="how much you\'ve engaged with this exact real-world topic before">'
+                'topic</th><th title="how much you\'ve engaged with this genre before">genre</th>'
+                f'<th title="external show rating">rating</th></tr>{recommended_html}</table>'
+                if m4["recommended"] else
+                '<p class="dim">Nothing to recommend yet — needs either some listening '
+                "history (sync with AntennaPod) or external show ratings "
+                "(<code>hark rate-shows</code>).</p>"
+            ) +
+            "<h2>Your genres</h2>" +
+            (
+                f"<p>{genre_pills}</p>"
+                + (f"<p>{topic_pills_html}</p>" if topic_pills_html else "")
+                if m4["genre_affinity"] else
+                '<p class="dim">No listening history yet — sync with AntennaPod to see your '
+                "own genre/topic affinity here.</p>"
+            ) +
             "<h2>Most contested</h2>"
             '<p class="dim">Topics where shows\' tellings diverge the most — highest count of '
             "claims unique to one show, among topics with a claims comparison loaded.</p>" +

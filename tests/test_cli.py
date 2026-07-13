@@ -4,7 +4,7 @@ from adscrub import cut as ad_cut
 from adscrub import detect as ad_detect
 from adscrub import transcribe as ad_transcribe
 
-from hark import cli, db, discover, nextcloud
+from hark import cli, db, discover, nextcloud, ratings, resolve
 from hark.extract import NullExtractor
 
 
@@ -975,3 +975,72 @@ def test_user_list_shows_invite_link(tmp_path, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "invite pending: /invite/" in out
+
+
+# --- rate-shows (M4, 0.17.0) ---
+
+
+def _fake_backfill(conn, client, limit=None):
+    return [resolve.BackfillResult(show_id=1, query="q", itunes_id=42)]
+
+
+def test_rate_shows_without_podchaser_key_only_runs_backfill(tmp_path, capsys, monkeypatch):
+    monkeypatch.delenv("HARK_PODCHASER_API_KEY", raising=False)
+    monkeypatch.setattr(resolve, "backfill_itunes_ids", _fake_backfill)
+
+    def boom(*a, **k):
+        raise AssertionError("refresh_ratings should not be called without an API key")
+
+    monkeypatch.setattr(ratings, "refresh_ratings", boom)
+    rc = cli.main(["--db", str(tmp_path / "t.db"), "rate-shows"])
+    assert rc == 0
+    out = capsys.readouterr()
+    assert "itunes_id backfill: 1/1 newly matched" in out.out
+    assert "HARK_PODCHASER_API_KEY" in out.err
+
+
+def test_rate_shows_with_podchaser_key_runs_both_steps(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("HARK_PODCHASER_API_KEY", "test-key")
+    monkeypatch.setattr(resolve, "backfill_itunes_ids", _fake_backfill)
+
+    def fake_refresh(conn, source, limit=None):
+        assert isinstance(source, ratings.PodchaserRatingsSource)
+        return [ratings.RatingResult(show_id=1, query="q", rating=ratings.ShowRating("42", 4.5, 900))]
+
+    monkeypatch.setattr(ratings, "refresh_ratings", fake_refresh)
+    rc = cli.main(["--db", str(tmp_path / "t.db"), "rate-shows"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "itunes_id backfill: 1/1 newly matched" in out
+    assert "ok    q: 4.5 (900 reviews)" in out
+    assert "refreshed ratings for 1 show(s) (0 failed)" in out
+
+
+def test_rate_shows_reports_rating_failures(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("HARK_PODCHASER_API_KEY", "test-key")
+    monkeypatch.setattr(resolve, "backfill_itunes_ids", _fake_backfill)
+    monkeypatch.setattr(
+        ratings, "refresh_ratings",
+        lambda conn, source, limit=None: [ratings.RatingResult(show_id=1, query="q", error="boom")],
+    )
+    rc = cli.main(["--db", str(tmp_path / "t.db"), "rate-shows"])
+    assert rc == 1
+    assert "FAIL  q: boom" in capsys.readouterr().out
+
+
+def test_rate_shows_passes_limit_to_both_steps(tmp_path, monkeypatch):
+    monkeypatch.setenv("HARK_PODCHASER_API_KEY", "test-key")
+    seen = {}
+
+    def fake_backfill(conn, client, limit=None):
+        seen["backfill_limit"] = limit
+        return []
+
+    def fake_refresh(conn, source, limit=None):
+        seen["refresh_limit"] = limit
+        return []
+
+    monkeypatch.setattr(resolve, "backfill_itunes_ids", fake_backfill)
+    monkeypatch.setattr(ratings, "refresh_ratings", fake_refresh)
+    cli.main(["--db", str(tmp_path / "t.db"), "rate-shows", "--limit", "5"])
+    assert seen == {"backfill_limit": 5, "refresh_limit": 5}

@@ -43,22 +43,24 @@ run the same way but as a scheduled Claude agent instead of a paid API call
 `$ANTHROPIC_API_KEY` and isn't starting now. See docs/PLAN.md's "Deployed pipeline
 automation" section.
 
-See `docs/PLAN.md` for milestones. Current state (0.16.0): feed resolution,
+See `docs/PLAN.md` for milestones. Current state (0.17.0): feed resolution,
 episode ingest, LLM topic extraction with Wikidata canonicalization, the
 cross-show topic index, a full web UI, adscrub-backed ad-stripping (with a
 per-show on/off toggle and feed URL, both from the show page; ad-span
 detection is now session-as-X automated too, not just chapter-marker
 scanning), cross-show claims comparison, M2 discovery (related shows/topics
-by co-occurrence, candidate-show search, and an interim notable-episodes
-page), M3's AntennaPod loop (Nextcloud gpodder subscription + listen-history
-sync, OPML import fallback, and hark speaking the gpodder-sync protocol
-itself so AntennaPod can point directly at it — no app fork needed), a
-per-show topic-index toggle (new shows start excluded from extraction until
-reviewed — most subscriptions aren't subject-per-episode genre shows), and
-multi-user accounts (per-user subscription lists + listen history + quota,
-shared processing, invite-link onboarding), and an admin-editable public base
-URL (used for invite links and the podcast feed/audio URLs, settable from
-`/admin/users` without a redeploy) — deployed live.
+by co-occurrence, candidate-show search), M3's AntennaPod loop (Nextcloud
+gpodder subscription + listen-history sync, OPML import fallback, and hark
+speaking the gpodder-sync protocol itself so AntennaPod can point directly
+at it — no app fork needed), a per-show topic-index toggle (new shows start
+excluded from extraction until reviewed — most subscriptions aren't
+subject-per-episode genre shows), multi-user accounts (per-user subscription
+lists + listen history + quota, shared processing, invite-link onboarding),
+an admin-editable public base URL (used for invite links and the podcast
+feed/audio URLs, settable from `/admin/users` without a redeploy), and M4
+episode scoring — personalized "recommended for you" ranking from your own
+listening history plus external show ratings (Podchaser), no LLM calls
+involved at all — deployed live.
 
 ## Demo
 

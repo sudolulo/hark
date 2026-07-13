@@ -428,6 +428,46 @@ def test_notable_page_handles_empty_state(server):
     resp, body = request(server, "GET", "/notable", cookie=cookie)
     assert resp.status == 200
     assert "No claims comparisons loaded yet" in body
+    assert "Nothing to recommend yet" in body
+    assert "No listening history yet" in body
+
+
+def test_notable_page_shows_recommendations_and_genre_affinity(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('q', 'Show A', 'http://a')")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('r', 'Show B', 'http://b')")
+    conn.execute("INSERT INTO topics (id, label) VALUES (1, 'Engaged Case')")
+    conn.execute("INSERT INTO topic_genres (topic_id, genre) VALUES (1, 'true_crime')")
+    conn.executemany(
+        "INSERT INTO episodes (show_id, guid, title) VALUES (?, ?, ?)",
+        [(1, "g1", "Listened Episode"), (2, "g2", "Candidate Episode")],
+    )
+    conn.executemany(
+        "INSERT INTO episode_topics (episode_id, topic_id, source) VALUES (?, 1, 't')", [(1,), (2,)],
+    )
+    conn.execute(
+        "INSERT INTO listen_actions (user_id, podcast_url, episode_url, episode_guid, action, position, total)"
+        " VALUES (1, 'http://a', '', 'g1', 'play', 900, 1000)"
+    )
+    conn.commit()
+    conn.close()
+
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db", bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
+        cookie = resp.getheader("Set-Cookie").split(";")[0]
+        resp, body = request(srv, "GET", "/notable", cookie=cookie)
+        assert resp.status == 200
+        assert "Recommended for you" in body
+        recommended_section = body[body.index("Recommended for you"):body.index("Your genres")]
+        assert "Candidate Episode" in recommended_section
+        assert "Listened Episode" not in recommended_section  # already played, excluded from the ranking
+        assert "Your genres" in body
+        assert "true_crime" in body
+    finally:
+        srv.shutdown()
 
 
 def test_show_page_distinguishes_unindexed_from_topicless_episodes(tmp_path):

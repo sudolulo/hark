@@ -143,3 +143,74 @@ def test_add_show_by_feed_url_skips_url_already_resolved_by_name(tmp_path, searc
     added = resolve.add_show_by_feed_url(conn, "https://feeds.example.com/casefile")
     assert added is False
     assert conn.execute("SELECT COUNT(*) FROM shows").fetchone()[0] == 1
+
+
+# --- backfill_itunes_ids ---
+
+
+def _seed_show(conn, feed_url, title="Casefile True Crime", itunes_id=None):
+    conn.execute(
+        "INSERT INTO shows (query, title, feed_url, itunes_id) VALUES (?, ?, ?, ?)",
+        (feed_url, title, feed_url, itunes_id),
+    )
+    conn.commit()
+    return conn.execute("SELECT id FROM shows WHERE feed_url = ?", (feed_url,)).fetchone()["id"]
+
+
+def test_backfill_itunes_ids_sets_id_on_exact_feed_url_match(tmp_path, search_payload):
+    conn = db.connect(tmp_path / "test.db")
+    show_id = _seed_show(conn, "https://feeds.example.com/casefile")
+    with make_client(search_payload) as client:
+        results = resolve.backfill_itunes_ids(conn, client)
+    assert results == [resolve.BackfillResult(show_id=show_id, query="https://feeds.example.com/casefile",
+                                               itunes_id=998568017)]
+    row = conn.execute("SELECT itunes_id FROM shows WHERE id = ?", (show_id,)).fetchone()
+    assert row["itunes_id"] == 998568017
+
+
+def test_backfill_itunes_ids_does_not_misattribute_on_similar_title(tmp_path, search_payload):
+    # The fixture's search results include "Casefile Fan Recaps" — a
+    # different feedUrl under a similar title. A show whose own feed_url
+    # matches *none* of the results exactly must stay unmatched rather than
+    # grabbing the nearest-sounding title's id.
+    conn = db.connect(tmp_path / "test.db")
+    show_id = _seed_show(conn, "https://feeds.example.com/casefile-mirror")
+    with make_client(search_payload) as client:
+        results = resolve.backfill_itunes_ids(conn, client)
+    assert results == [resolve.BackfillResult(show_id=show_id, query="https://feeds.example.com/casefile-mirror")]
+    row = conn.execute("SELECT itunes_id FROM shows WHERE id = ?", (show_id,)).fetchone()
+    assert row["itunes_id"] is None
+
+
+def test_backfill_itunes_ids_skips_shows_that_already_have_one(tmp_path):
+    conn = db.connect(tmp_path / "test.db")
+    _seed_show(conn, "https://feeds.example.com/casefile", itunes_id=998568017)
+
+    def handler(request):
+        raise AssertionError("should not query a show that already has an itunes_id")
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        results = resolve.backfill_itunes_ids(conn, client)
+    assert results == []
+
+
+def test_backfill_itunes_ids_isolates_a_failure_and_keeps_prior_progress(tmp_path, search_payload):
+    conn = db.connect(tmp_path / "test.db")
+    ok_id = _seed_show(conn, "https://feeds.example.com/casefile", title="Casefile True Crime")
+    boom_id = _seed_show(conn, "https://feeds.example.com/boom", title="Boom Show")
+
+    def handler(request):
+        if request.url.params["term"] == "Boom Show":
+            raise httpx.ConnectError("simulated network failure", request=request)
+        return httpx.Response(200, json=search_payload)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        results = resolve.backfill_itunes_ids(conn, client)
+
+    by_id = {r.show_id: r for r in results}
+    assert by_id[ok_id].itunes_id == 998568017
+    assert by_id[ok_id].error is None
+    assert by_id[boom_id].itunes_id is None
+    assert by_id[boom_id].error is not None
+    row = conn.execute("SELECT itunes_id FROM shows WHERE id = ?", (ok_id,)).fetchone()
+    assert row["itunes_id"] == 998568017

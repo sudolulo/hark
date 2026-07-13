@@ -1,7 +1,7 @@
 """hark command line: resolve, ingest, sync-subscriptions, sync-history,
 import-opml, discover, extract, chapters, transcribe, detect-ads,
 load-ad-detections, cut, fsck, compare, load-comparisons, stats, topics, who,
-web.
+rate-shows, web.
 
 chapters/transcribe/detect-ads/cut call straight into the `adscrub` package
 (a separate product, depended on as a library — see pyproject.toml) rather
@@ -34,7 +34,7 @@ from adscrub import transcribe as ad_transcribe
 
 from . import (
     __version__, claims, db, discover, extract, gpodder_server, ingest,
-    nextcloud, opml, pipeline, resolve, wikidata,
+    nextcloud, opml, pipeline, ratings, resolve, wikidata,
 )
 
 DEFAULT_DB = os.environ.get("HARK_DB", "hark.db")
@@ -650,6 +650,42 @@ def cmd_canon(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rate_shows(args: argparse.Namespace) -> int:
+    """M4: enrich shows with data scoring.py's recommendations (see
+    /notable) draw on. Two independent steps, each isolated per-show:
+    itunes_id backfill (resolve.py — free, keyless, runs regardless) then
+    external show ratings (ratings.py — needs $HARK_PODCHASER_API_KEY; runs
+    with a NullRatingsSource, a no-op, if unset). --limit caps each step
+    independently, not a combined total."""
+    conn = db.connect(args.db)
+    with make_client() as client:
+        backfilled = resolve.backfill_itunes_ids(conn, client, limit=args.limit)
+    matched = sum(1 for r in backfilled if r.itunes_id is not None)
+    print(f"itunes_id backfill: {matched}/{len(backfilled)} newly matched")
+
+    api_key = os.environ.get("HARK_PODCHASER_API_KEY")
+    if not api_key:
+        print("hint: set $HARK_PODCHASER_API_KEY to fetch external show ratings "
+              "(free tier — see podchaser.com/api) — skipping the ratings refresh",
+              file=sys.stderr)
+        return 0
+
+    with make_client() as client:
+        source = ratings.PodchaserRatingsSource(client, api_key)
+        results = ratings.refresh_ratings(conn, source, limit=args.limit)
+    errors = 0
+    for r in results:
+        if r.error:
+            errors += 1
+            print(f"  FAIL  {r.query}: {r.error}")
+        elif r.rating is None:
+            print(f"  miss  {r.query}: not found on Podchaser")
+        else:
+            print(f"  ok    {r.query}: {r.rating.rating_avg} ({r.rating.rating_count} reviews)")
+    print(f"refreshed ratings for {len(results) - errors} show(s) ({errors} failed)")
+    return 1 if errors else 0
+
+
 def cmd_topics(args: argparse.Namespace) -> int:
     from . import web  # deferred: other commands work without importing the web module
 
@@ -973,6 +1009,13 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("canon", help="retry Wikidata canonicalization for unmatched topics")
     p.set_defaults(func=cmd_canon)
+
+    p = sub.add_parser(
+        "rate-shows",
+        help="M4: backfill itunes_id + refresh external show ratings (feeds /notable's recommendations)",
+    )
+    p.add_argument("--limit", type=int, help="max shows to process per step this run")
+    p.set_defaults(func=cmd_rate_shows)
 
     p = sub.add_parser(
         "web", help="serve the dashboard (login-walled) + feed/audio routes (token-gated)"

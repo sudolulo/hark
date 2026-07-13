@@ -40,7 +40,7 @@ def test_connect_creates_tables(conn):
         for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
     }
     assert {"shows", "episodes", "topics", "topic_genres", "episode_topics",
-            "ad_segments"} <= tables
+            "ad_segments", "show_ratings"} <= tables
 
 
 def test_connect_is_idempotent(tmp_path):
@@ -321,6 +321,15 @@ def test_user_shows_cascades_on_show_delete(conn):
     conn.execute("INSERT INTO user_shows (user_id, show_id) VALUES (1, 1)")
     conn.execute("DELETE FROM shows WHERE id = 1")
     assert conn.execute("SELECT COUNT(*) FROM user_shows").fetchone()[0] == 0
+
+
+def test_show_ratings_cascades_on_show_delete(conn):
+    conn.execute("INSERT INTO shows (query) VALUES ('a')")
+    conn.execute(
+        "INSERT INTO show_ratings (show_id, source, fetched_at) VALUES (1, 'podchaser', '2026-01-01T00:00:00Z')"
+    )
+    conn.execute("DELETE FROM shows WHERE id = 1")
+    assert conn.execute("SELECT COUNT(*) FROM show_ratings").fetchone()[0] == 0
 
 
 def test_utcnow_format():

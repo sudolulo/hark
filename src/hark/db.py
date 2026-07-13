@@ -57,6 +57,25 @@ CREATE TABLE IF NOT EXISTS shows (
     updated_at      TEXT
 );
 
+-- M4: cached external show ratings (e.g. Podchaser) — a source, not a merge
+-- of rating data into `shows` itself, since (a) more sources can be added
+-- later without a migration and (b) a row records a *fetch attempt*, not
+-- just a hit: written even on no-match/zero-review (external_id/rating_avg/
+-- rating_count left NULL, fetched_at still set) so a show the source
+-- doesn't have isn't re-queried against a rate-limited API's budget on
+-- every run — same idiom pipeline.py's extracted_at already uses for a
+-- zero-topic episode. Composite natural key + cascade, same shape as
+-- topic_genres/episode_topics.
+CREATE TABLE IF NOT EXISTS show_ratings (
+    show_id      INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+    source       TEXT NOT NULL,
+    external_id  TEXT,
+    rating_avg   REAL,
+    rating_count INTEGER,
+    fetched_at   TEXT NOT NULL,
+    PRIMARY KEY (show_id, source)
+);
+
 CREATE TABLE IF NOT EXISTS episodes (
     id                  INTEGER PRIMARY KEY,
     show_id             INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
@@ -128,7 +147,7 @@ CREATE INDEX IF NOT EXISTS idx_episode_topics_topic ON episode_topics (topic_id)
 -- hark's own episode_id, since a listen can arrive before hark has ever
 -- ingested that episode (or for a show hark doesn't track at all) —
 -- resolving to episode_id is a query-time join, not a storage-time one.
--- Consumed by M4's scoring calibration; nothing reads this table yet.
+-- Consumed by M4's scoring.py (0.17.0) for personal genre/topic affinity.
 -- user_id (multi-user, 0.14.0) is part of the UNIQUE constraint, not just a
 -- tag column: play position is inherently personal, so two accounts playing
 -- the same episode at the same occurred_at must not collide/dedupe against

@@ -463,13 +463,68 @@ every access (not cached) so an edit from one request is visible on the very nex
 no restart needed. `hark user invite` (CLI) checks the same override; an explicit
 `--base-url` flag still wins outright over it.
 
-## M4 — episode scoring (tiltmeter-style)
+## M4 — episode scoring (done, first cut, 0.17.0)
 
-- Defined interestingness metrics, calibration loop against owner ratings.
-- Per-topic treatment comparison (depth, sensationalism) — needs transcripts for
-  fidelity. Whisper is already available via the adscrub dependency (see above);
-  this milestone should call `adscrub.transcribe`'s functions the same way the
-  ad-stripping pipeline does, not stand up its own transcription path.
+On explicit request: "interesting" depends on (a) episodes the listener actually
+gravitates toward, from their own listening history, and (b) external ratings from
+whatever sources are genuinely accessible — plus an explicit steer toward the
+cheapest/weakest model that can do the job. It turned out none was needed at all: the
+whole computation is pure SQL/Python arithmetic, no LLM calls anywhere, which is both
+the cheapest possible answer and — matching "tiltmeter-style: auditable, defined
+metrics" — the most auditable one. `/notable`'s own docstring had reserved itself for
+this since the page was first built ("PLAN.md's M4 ... is the eventual real version
+of this page"); this pass upgrades it rather than adding a new page.
+
+- **Personal affinity** (`scoring.py`, new): completion ratio (`position/total`, MAX
+  across any pause/resume play rows, not an average) per genre and per real-world
+  topic the listener has actually played — joined from `listen_actions` via the show
+  resolved from `podcast_url`, then `episode_guid` scoped to that show (GUIDs aren't
+  globally unique) with `audio_url` as a fallback. Bayesian-shrunk toward the user's
+  own overall completion average, weighted by each genre/topic's own play count —
+  one shrinkage formula (`_shrink()`) reused for this and the external-rating signal
+  below, rather than a hand-rolled minimum-sample cutoff living next to a separately
+  invented weighted average for just one of the two. At zero plays this already
+  reduces to the user's mean with no special case, and at zero listening history at
+  all, both signals are simply absent (`None`) rather than defaulting to some
+  fabricated "average" value. No persisted table — recomputed live per page view
+  (`App.db()`'s own query style), revisit only if that's ever actually too slow at
+  real data volumes.
+- **External rating** (`ratings.py`, new): Podchaser's free-tier GraphQL API (25,000
+  query points/month), matched by RSS feed URL first, Apple Podcast ID as a fallback
+  — both exact-identifier lookups, no fuzzy title matching involved. Cached in a new
+  `show_ratings` table (`(show_id, source)` composite key, room for more sources
+  later without a migration) rather than fetched live: `App.db()` only ever holds a
+  read-only connection, and a rate-limited API shouldn't be hit on every page view
+  anyway. A row is written even on a miss (same "mark it processed regardless" idiom
+  `pipeline._store()` already uses for a zero-topic episode) so an unmatched show
+  isn't re-queried against the query-point budget every run — `hark rate-shows`
+  (new CLI command) only re-attempts rows older than 30 days. Bayesian-shrunk toward
+  the mean rating across all rated shows, same formula shape as personal affinity, so
+  a show with 2 five-star reviews doesn't outrank one with 10,000 averaging 4.3.
+  Needs `$HARK_PODCHASER_API_KEY` (free signup at podchaser.com/api) — `hark
+  rate-shows` no-ops the ratings half and prints a hint if it's unset; personal
+  affinity works standalone with zero external dependency.
+- **`itunes_id` backfill** (`resolve.py`, new `backfill_itunes_ids()`): only
+  `resolve_show()`'s hand-curated path ever set `itunes_id` — `add_show_by_feed_url()`
+  (gpodder sync, OPML import, `discover --add`), how most of a real catalog actually
+  gets registered, never did. Runs first inside `hark rate-shows`, using title search
+  purely as a candidate generator — a result is only accepted when its own `feedUrl`
+  exactly matches the show's stored `feed_url`, so it can't misattribute the wrong
+  show's id the way a bare title-similarity accept could.
+- **Combining**: `recommended_episodes()`/`recommendations_for_user()` treat topic
+  affinity, genre affinity, and external rating as independent components, weighted
+  topic:genre:external = 3:2:1 (the more specific/personal a signal, the more it's
+  trusted) and renormalized over whichever are actually present for a given episode.
+  Returned alongside the combined score, not hidden behind it — the `/notable` page
+  shows all four numbers per recommended episode.
+- **Still open, deliberately not part of this pass**: per-topic treatment comparison
+  (depth, sensationalism) — needs transcripts and genuine LLM judgment (unlike
+  everything above), matches `claims.ClaudeComparator`'s Protocol/Null-placeholder
+  shape if it's ever built. Whisper is already available via the adscrub dependency
+  (see above); this should call `adscrub.transcribe`'s functions the same way the
+  ad-stripping pipeline does, not stand up its own transcription path — and should
+  default to the cheapest capable model, unlike `extract.py`/`claims.py`'s current
+  Opus default.
 
 ## Seed shows (feeds.txt)
 

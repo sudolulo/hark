@@ -13,8 +13,10 @@ A homelab web service (NOT a mobile app, NOT an AntennaPod fork) that:
    incident?" and compare treatments across shows.
 2. **Discovery:** related-show and notable-episode recommendations via topic/embedding
    similarity.
-3. **Episode scoring (later):** metric-based interestingness ratings, tiltmeter-style
-   (auditable, defined metrics, calibrated against the owner's actual listening).
+3. **Episode scoring (added 2026-07-13):** personalized "recommended for you" ranking
+   from the owner's own listening history plus external show ratings, tiltmeter-style
+   (auditable, defined metrics — pure SQL/Python arithmetic, no LLM calls at all).
+   Per-topic treatment-comparison scoring (depth, sensationalism) is still future work.
 4. **Ad-stripping (added 2026-07-11):** finds ad spans (chapter markers, or Whisper +
    LLM classification) and cuts them out, covering *every* subscription, not just the
    genre-curated shows #1-#3 track. **This is provided by depending on `flan/adscrub` as
@@ -95,6 +97,21 @@ beats fingerprinting/crowdsourcing) is in adscrub's own repo history.
   `gpodder_server.MAX_SHOWS_PER_USER` (10) — enforced on both paths that can add a
   subscription (`web.py`'s `subscribe()` and `record_subscription_changes()`), admin
   exempt. See docs/PLAN.md's multi-user and invite-links sections.
+- **M4 episode scoring (added 2026-07-13) has zero LLM calls, deliberately.** `scoring.py`
+  is pure SQL/Python arithmetic over `listen_actions` + `episode_topics`/`topic_genres` +
+  the new `show_ratings` cache — don't reach for a model here even for something that
+  feels judgment-shaped; the whole point was proving "interesting" could be answered
+  with auditable arithmetic instead. `show_ratings` (external ratings, currently just
+  Podchaser's free-tier API via `ratings.py`) lives in hark.db, not auth.db — unlike
+  server config (`settings`, auth.db), this genuinely is show-catalog data, not
+  per-deployment config, so it's fine if a pipeline snapshot swap replaces it wholesale.
+  `App.db()`'s read-only connection never runs schema setup, so any query touching a
+  table this feature added needs the same `try/except sqlite3.OperationalError` guard
+  `claims.get_comparison()` already established — see `scoring._weighted_external_ratings()`.
+  Per-topic treatment-comparison scoring (depth/sensationalism) is real future work that
+  WILL need an LLM (matches `claims.ClaudeComparator`'s Protocol shape) — default it to
+  the cheapest capable model when it's built, not `extract.py`/`claims.py`'s Opus default.
+  See docs/PLAN.md's M4 section for the full metric definitions.
 
 ## Conventions
 
