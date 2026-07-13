@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-07-13
+
+### Added
+
+- **Admin-triggered ratings refresh.** `/admin/users` gained a "Show ratings"
+  section — a "Refresh now" button running the same two steps `hark rate-shows`
+  does (itunes_id backfill, then Taddy ratings if configured), for when
+  SSH/Shell access to the deployed container isn't convenient (this project's
+  own homelab deploy is exactly that case). Manual/on-demand only —
+  automatic/scheduled runs are a deliberate follow-up, not part of this.
+
 ## [0.17.0] - 2026-07-13
 
 ### Added

@@ -15,7 +15,7 @@ import urllib.parse
 import pytest
 
 from hark import auth as auth_module
-from hark import claims, db, web
+from hark import claims, db, ratings, resolve, web
 
 
 @pytest.fixture(autouse=True)
@@ -1864,6 +1864,71 @@ def test_base_url_override_used_for_new_invite_links(server, tmp_path):
                       body={"username": "bob"}, cookie=cookie)
     location = urllib.parse.unquote(resp.getheader("Location"))
     assert "invite_link=https://hark.example.com/invite/" in location
+
+
+# --- Admin-triggered show ratings refresh (0.17.0) ---
+
+
+def _fake_backfill(conn, client, limit=None):
+    return [resolve.BackfillResult(show_id=1, query="q", itunes_id=42)]
+
+
+def test_admin_users_page_shows_taddy_configuration_status(server, monkeypatch):
+    monkeypatch.delenv("HARK_TADDY_USER_ID", raising=False)
+    monkeypatch.delenv("HARK_TADDY_API_KEY", raising=False)
+    cookie = login(server)
+    resp, body = request(server, "GET", "/admin/users", cookie=cookie)
+    assert resp.status == 200
+    assert "not configured" in body
+
+    monkeypatch.setenv("HARK_TADDY_USER_ID", "test-user-id")
+    monkeypatch.setenv("HARK_TADDY_API_KEY", "test-api-key")
+    resp, body = request(server, "GET", "/admin/users", cookie=cookie)
+    assert "Taddy): <strong>configured</strong>" in body
+
+
+def test_admin_rate_shows_requires_admin(server, tmp_path):
+    web.Auth(tmp_path / "auth.db", admin_token="letmein").create_user("viewer")
+    resp, _ = request(server, "POST", "/login", body={"username": "viewer", "password": "letmein"})
+    cookie = resp.getheader("Set-Cookie").split(";")[0]
+    resp, _ = request(server, "POST", "/admin/users/rate-shows", body={}, cookie=cookie)
+    assert resp.status == 403
+
+
+def test_admin_rate_shows_reports_summary_when_taddy_not_configured(server, monkeypatch):
+    monkeypatch.delenv("HARK_TADDY_USER_ID", raising=False)
+    monkeypatch.delenv("HARK_TADDY_API_KEY", raising=False)
+    monkeypatch.setattr(resolve, "backfill_itunes_ids", _fake_backfill)
+
+    def boom(*a, **k):
+        raise AssertionError("refresh_ratings should not run without Taddy credentials")
+
+    monkeypatch.setattr(ratings, "refresh_ratings", boom)
+    cookie = login(server)
+    resp, body = request(server, "POST", "/admin/users/rate-shows", body={}, cookie=cookie)
+    assert resp.status == 200
+    assert "itunes_id: 1/1 newly matched" in body
+    assert "ratings skipped (Taddy credentials not configured)" in body
+
+
+def test_admin_rate_shows_reports_summary_when_taddy_configured(server, monkeypatch):
+    monkeypatch.setenv("HARK_TADDY_USER_ID", "test-user-id")
+    monkeypatch.setenv("HARK_TADDY_API_KEY", "test-api-key")
+    monkeypatch.setattr(resolve, "backfill_itunes_ids", _fake_backfill)
+
+    def fake_refresh(conn, source, limit=None):
+        assert isinstance(source, ratings.TaddyRatingsSource)
+        return [
+            ratings.RatingResult(show_id=1, query="a", rating=ratings.ShowRating("1", 4.5, 50)),
+            ratings.RatingResult(show_id=2, query="b", error="boom"),
+        ]
+
+    monkeypatch.setattr(ratings, "refresh_ratings", fake_refresh)
+    cookie = login(server)
+    resp, body = request(server, "POST", "/admin/users/rate-shows", body={}, cookie=cookie)
+    assert resp.status == 200
+    assert "itunes_id: 1/1 newly matched" in body
+    assert "ratings: 1 ok, 1 failed" in body
 
 
 def test_app_base_url_property_falls_back_to_startup_default(tmp_path):

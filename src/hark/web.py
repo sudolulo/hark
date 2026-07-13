@@ -538,6 +538,16 @@ class Handler(BaseHTTPRequestHandler):
                     return self.forbidden(user)
                 app.auth.clear_setting(BASE_URL_SETTING)
                 return self.redirect("/admin/users")
+            if route == "/admin/users/rate-shows":
+                if not user["is_admin"]:
+                    return self.forbidden(user)
+                summary = app.rate_shows()  # blocking — real network calls, see its own docstring
+                msg = f"itunes_id: {summary['itunes_matched']}/{summary['itunes_total']} newly matched"
+                if summary["ratings_configured"]:
+                    msg += f"; ratings: {summary['ratings_ok']} ok, {summary['ratings_errors']} failed"
+                else:
+                    msg += " — ratings skipped (Taddy credentials not configured)"
+                return self.respond(200, app.view_admin_users(user, {}, msg=msg))
             if route.startswith("/show/") and route.endswith("/adblock"):
                 if not user["is_admin"]:
                     return self.forbidden(user)

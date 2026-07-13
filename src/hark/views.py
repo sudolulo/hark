@@ -5,11 +5,14 @@ and HTTP routing.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import urllib.parse
 from pathlib import Path
 
-from . import claims, gpodder_server, podcast_feed, scoring
+import httpx
+
+from . import claims, gpodder_server, podcast_feed, ratings, resolve, scoring
 from .auth import BASE_URL_SETTING, Auth, parse_iso
 from .extract import GENRES as GENRES_FILTER
 from .queries import (
@@ -165,6 +168,44 @@ class App:
                 "DELETE FROM user_shows WHERE user_id = ? AND show_id = ?", (user_id, show_id)
             )
             conn.commit()
+        finally:
+            conn.close()
+
+    def rate_shows(self) -> dict:
+        """Admin-triggered on-demand run of the same two steps `hark
+        rate-shows` (cli.py) runs — for when SSH/Shell access to the
+        deployed container isn't convenient (this project's own homelab
+        deploy is exactly that case; see view_admin_users' own docstring).
+        Not wired into any schedule — a manual trigger only, on request;
+        automatic/periodic runs are a deliberate follow-up, not part of
+        this.
+
+        Blocking: makes real network calls (itunes_id backfill, and Taddy
+        if configured), so this can take a while for a large catalog — the
+        caller (web.py's POST handler) should expect a slow response, not
+        treat this like a normal fast request."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+                backfilled = resolve.backfill_itunes_ids(conn, client)
+            matched = sum(1 for r in backfilled if r.itunes_id is not None)
+            summary = {"itunes_matched": matched, "itunes_total": len(backfilled)}
+
+            taddy_user_id = os.environ.get("HARK_TADDY_USER_ID")
+            taddy_api_key = os.environ.get("HARK_TADDY_API_KEY")
+            if not taddy_user_id or not taddy_api_key:
+                summary["ratings_configured"] = False
+                return summary
+
+            with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+                source = ratings.TaddyRatingsSource(client, taddy_user_id, taddy_api_key)
+                results = ratings.refresh_ratings(conn, source)
+            errors = sum(1 for r in results if r.error)
+            summary["ratings_configured"] = True
+            summary["ratings_ok"] = len(results) - errors
+            summary["ratings_errors"] = errors
+            return summary
         finally:
             conn.close()
 
@@ -837,6 +878,22 @@ just from this host.</p>
 {reset_form}
 </div>"""
 
+        taddy_configured = bool(
+            os.environ.get("HARK_TADDY_USER_ID") and os.environ.get("HARK_TADDY_API_KEY")
+        )
+        ratings_section = f"""<h2>Show ratings</h2>
+<div class="status">
+<p>External ratings (Taddy): <strong>{"configured" if taddy_configured else "not configured"}</strong></p>
+<p class="dim">Backfills itunes_id for shows that don't have one yet, then refreshes external
+show ratings from Taddy — skipped if $HARK_TADDY_USER_ID/$HARK_TADDY_API_KEY aren't set, same
+as <code>hark rate-shows</code> run from a shell. Only touches shows missing data or overdue
+for a refresh, so repeat clicks are cheap; can still take a while for a large catalog since it
+makes real network calls.</p>
+<form method="post" action="/admin/users/rate-shows">
+<button class="ghost">Refresh now</button>
+</form>
+</div>"""
+
         def status_cell(a) -> str:
             if not a["invite_pending"]:
                 return "" if a["has_password"] else "no password"
@@ -863,6 +920,7 @@ just from this host.</p>
         )
         body = f"""<h1>users</h1>{link_note}{note}
 {settings_section}
+{ratings_section}
 <h2>Accounts</h2>
 <table><tr><th>account</th><th>role</th><th>podcasts</th><th>status</th><th></th></tr>
 {rows}</table>

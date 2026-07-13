@@ -567,6 +567,18 @@ of this page"); this pass upgrades it rather than adding a new page.
   ad-stripping pipeline does, not stand up its own transcription path — and should
   default to the cheapest capable model, unlike `extract.py`/`claims.py`'s current
   Opus default.
+- **Live-verified, 2026-07-13**: `hark rate-shows --limit 5` against the real deployed
+  catalog matched 4/5 shows to a Taddy tier on the first attempt with the query shape as
+  originally built (no fix needed) — `getPodcastSeries(rssUrl: ...)`, the `uuid`/
+  `popularityRank` fields, and the `X-USER-ID`/`X-API-KEY` headers all held up. One show
+  (Short History Of) landed as a real match with no tier, confirming the sparsity caveat
+  above is accurate rather than overly cautious.
+- **Admin-triggered refresh, 0.17.1**: `/admin/users` gained a "Show ratings" section — a
+  "Refresh now" button running the same two steps as `hark rate-shows`, for when
+  SSH/Shell access to the deployed container isn't convenient. Manual/on-demand only.
+  Automatic/scheduled runs (via `claude-fleet`, same mechanism the other pipeline
+  commands use) are still a deliberate follow-up — explicitly deferred again on request,
+  not forgotten.
 
 ## Seed shows (feeds.txt)
 
