@@ -639,7 +639,7 @@ def cmd_canon(args: argparse.Namespace) -> int:
     conn = db.connect(args.db)
     with make_client() as http_client:
         canon = wikidata.Canonicalizer(http_client)
-        results = pipeline.recanonicalize(conn, canon.canonicalize)
+        results = pipeline.recanonicalize(conn, canon.canonicalize, limit=args.limit)
     for r in results:
         action = "merged into" if r.merged else "->"
         print(f"  {r.old_label} {action} {r.new_label} [{r.qid}]")
@@ -1012,6 +1012,7 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(func=cmd_stats)
 
     p = sub.add_parser("canon", help="retry Wikidata canonicalization for unmatched topics")
+    p.add_argument("--limit", type=int, help="max unmatched topics to attempt this run")
     p.set_defaults(func=cmd_canon)
 
     p = sub.add_parser(

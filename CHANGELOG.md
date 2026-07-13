@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.2] - 2026-07-13
+
+### Fixed
+
+- **`hark canon` can now be bounded with `--limit`.** The deployed pipeline's
+  fast loop runs `ingest`/`canon`/`chapters` sequentially ahead of the
+  pending-file loads and `transcribe`/`cut` steps, once at container start
+  and again every ~30 minutes. `canon` had no limit — every unmatched topic
+  is a live, retried Wikidata lookup, so a large backlog (514 unmatched
+  topics after the 2026-07-12 gpodder sync brought in ~24,000 episodes) could
+  run for hours, blocking the entire loop the whole time: no pending
+  extraction/comparison/ad-detection batch got loaded, `cut` never ran, and
+  nothing in the log showed progress (the CLI only prints results after the
+  whole sweep finishes). `recanonicalize()` now takes an optional `limit`,
+  processed oldest-unmatched-first; the deployed loop's `canon` step should
+  run bounded (e.g. `hark canon --limit 50`) so a backlog spike degrades to
+  "matches trickle in over more cycles" instead of "the whole pipeline stops."
+
 ## [0.17.1] - 2026-07-13
 
 ### Added

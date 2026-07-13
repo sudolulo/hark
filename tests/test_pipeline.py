@@ -257,6 +257,35 @@ def test_recanonicalize_skips_unmatched(tmp_path):
     assert (row["label"], row["wikidata_id"]) == ("Some Obscure Case", None)
 
 
+def test_recanonicalize_limit_caps_batch_size(tmp_path):
+    """A large unmatched-topic backlog must not force one call to sweep it
+    all — each lookup is a live network request, so an unbounded run can
+    block a shared cron/loop for hours (2026-07-13 incident)."""
+    conn = db.connect(tmp_path / "t.db")
+    seed(conn, ["ep1", "ep2", "ep3"])
+    extractor = FakeExtractor({
+        "ep1": [ExtractedTopic(label="Case A", genres=())],
+        "ep2": [ExtractedTopic(label="Case B", genres=())],
+        "ep3": [ExtractedTopic(label="Case C", genres=())],
+    })
+    pipeline.extract_pending(conn, extractor, lambda label: None, source="test")
+
+    calls = []
+
+    def canonicalize(label):
+        calls.append(label)
+        return None
+
+    results = pipeline.recanonicalize(conn, canonicalize, limit=2)
+    assert results == []  # canonicalize returns None for all, no upgrades
+    assert calls == ["Case A", "Case B"]  # oldest first, third left for next run
+
+    remaining = conn.execute(
+        "SELECT COUNT(*) FROM topics WHERE wikidata_id IS NULL"
+    ).fetchone()[0]
+    assert remaining == 3  # none matched, all still pending
+
+
 def test_rerun_is_idempotent(tmp_path):
     conn = db.connect(tmp_path / "t.db")
     seed(conn, ["ep1"])

@@ -173,7 +173,7 @@ class CanonResult:
 
 
 def recanonicalize(
-    conn: sqlite3.Connection, canonicalize: Canonicalize
+    conn: sqlite3.Connection, canonicalize: Canonicalize, limit: int | None = None
 ) -> list[CanonResult]:
     """Retry Wikidata canonicalization for topics without a QID.
 
@@ -185,9 +185,21 @@ def recanonicalize(
     sharing a display string (e.g. "Mercury" the planet vs. the element) —
     so it's left as an in-place update rather than corrupting the existing
     topic's identity.
+
+    `limit` caps how many unmatched topics this call attempts (oldest first).
+    Each lookup is a live Wikidata request with its own retry/backoff, so an
+    unbounded sweep over a large backlog can run for hours — exactly what
+    blocked the deployed pipeline's fast loop on 2026-07-13, since ingest/
+    canon/chapters run sequentially ahead of it. Callers on a shared cron/loop
+    should always pass a bounded `limit`.
     """
+    query = "SELECT id, label FROM topics WHERE wikidata_id IS NULL ORDER BY id"
+    params: tuple[int, ...] = ()
+    if limit is not None:
+        query += " LIMIT ?"
+        params = (limit,)
     results: list[CanonResult] = []
-    for row in conn.execute("SELECT id, label FROM topics WHERE wikidata_id IS NULL").fetchall():
+    for row in conn.execute(query, params).fetchall():
         # Re-check: an earlier iteration in this same pass may have already
         # merged this row away or resolved it as a merge target.
         current = conn.execute(
