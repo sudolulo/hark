@@ -62,9 +62,27 @@ def upsert_topic(
             "SELECT id FROM topics WHERE wikidata_id = ?", (wikidata_id,)
         ).fetchone()
     if row is None:
-        row = conn.execute("SELECT id, wikidata_id FROM topics WHERE label = ?", (label,)).fetchone()
-        if row is not None and wikidata_id and row["wikidata_id"] is None:
-            conn.execute("UPDATE topics SET wikidata_id = ? WHERE id = ?", (wikidata_id, row["id"]))
+        by_label = conn.execute(
+            "SELECT id, wikidata_id FROM topics WHERE label = ?", (label,)
+        ).fetchone()
+        if by_label is not None:
+            if by_label["wikidata_id"] is None:
+                if wikidata_id:
+                    conn.execute(
+                        "UPDATE topics SET wikidata_id = ? WHERE id = ?",
+                        (wikidata_id, by_label["id"]),
+                    )
+                row = by_label
+            elif not wikidata_id or by_label["wikidata_id"] == wikidata_id:
+                row = by_label
+            # else: same display label, different already-resolved QID —
+            # two distinct entities (e.g. "Mercury" the planet vs. the
+            # element, per recanonicalize()'s own handling of this exact
+            # case). Don't silently fold this one into the wrong existing
+            # row and drop its real QID — fall through to INSERT below with
+            # a disambiguated label instead.
+            else:
+                label = f"{label} ({wikidata_id})"
     if row is None:
         cur = conn.execute(
             "INSERT INTO topics (label, wikidata_id) VALUES (?, ?)", (label, wikidata_id)

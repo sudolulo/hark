@@ -193,6 +193,34 @@ def test_recanonicalize_merges_duplicates(tmp_path):
     assert genres == {"true_crime", "biography"}
 
 
+def test_upsert_topic_does_not_clobber_unrelated_qid_on_label_collision(tmp_path):
+    """Same hazard as test_recanonicalize_does_not_clobber_unrelated_qid_on_label_collision,
+    but hitting the normal extraction hot path (upsert_topic, via extract_pending)
+    instead of the offline recanonicalize() recovery path — both distinct QIDs are
+    already known up front here, not backfilled later."""
+    conn = db.connect(tmp_path / "t.db")
+    seed(conn, ["ep1", "ep2"])
+    extractor = FakeExtractor({
+        "ep1": [ExtractedTopic(label="the planet", genres=("history",))],
+        "ep2": [ExtractedTopic(label="quicksilver metal", genres=("history",))],
+    })
+    matches = {
+        "the planet": WikidataMatch(qid="Q308", label="Mercury"),
+        "quicksilver metal": WikidataMatch(qid="Q925", label="Mercury"),
+    }
+    results = pipeline.extract_pending(
+        conn, extractor, lambda label: matches[label.casefold()], source="test"
+    )
+    assert [r.error for r in results] == [None, None]
+
+    rows = {r["wikidata_id"]: r["label"] for r in conn.execute("SELECT label, wikidata_id FROM topics")}
+    assert set(rows) == {"Q308", "Q925"}  # two rows, neither QID overwritten
+    assert list(rows.values()).count("Mercury") == 1  # one keeps the plain label
+    assert any(v.startswith("Mercury (Q9") for v in rows.values())  # the other is disambiguated
+    links = conn.execute("SELECT topic_id FROM episode_topics ORDER BY episode_id").fetchall()
+    assert len({row["topic_id"] for row in links}) == 2  # each episode kept its own topic
+
+
 def test_recanonicalize_does_not_clobber_unrelated_qid_on_label_collision(tmp_path):
     """Two distinct entities sharing a display label (planet vs. element,
     both called "Mercury") must not get merged just because their labels
