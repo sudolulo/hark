@@ -23,11 +23,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     shrunk toward your own overall average so a single play doesn't swing a
     genre's score to 0 or 1. New `scoring.py` — pure computation, no
     persisted table; recomputed live per page view.
-  - **External rating**, from Podchaser's free-tier API (`hark rate-shows`,
+  - **External rating**, from Taddy's free-tier API (`hark rate-shows`,
     new CLI command) — cached in a new `show_ratings` table (`(show_id,
-    source)`, room for more sources later without a migration), similarly
-    shrunk toward the mean rating across all rated shows so a show with 2
-    five-star reviews doesn't outrank one with 10,000 averaging 4.3.
+    source)`, room for more sources later without a migration). Taddy's own
+    signal (`popularityRank`) is a coarse tier ("TOP_1000", etc.) rather than
+    a star average, mapped to a 0-5 score and fed through the same
+    Bayesian-shrinkage machinery as personal affinity. (Podchaser was the
+    original pick — free-tier docs looked to have exactly the star-rating
+    data wanted — but turned out to need a paid tier for the rating fields
+    themselves; swapped before ever deploying it.)
   - Every score shown alongside its own raw component numbers (topic
     affinity, genre affinity, external rating), not collapsed into one
     opaque blend. A user with no listening history at all collapses
@@ -38,7 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     fills in `itunes_id` for shows registered via `add_show_by_feed_url()`
     (gpodder sync, OPML import — most of a real catalog), which never set it
     the way `resolve_show()`'s hand-curated path does. A second, URL-drift-
-    proof match key for Podchaser lookups, verified by exact feed-URL
+    proof match key for external-rating lookups, verified by exact feed-URL
     equality against the search candidate (never a bare title-similarity
     guess, which could misattribute the wrong show's id).
   - Explicitly not part of this pass: per-topic treatment comparison

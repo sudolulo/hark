@@ -654,26 +654,25 @@ def cmd_rate_shows(args: argparse.Namespace) -> int:
     """M4: enrich shows with data scoring.py's recommendations (see
     /notable) draw on. Two independent steps, each isolated per-show:
     itunes_id backfill (resolve.py — free, keyless, runs regardless) then
-    external show ratings (ratings.py — needs $HARK_PODCHASER_CLIENT_ID and
-    $HARK_PODCHASER_CLIENT_SECRET; runs with a NullRatingsSource, a no-op,
-    if either is unset). --limit caps each step independently, not a
-    combined total."""
+    external show ratings (ratings.py — needs $HARK_TADDY_USER_ID and
+    $HARK_TADDY_API_KEY; runs with a NullRatingsSource, a no-op, if either
+    is unset). --limit caps each step independently, not a combined total."""
     conn = db.connect(args.db)
     with make_client() as client:
         backfilled = resolve.backfill_itunes_ids(conn, client, limit=args.limit)
     matched = sum(1 for r in backfilled if r.itunes_id is not None)
     print(f"itunes_id backfill: {matched}/{len(backfilled)} newly matched")
 
-    client_id = os.environ.get("HARK_PODCHASER_CLIENT_ID")
-    client_secret = os.environ.get("HARK_PODCHASER_CLIENT_SECRET")
-    if not client_id or not client_secret:
-        print("hint: set $HARK_PODCHASER_CLIENT_ID and $HARK_PODCHASER_CLIENT_SECRET to fetch "
-              "external show ratings (free — register an app from your account's API settings "
-              "at podchaser.com) — skipping the ratings refresh", file=sys.stderr)
+    taddy_user_id = os.environ.get("HARK_TADDY_USER_ID")
+    taddy_api_key = os.environ.get("HARK_TADDY_API_KEY")
+    if not taddy_user_id or not taddy_api_key:
+        print("hint: set $HARK_TADDY_USER_ID and $HARK_TADDY_API_KEY to fetch external show "
+              "ratings (free, no card — see taddy.org/developers) — skipping the ratings refresh",
+              file=sys.stderr)
         return 0
 
     with make_client() as client:
-        source = ratings.PodchaserRatingsSource(client, client_id, client_secret)
+        source = ratings.TaddyRatingsSource(client, taddy_user_id, taddy_api_key)
         results = ratings.refresh_ratings(conn, source, limit=args.limit)
     errors = 0
     for r in results:
@@ -681,9 +680,12 @@ def cmd_rate_shows(args: argparse.Namespace) -> int:
             errors += 1
             print(f"  FAIL  {r.query}: {r.error}")
         elif r.rating is None:
-            print(f"  miss  {r.query}: not found on Podchaser")
+            print(f"  miss  {r.query}: not found on Taddy")
+        elif r.rating.rating_avg is None:
+            print(f"  ok    {r.query}: found, but outside any popularity tier")
         else:
-            print(f"  ok    {r.query}: {r.rating.rating_avg} ({r.rating.rating_count} reviews)")
+            print(f"  ok    {r.query}: score {r.rating.rating_avg:.2f} "
+                  f"(confidence {r.rating.rating_count})")
     print(f"refreshed ratings for {len(results) - errors} show(s) ({errors} failed)")
     return 1 if errors else 0
 

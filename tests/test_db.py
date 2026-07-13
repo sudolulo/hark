@@ -326,7 +326,7 @@ def test_user_shows_cascades_on_show_delete(conn):
 def test_show_ratings_cascades_on_show_delete(conn):
     conn.execute("INSERT INTO shows (query) VALUES ('a')")
     conn.execute(
-        "INSERT INTO show_ratings (show_id, source, fetched_at) VALUES (1, 'podchaser', '2026-01-01T00:00:00Z')"
+        "INSERT INTO show_ratings (show_id, source, fetched_at) VALUES (1, 'taddy', '2026-01-01T00:00:00Z')"
     )
     conn.execute("DELETE FROM shows WHERE id = 1")
     assert conn.execute("SELECT COUNT(*) FROM show_ratings").fetchone()[0] == 0

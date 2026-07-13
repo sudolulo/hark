@@ -66,7 +66,7 @@ def download(conn, user_id, podcast_url, episode_url):
     conn.commit()
 
 
-def rate_show(conn, show_id, rating_avg, rating_count, source="podchaser"):
+def rate_show(conn, show_id, rating_avg, rating_count, source="taddy"):
     conn.execute(
         "INSERT INTO show_ratings (show_id, source, rating_avg, rating_count, fetched_at)"
         " VALUES (?, ?, ?, ?, '2026-01-01T00:00:00Z')",

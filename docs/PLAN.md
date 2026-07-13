@@ -489,28 +489,51 @@ of this page"); this pass upgrades it rather than adding a new page.
   fabricated "average" value. No persisted table — recomputed live per page view
   (`App.db()`'s own query style), revisit only if that's ever actually too slow at
   real data volumes.
-- **External rating** (`ratings.py`, new): Podchaser's free-tier GraphQL API (25,000
-  query points/month), matched by RSS feed URL first, Apple Podcast ID as a fallback
-  — both exact-identifier lookups, no fuzzy title matching involved. Cached in a new
-  `show_ratings` table (`(show_id, source)` composite key, room for more sources
-  later without a migration) rather than fetched live: `App.db()` only ever holds a
-  read-only connection, and a rate-limited API shouldn't be hit on every page view
-  anyway. A row is written even on a miss (same "mark it processed regardless" idiom
-  `pipeline._store()` already uses for a zero-topic episode) so an unmatched show
-  isn't re-queried against the query-point budget every run — `hark rate-shows`
-  (new CLI command) only re-attempts rows older than 30 days. Bayesian-shrunk toward
-  the mean rating across all rated shows, same formula shape as personal affinity, so
-  a show with 2 five-star reviews doesn't outrank one with 10,000 averaging 4.3.
-  Auth is OAuth2 client-credentials, not a bare key: `$HARK_PODCHASER_CLIENT_ID` +
-  `$HARK_PODCHASER_CLIENT_SECRET` (register a free app from the account's own API
-  settings page at podchaser.com — both the client_id/client_secret naming and the
-  "exchange them for a Bearer token via a `requestAccessToken` mutation, not a REST
-  endpoint" mechanics only got confirmed *after* first shipping this against a bare
-  api_key assumption that turned out wrong; see the ratings.py module docstring for
-  the corroborating sources, since api-docs.podchaser.com itself 403'd every direct
-  fetch attempt during development). `hark rate-shows` no-ops the ratings half and
-  prints a hint if either var is unset; personal affinity works standalone with zero
-  external dependency.
+- **External rating** (`ratings.py`, new): Taddy's free-tier GraphQL API (500
+  requests/month, no card), matched by RSS feed URL first, Apple Podcast ID as a
+  fallback via `getPodcastSeries` — both exact-identifier lookups, no fuzzy title
+  matching involved. Auth is two static headers (`$HARK_TADDY_USER_ID`,
+  `$HARK_TADDY_API_KEY` from the account's developer dashboard) — no OAuth exchange
+  needed. Cached in a new `show_ratings` table (`(show_id, source)` composite key,
+  room for more sources later without a migration) rather than fetched live:
+  `App.db()` only ever holds a read-only connection, and a rate-limited API shouldn't
+  be hit on every page view anyway. A row is written even on a miss (same "mark it
+  processed regardless" idiom `pipeline._store()` already uses for a zero-topic
+  episode) so an unmatched show isn't re-queried against the request budget every
+  run — `hark rate-shows` (new CLI command) only re-attempts rows older than 30 days.
+  - **Podchaser was the original pick, abandoned before ever deploying it.** Its
+    free-tier docs read as having exactly the star-rating data wanted
+    (`ratingAverage`/`ratingCount`), and its `podcast` query even supports the same
+    feed-URL/Apple-ID exact-identifier lookup Taddy's does — but it turned out those
+    rating fields need a paid tier, caught only because the owner happened to already
+    know Podchaser's real pricing; the free-tier docs alone never said so. A shallower
+    research gap on the way there: Podchaser's own interactive docs site 403'd every
+    direct fetch attempt, so the *auth mechanism* (turned out to be OAuth2
+    client-credentials via a `requestAccessToken` mutation, not a bare API key) also
+    had to be corrected once, from search-indexed doc fragments rather than a live
+    schema browser — a preview of the pricing miss to come, in hindsight. Before
+    picking Taddy, the same "is this actually free" question got asked of iTunes'
+    Search API (verified empirically: no rating fields for podcasts at all), Spotify's
+    Web API (verified via official docs: Show objects have no `popularity` field,
+    unlike Track/Album/Artist), PodcastIndex.org (verified via its OpenAPI spec: no
+    per-show rating field, only an undocumented `/trending` list), and Listen Notes
+    (its Listen Score/Global Rank fields are explicitly Pro-tier-only, per its own
+    pricing page) — Taddy was the only one where the useful field wasn't
+    documented as gated.
+  - **Taddy's own signal is a coarse tier, not a star average.** `popularityRank`
+    returns a bucket ("TOP_200", "TOP_1000", ...) reflecting standing across Taddy's
+    4M+-podcast index, not a fine-grained rating — mapped to a 0-5 score
+    (`_score_from_popularity_rank()`, log-scaled by tier size, not calibrated against
+    real data yet) and fed through the *same* Bayesian-shrinkage machinery as personal
+    affinity, using a fixed confidence weight since there's no real per-show sample
+    size the way a review count would give. Expect this to be a genuinely *sparse*
+    signal for hark's mostly-niche true-crime/history catalog — most shows won't crack
+    even `TOP_100000` out of Taddy's full index, and a real match with no tier
+    (`ShowRating(external_id=..., rating_avg=None, ...)`) is stored distinctly from
+    "show not found at all," so `show_ratings` itself stays informative either way.
+  `hark rate-shows` no-ops the ratings half (the itunes_id backfill below still runs)
+  and prints a hint if either Taddy var is unset; personal affinity works standalone
+  with zero external dependency.
 - **`itunes_id` backfill** (`resolve.py`, new `backfill_itunes_ids()`): only
   `resolve_show()`'s hand-curated path ever set `itunes_id` — `add_show_by_feed_url()`
   (gpodder sync, OPML import, `discover --add`), how most of a real catalog actually

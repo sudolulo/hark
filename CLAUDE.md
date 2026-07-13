@@ -102,7 +102,7 @@ beats fingerprinting/crowdsourcing) is in adscrub's own repo history.
   the new `show_ratings` cache — don't reach for a model here even for something that
   feels judgment-shaped; the whole point was proving "interesting" could be answered
   with auditable arithmetic instead. `show_ratings` (external ratings, currently just
-  Podchaser's free-tier API via `ratings.py`) lives in hark.db, not auth.db — unlike
+  Taddy's free-tier API via `ratings.py`) lives in hark.db, not auth.db — unlike
   server config (`settings`, auth.db), this genuinely is show-catalog data, not
   per-deployment config, so it's fine if a pipeline snapshot swap replaces it wholesale.
   `App.db()`'s read-only connection never runs schema setup, so any query touching a

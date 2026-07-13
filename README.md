@@ -59,7 +59,7 @@ lists + listen history + quota, shared processing, invite-link onboarding),
 an admin-editable public base URL (used for invite links and the podcast
 feed/audio URLs, settable from `/admin/users` without a redeploy), and M4
 episode scoring — personalized "recommended for you" ranking from your own
-listening history plus external show ratings (Podchaser), no LLM calls
+listening history plus external show ratings (Taddy), no LLM calls
 involved at all — deployed live.
 
 ## Demo

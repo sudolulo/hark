@@ -6,42 +6,45 @@ import pytest
 from hark import db, ratings
 
 
-FAKE_TOKEN_RESPONSE = httpx.Response(
-    200, json={"data": {"requestAccessToken": {"access_token": "test-access-token", "token_type": "Bearer"}}}
-)
-
-
-def graphql_client(handler, token_response=None):
-    """Auto-answers the requestAccessToken mutation (verifying client_id/
-    client_secret and the absence of an auth header on that specific call),
-    then delegates the podcast query to handler(identifier) — tests only
-    need to care about the query behavior they're actually exercising."""
+def graphql_client(handler):
     def wrapped(request):
-        assert str(request.url) == ratings.PODCHASER_GRAPHQL_URL
+        assert str(request.url) == ratings.TADDY_GRAPHQL_URL
+        assert request.headers["x-user-id"] == "test-user-id"
+        assert request.headers["x-api-key"] == "test-api-key"
         body = json.loads(request.content)
-        if "requestAccessToken" in body["query"]:
-            assert "authorization" not in request.headers
-            assert body["variables"]["input"] == {
-                "grant_type": "CLIENT_CREDENTIALS",
-                "client_id": "test-client-id",
-                "client_secret": "test-client-secret",
-            }
-            return token_response or FAKE_TOKEN_RESPONSE
-        assert request.headers["authorization"] == "Bearer test-access-token"
-        return handler(body["variables"]["identifier"])
+        return handler(body["variables"])
 
     return httpx.Client(transport=httpx.MockTransport(wrapped))
 
 
 def make_source(client):
-    return ratings.PodchaserRatingsSource(client, "test-client-id", "test-client-secret")
+    return ratings.TaddyRatingsSource(client, "test-user-id", "test-api-key")
 
 
-def podcast_response(id=None, rating_average=None, rating_count=None):
-    podcast = None
-    if id is not None:
-        podcast = {"id": id, "ratingAverage": rating_average, "ratingCount": rating_count}
-    return httpx.Response(200, json={"data": {"podcast": podcast}})
+def series_response(uuid=None, popularity_rank=None):
+    series = None
+    if uuid is not None:
+        series = {"uuid": uuid, "popularityRank": popularity_rank}
+    return httpx.Response(200, json={"data": {"getPodcastSeries": series}})
+
+
+# --- _score_from_popularity_rank ---
+
+
+def test_score_from_popularity_rank_none_for_no_rank():
+    assert ratings._score_from_popularity_rank(None) is None
+
+
+def test_score_from_popularity_rank_none_for_unrecognized_shape():
+    assert ratings._score_from_popularity_rank("SOMETHING_ELSE") is None
+
+
+def test_score_from_popularity_rank_smaller_n_scores_higher():
+    top_200 = ratings._score_from_popularity_rank("TOP_200")
+    top_5000 = ratings._score_from_popularity_rank("TOP_5000")
+    top_100000 = ratings._score_from_popularity_rank("TOP_100000")
+    assert top_200 > top_5000 > top_100000
+    assert 2.5 <= top_100000 and top_200 <= 5.0
 
 
 # --- NullRatingsSource ---
@@ -51,63 +54,68 @@ def test_null_ratings_source_finds_nothing():
     assert ratings.NullRatingsSource().fetch("https://feeds.example.com/x", 123) is None
 
 
-# --- PodchaserRatingsSource ---
+# --- TaddyRatingsSource ---
 
 
 def test_fetch_matches_by_feed_url():
-    def handler(identifier):
-        assert identifier == {"id": "https://feeds.example.com/casefile", "type": "RSS"}
-        return podcast_response(id="42", rating_average=4.7, rating_count=1200)
+    def handler(variables):
+        assert variables == {"rssUrl": "https://feeds.example.com/casefile"}
+        return series_response(uuid="abc-123", popularity_rank="TOP_1000")
 
     with graphql_client(handler) as client:
-        rating = make_source(client).fetch(
-            "https://feeds.example.com/casefile", 998568017
-        )
-    assert rating == ratings.ShowRating(external_id="42", rating_avg=4.7, rating_count=1200)
+        rating = make_source(client).fetch("https://feeds.example.com/casefile", 998568017)
+    assert rating.external_id == "abc-123"
+    assert rating.rating_avg == ratings._score_from_popularity_rank("TOP_1000")
+    assert rating.rating_count == ratings._POPULARITY_RANK_CONFIDENCE
 
 
 def test_fetch_falls_back_to_itunes_id_when_feed_url_misses():
     calls = []
 
-    def handler(identifier):
-        calls.append(identifier)
-        if identifier["type"] == "RSS":
-            return podcast_response()  # miss
-        return podcast_response(id="42", rating_average=4.2, rating_count=50)
+    def handler(variables):
+        calls.append(variables)
+        if variables.get("rssUrl"):
+            return series_response()  # miss
+        return series_response(uuid="abc-123", popularity_rank="TOP_1000")
 
     with graphql_client(handler) as client:
-        rating = make_source(client).fetch(
-            "https://feeds.example.com/moved", 998568017
-        )
-    assert rating == ratings.ShowRating(external_id="42", rating_avg=4.2, rating_count=50)
-    assert [c["type"] for c in calls] == ["RSS", "APPLE_PODCASTS"]
+        rating = make_source(client).fetch("https://feeds.example.com/moved", 998568017)
+    assert rating.external_id == "abc-123"
+    assert len(calls) == 2 and calls[1]["itunesId"] == 998568017
 
 
 def test_fetch_returns_none_when_no_itunes_id_and_feed_url_misses():
-    with graphql_client(lambda identifier: podcast_response()) as client:
-        rating = make_source(client).fetch(
-            "https://feeds.example.com/unknown", None
-        )
+    with graphql_client(lambda variables: series_response()) as client:
+        rating = make_source(client).fetch("https://feeds.example.com/unknown", None)
     assert rating is None
 
 
 def test_fetch_returns_none_when_both_identifiers_miss():
-    with graphql_client(lambda identifier: podcast_response()) as client:
-        rating = make_source(client).fetch(
-            "https://feeds.example.com/unknown", 998568017
-        )
+    with graphql_client(lambda variables: series_response()) as client:
+        rating = make_source(client).fetch("https://feeds.example.com/unknown", 998568017)
     assert rating is None
 
 
-def test_fetch_raises_podchaser_error_on_graphql_error_body():
-    def handler(identifier):
-        return httpx.Response(200, json={"errors": [{"message": "bad identifier type"}]})
+def test_fetch_records_a_real_match_with_no_rating_when_show_has_no_tier():
+    # Distinct from "not found at all" — Taddy knows this show, it's just
+    # outside every popularity tier (the common case for a niche show).
+    def handler(variables):
+        return series_response(uuid="abc-123", popularity_rank=None)
 
     with graphql_client(handler) as client:
-        with pytest.raises(ratings.PodchaserError):
-            make_source(client).fetch(
-                "https://feeds.example.com/x", None
-            )
+        rating = make_source(client).fetch("https://feeds.example.com/niche", None)
+    assert rating.external_id == "abc-123"
+    assert rating.rating_avg is None
+    assert rating.rating_count is None
+
+
+def test_fetch_raises_taddy_error_on_graphql_error_body():
+    def handler(variables):
+        return httpx.Response(200, json={"errors": [{"message": "bad argument"}]})
+
+    with graphql_client(handler) as client:
+        with pytest.raises(ratings.TaddyError):
+            make_source(client).fetch("https://feeds.example.com/x", None)
 
 
 def test_fetch_raises_on_http_error_status():
@@ -116,33 +124,6 @@ def test_fetch_raises_on_http_error_status():
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(httpx.HTTPStatusError):
-            make_source(client).fetch("https://feeds.example.com/x", None)
-
-
-def test_authenticates_once_and_reuses_the_token_across_fetches():
-    token_calls = []
-
-    def wrapped(request):
-        body = json.loads(request.content)
-        if "requestAccessToken" in body["query"]:
-            token_calls.append(body)
-            return FAKE_TOKEN_RESPONSE
-        assert request.headers["authorization"] == "Bearer test-access-token"
-        return podcast_response(id="42", rating_average=4.5, rating_count=10)
-
-    with httpx.Client(transport=httpx.MockTransport(wrapped)) as client:
-        source = make_source(client)
-        source.fetch("https://feeds.example.com/a", None)
-        source.fetch("https://feeds.example.com/b", None)
-    assert len(token_calls) == 1  # not re-requested for the second show
-
-
-def test_fetch_raises_podchaser_error_when_token_response_has_no_access_token():
-    def wrapped(request):
-        return httpx.Response(200, json={"data": {"requestAccessToken": {"token_type": "Bearer"}}})
-
-    with httpx.Client(transport=httpx.MockTransport(wrapped)) as client:
-        with pytest.raises(ratings.PodchaserError):
             make_source(client).fetch("https://feeds.example.com/x", None)
 
 
@@ -177,12 +158,12 @@ def seed_show(conn, feed_url, itunes_id=None):
 def test_refresh_ratings_stores_a_match(tmp_path):
     conn = db.connect(tmp_path / "t.db")
     show_id = seed_show(conn, "https://feeds.example.com/a")
-    source = FakeSource({"https://feeds.example.com/a": ratings.ShowRating("42", 4.5, 900)})
+    source = FakeSource({"https://feeds.example.com/a": ratings.ShowRating("42", 4.5, 50)})
     results = ratings.refresh_ratings(conn, source)
     assert results == [ratings.RatingResult(show_id=show_id, query="https://feeds.example.com/a",
-                                            rating=ratings.ShowRating("42", 4.5, 900))]
+                                            rating=ratings.ShowRating("42", 4.5, 50))]
     row = conn.execute("SELECT * FROM show_ratings WHERE show_id = ?", (show_id,)).fetchone()
-    assert (row["external_id"], row["rating_avg"], row["rating_count"]) == ("42", 4.5, 900)
+    assert (row["external_id"], row["rating_avg"], row["rating_count"]) == ("42", 4.5, 50)
     assert row["fetched_at"] is not None
 
 
@@ -204,11 +185,11 @@ def test_refresh_ratings_reattempts_stale_rows(tmp_path):
     conn = db.connect(tmp_path / "t.db")
     show_id = seed_show(conn, "https://feeds.example.com/a")
     conn.execute(
-        "INSERT INTO show_ratings (show_id, source, fetched_at) VALUES (?, 'podchaser', '2020-01-01T00:00:00Z')",
+        "INSERT INTO show_ratings (show_id, source, fetched_at) VALUES (?, 'taddy', '2020-01-01T00:00:00Z')",
         (show_id,),
     )
     conn.commit()
-    source = FakeSource({"https://feeds.example.com/a": ratings.ShowRating("42", 4.5, 900)})
+    source = FakeSource({"https://feeds.example.com/a": ratings.ShowRating("42", 4.5, 50)})
     results = ratings.refresh_ratings(conn, source)
     assert len(results) == 1
     row = conn.execute("SELECT * FROM show_ratings WHERE show_id = ?", (show_id,)).fetchone()
@@ -220,7 +201,7 @@ def test_refresh_ratings_isolates_a_failure_and_keeps_prior_progress(tmp_path):
     ok_id = seed_show(conn, "https://feeds.example.com/a")
     boom_id = seed_show(conn, "https://feeds.example.com/boom")
     source = FakeSource({
-        "https://feeds.example.com/a": ratings.ShowRating("42", 4.5, 900),
+        "https://feeds.example.com/a": ratings.ShowRating("42", 4.5, 50),
         "https://feeds.example.com/boom": httpx.ConnectError("simulated failure"),
     })
     results = ratings.refresh_ratings(conn, source)
@@ -241,8 +222,8 @@ def test_refresh_ratings_respects_limit(tmp_path):
     seed_show(conn, "https://feeds.example.com/a")
     seed_show(conn, "https://feeds.example.com/b")
     source = FakeSource({
-        "https://feeds.example.com/a": ratings.ShowRating("1", 4.0, 10),
-        "https://feeds.example.com/b": ratings.ShowRating("2", 4.0, 10),
+        "https://feeds.example.com/a": ratings.ShowRating("1", 4.0, 50),
+        "https://feeds.example.com/b": ratings.ShowRating("2", 4.0, 50),
     })
     results = ratings.refresh_ratings(conn, source, limit=1)
     assert len(results) == 1

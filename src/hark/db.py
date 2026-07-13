@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS shows (
     updated_at      TEXT
 );
 
--- M4: cached external show ratings (e.g. Podchaser) — a source, not a merge
+-- M4: cached external show ratings (e.g. Taddy) — a source, not a merge
 -- of rating data into `shows` itself, since (a) more sources can be added
 -- later without a migration and (b) a row records a *fetch attempt*, not
 -- just a hit: written even on no-match/zero-review (external_id/rating_avg/
