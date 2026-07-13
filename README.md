@@ -116,9 +116,12 @@ cd .. && git clone ssh://git@git.onetick.ninja:55214/flan/adscrub.git
 cd hark && uv sync
 ```
 
-This works for local development; it does **not** yet work for the Docker
-build (the build context only has hark's own files) — see the Dockerfile's
-"KNOWN GAP" comment and docs/PLAN.md's open questions. Not solved yet.
+For local development, that's all you need. Plain `docker build .`/`docker compose
+build` run from this repo alone still won't work, though — the build context only has
+hark's own files, and the adscrub path dependency needs adscrub's source alongside it.
+Use `scripts/build-image.sh` instead (stages git-archive-clean copies of both repos
+into a temp directory and builds against that) — see docs/PLAN.md's ad-stripping
+section for the full story.
 
 ## Web UI
 
