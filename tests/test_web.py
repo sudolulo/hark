@@ -14,12 +14,17 @@ import urllib.parse
 
 import pytest
 
+from hark import auth as auth_module
 from hark import claims, db, web
 
 
 @pytest.fixture(autouse=True)
 def fast_stretch(monkeypatch):
-    monkeypatch.setattr(web, "PW_ITERS", 10)
+    # auth.py, not web.py: stretch() reads PW_ITERS from its own module's
+    # global scope, so patching a re-exported web.PW_ITERS binding (if one
+    # even existed) wouldn't actually affect it — this must target the
+    # module the function itself lives in.
+    monkeypatch.setattr(auth_module, "PW_ITERS", 10)
 
 
 @pytest.fixture
