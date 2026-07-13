@@ -200,18 +200,26 @@ class Auth:
     def verify(self, username: str, password: str) -> int | None:
         """Return user id on success. Fail-closed: an account with no stored
         password only accepts the bootstrap admin token, and if that is unset
-        nothing is accepted."""
+        nothing is accepted.
+
+        stretch() runs on every call, on every branch, even the ones that
+        don't need its result — an unauthenticated caller can otherwise time
+        the response to tell a passwordless account (no stretch() call, so
+        faster) apart from one with a password set, or from a nonexistent
+        username (both call stretch() once). That's a real, if narrow, way
+        to fingerprint account state without knowing any password."""
         with contextlib.closing(self._connect()) as conn:
             row = conn.execute(
                 "SELECT id, salt, password_hash FROM users WHERE username = ?", (username,)
             ).fetchone()
             if row is None:
-                stretch("timing-pad", password)  # equalise timing for unknown users
+                stretch("timing-pad", password)
                 return None
             if row["password_hash"]:
                 if constant_eq(stretch(row["salt"], password), row["password_hash"]):
                     return row["id"]
                 return None
+            stretch(row["salt"] or "timing-pad", password)  # timing parity only; result unused
             if self.admin_token and constant_eq(password, self.admin_token):
                 return row["id"]
             return None

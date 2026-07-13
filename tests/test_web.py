@@ -1301,6 +1301,40 @@ def test_new_user_can_log_in_with_bootstrap_token(tmp_path):
     assert auth.verify("alice", "t") == user_id
 
 
+def test_verify_calls_stretch_on_every_branch_for_timing_parity(tmp_path, monkeypatch):
+    """Regression: the passwordless-known-account branch used to skip
+    stretch() entirely (nothing to check a hash against), while the
+    unknown-username and has-a-password branches both call it once — an
+    unauthenticated caller could tell "this username exists but has no
+    password yet" apart from the other two cases purely by response time.
+    Verifying call counts (not actual elapsed time, which would make this
+    test flaky) confirms stretch() now runs on all three paths."""
+    calls = []
+    real_stretch = auth_module.stretch
+
+    def spy(salt, password):
+        calls.append(salt)
+        return real_stretch(salt, password)
+
+    monkeypatch.setattr(auth_module, "stretch", spy)
+    auth = web.Auth(tmp_path / "auth.db", admin_token="t")
+    auth.create_user("alice")  # passwordless
+    bob_id = auth.create_user("bob")
+    auth.set_password(bob_id, "bobs-password")
+
+    calls.clear()
+    auth.verify("nobody", "irrelevant")
+    assert len(calls) == 1  # unknown username
+
+    calls.clear()
+    auth.verify("alice", "t")  # passwordless account, admin-token path
+    assert len(calls) == 1
+
+    calls.clear()
+    auth.verify("bob", "bobs-password")  # has a real password
+    assert len(calls) == 1
+
+
 def test_delete_user_removes_account(tmp_path):
     auth = web.Auth(tmp_path / "auth.db", admin_token="t")
     auth.create_user("alice")
