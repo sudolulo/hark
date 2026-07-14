@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.2] - 2026-07-14
+
+### Changed
+
+- Bumped adscrub to 0.7.2: `dai-probe` now defaults to real podcast-app
+  User-Agents (Apple Podcasts, Spotify, Overcast, AntennaPod) instead of
+  browser signatures — measured to catch real DAI variance a browser UA
+  missed. No changes in hark's own source.
+
 ## [0.19.1] - 2026-07-14
 
 ### Fixed
