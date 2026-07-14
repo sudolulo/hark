@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-07-14
+
+### Added
+
+- **`hark dai-probe`: research command for adscrub 0.7.0's dual-fetch DAI
+  detection.** Backfills `shows.hosting_platform` (new column — the
+  registrable domain a show's audio is actually served from, e.g.
+  "acast.com"; see `hosting.py`), then probes up to `--per-platform`
+  untested episodes per distinct platform so results are comparable across
+  hosts rather than clustering on whichever shows happen to sync first. New
+  `dai_probes` table records every attempt (even failures/no-divergence),
+  same idiom as `show_ratings` — a platform that never varies is exactly as
+  useful to know as one that does, and re-probing it forever would waste
+  bandwidth for nothing. `--dry-run` shows the sample without fetching
+  anything; `--limit` caps the total run. See adscrub's own CHANGELOG for
+  what the underlying technique can and can't do.
+
 ## [0.18.1] - 2026-07-14
 
 ### Changed

@@ -1,6 +1,6 @@
 [project]
 name = "hark"
-version = "0.18.1"
+version = "0.19.0"
 description = "Cross-podcast topic index and discovery service"
 readme = "README.md"
 requires-python = ">=3.12"

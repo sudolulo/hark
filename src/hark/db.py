@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS shows (
     feed_token      TEXT,
     ad_stripping_enabled INTEGER NOT NULL DEFAULT 1,
     topic_index_enabled  INTEGER NOT NULL DEFAULT 1,
+    hosting_platform TEXT,
     last_fetched_at TEXT,
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     updated_at      TEXT
@@ -94,6 +95,28 @@ CREATE TABLE IF NOT EXISTS episodes (
     created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     updated_at          TEXT,
     UNIQUE (show_id, guid)
+);
+
+-- Dual-fetch dynamic-ad-insertion probes (2026-07-14 research): does re-fetching
+-- an episode's audio_url with a different listener-targeting signal (cookie +
+-- user-agent) actually return different stitched content? A row records an
+-- ATTEMPT (tested_at always set), same idiom as show_ratings — a platform that
+-- never varies is exactly as useful to know as one that does, and re-probing it
+-- forever would waste bandwidth for nothing. `platform` is a copy of the show's
+-- hosting_platform at test time, not a join, so historical probes stay readable
+-- even if platform detection logic or a show's actual host later changes.
+CREATE TABLE IF NOT EXISTS dai_probes (
+    id                    INTEGER PRIMARY KEY,
+    episode_id            INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+    platform              TEXT,
+    tested_at             TEXT NOT NULL,
+    bytes_compared        INTEGER NOT NULL,
+    diverged              INTEGER NOT NULL,
+    divergence_byte       INTEGER,
+    divergence_second     REAL,
+    reconverged           INTEGER,
+    reconvergence_byte    INTEGER,
+    reconvergence_second  REAL
 );
 
 CREATE TABLE IF NOT EXISTS topics (
@@ -226,6 +249,7 @@ _MIGRATIONS = (
      "ALTER TABLE shows ADD COLUMN ad_stripping_enabled INTEGER NOT NULL DEFAULT 1"),
     ("shows", "topic_index_enabled",
      "ALTER TABLE shows ADD COLUMN topic_index_enabled INTEGER NOT NULL DEFAULT 1"),
+    ("shows", "hosting_platform", "ALTER TABLE shows ADD COLUMN hosting_platform TEXT"),
     ("listen_actions", "started", "ALTER TABLE listen_actions ADD COLUMN started INTEGER"),
     ("subscription_changes", "user_id",
      "ALTER TABLE subscription_changes ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1"),

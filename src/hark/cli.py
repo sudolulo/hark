@@ -34,8 +34,8 @@ from adscrub import repeats as ad_repeats
 from adscrub import transcribe as ad_transcribe
 
 from . import (
-    __version__, claims, db, discover, extract, gpodder_server, ingest,
-    nextcloud, opml, pipeline, ratings, resolve, wikidata,
+    __version__, claims, dai_probe, db, discover, extract, gpodder_server,
+    hosting, ingest, nextcloud, opml, pipeline, ratings, resolve, wikidata,
 )
 
 DEFAULT_DB = os.environ.get("HARK_DB", "hark.db")
@@ -753,6 +753,56 @@ def cmd_rate_shows(args: argparse.Namespace) -> int:
     return 1 if errors else 0
 
 
+def cmd_dai_probe(args: argparse.Namespace) -> int:
+    """Research (2026-07-14): does re-fetching an episode's audio with different
+    request signals (User-Agent) return genuinely different content? If so, the
+    divergence point is an ad boundary found with zero transcription/LLM calls.
+    Backfills shows.hosting_platform first (free, keyless), then probes up to
+    --per-platform untested episodes per distinct platform, so results can show
+    which platforms actually support the technique rather than just running it
+    once. See adscrub.dai's own module docstring for what this can and can't do."""
+    conn = db.connect(args.db)
+    backfilled = hosting.backfill_hosting_platform(conn)
+    print(f"hosting_platform backfill: {backfilled} show(s) newly classified")
+
+    sample = dai_probe.select_sample(conn, per_platform=args.per_platform, limit=args.limit)
+    if args.dry_run:
+        by_platform: dict[str, int] = {}
+        for ep in sample:
+            by_platform[ep["hosting_platform"]] = by_platform.get(ep["hosting_platform"], 0) + 1
+        print(f"would probe {len(sample)} episode(s) across {len(by_platform)} platform(s):")
+        for platform, n in sorted(by_platform.items()):
+            print(f"  {platform}: {n}")
+        return 0
+    if not sample:
+        print("no untested episodes with a known hosting_platform", file=sys.stderr)
+        return 1
+
+    errors = 0
+    with httpx.Client(timeout=60.0, headers={"User-Agent": USER_AGENT}) as client:
+        for ep in sample:
+            r = dai_probe.run_probe(client, conn, ep, ep["hosting_platform"])
+            if r.error or r.result is None:  # run_probe sets exactly one of the two
+                errors += 1
+                print(f"  FAIL  [{r.platform}] {r.title}: {r.error}")
+            elif not r.result.diverged:
+                print(f"  same  [{r.platform}] {r.title}: no divergence in "
+                      f"{r.result.bytes_compared} bytes compared")
+            else:
+                reconv = (f", reconverges at byte {r.result.reconvergence_byte}"
+                          if r.result.reconverged else ", no reconvergence found")
+                print(f"  DIFF  [{r.platform}] {r.title}: diverges at byte "
+                      f"{r.result.divergence_byte}{reconv}")
+    print(f"probed {len(sample) - errors} episode(s) ({errors} failed)")
+
+    print()
+    print("per-platform summary (all probes ever run):")
+    for row in dai_probe.platform_summary(conn):
+        print(f"  {row['platform']}: {row['diverged']}/{row['tested']} diverged, "
+              f"{row['reconverged']} of those also reconverged")
+    return 1 if errors else 0
+
+
 def cmd_topics(args: argparse.Namespace) -> int:
     from . import web  # deferred: other commands work without importing the web module
 
@@ -1091,6 +1141,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--limit", type=int, help="max shows to process per step this run")
     p.set_defaults(func=cmd_rate_shows)
+
+    p = sub.add_parser(
+        "dai-probe",
+        help="research: probe whether re-fetching audio with different signals reveals "
+             "dynamic ad insertion, per hosting platform",
+    )
+    p.add_argument("--per-platform", type=int, default=1,
+                    help="max untested episodes to probe per distinct hosting platform (default: 1)")
+    p.add_argument("--limit", type=int, help="cap total episodes probed this run")
+    p.add_argument("--dry-run", action="store_true", help="show what would be probed, fetch nothing")
+    p.set_defaults(func=cmd_dai_probe)
 
     p = sub.add_parser(
         "web", help="serve the dashboard (login-walled) + feed/audio routes (token-gated)"
