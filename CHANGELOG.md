@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.3] - 2026-07-14
+
+### Fixed
+
+- **`load-ad-detections` now accepts bare `[start_segment, end_segment]` pairs**,
+  not just the documented `{start_segment, end_segment, reason}` dict. A real
+  fleet-agent batch dropped in production on 2026-07-13 used the shorthand
+  pair form; every record in it failed with `'list' object has no attribute
+  'get'` (adscrub's `spans_from_segment_indices()` is dict-only), the file
+  was never renamed to `loaded-*`, and the deployed loop retried and failed
+  on it every ~60-90s cycle indefinitely. `_PrecomputedDetector` now
+  normalizes either shape before handing spans to adscrub; malformed shapes
+  are still dropped the same way out-of-range indices already are.
+
 ## [0.17.2] - 2026-07-13
 
 ### Fixed

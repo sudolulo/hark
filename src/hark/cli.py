@@ -401,13 +401,28 @@ class _PrecomputedDetector:
     runs unchanged — same index-grounding (adscrub's spans_from_segment_indices)
     and llm_detected_at marking a live ClaudeAdDetector run gets, just fed
     pre-computed judgment instead of calling the API. Mirrors extract/compare's
-    own load-precomputed idiom (pipeline.load_extractions/claims.load_comparisons)."""
+    own load-precomputed idiom (pipeline.load_extractions/claims.load_comparisons).
 
-    def __init__(self, raw_spans: list[dict]):
+    Also accepts a bare [start_segment, end_segment] pair per span (no
+    `reason`) — a real fleet-agent batch dropped in production on 2026-07-13
+    used this shorthand instead of the documented dict shape, and
+    spans_from_segment_indices() (adscrub, dict-only) would otherwise crash
+    with 'list' object has no attribute 'get' on every record in the batch."""
+
+    def __init__(self, raw_spans: list):
         self._raw_spans = raw_spans
 
     def detect(self, transcript: list[dict]) -> list[ad_detect.DetectedAdSpan]:
-        return ad_detect.spans_from_segment_indices(transcript, self._raw_spans)
+        normalized = []
+        for raw in self._raw_spans:
+            if isinstance(raw, dict):
+                normalized.append(raw)
+            elif isinstance(raw, (list, tuple)) and len(raw) == 2:
+                normalized.append({"start_segment": raw[0], "end_segment": raw[1]})
+            # else: left out — spans_from_segment_indices already drops
+            # missing/out-of-range indices the same way, this just extends
+            # that tolerance to a shape it can't itself introspect.
+        return ad_detect.spans_from_segment_indices(transcript, normalized)
 
 
 def cmd_load_ad_detections(args: argparse.Namespace) -> int:

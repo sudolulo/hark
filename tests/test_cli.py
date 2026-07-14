@@ -498,6 +498,42 @@ def test_load_ad_detections_drops_out_of_range_span(tmp_path, capsys):
     assert "ok    Ep One: 0 ad span(s) loaded" in capsys.readouterr().out
 
 
+def test_load_ad_detections_accepts_bare_pair_shorthand(tmp_path, capsys):
+    """Regression: a real fleet-agent batch (2026-07-13) used [start, end]
+    pairs instead of the documented {start_segment, end_segment, reason}
+    dicts, and every record in it failed with 'list' object has no
+    attribute 'get' — the file was never renamed to loaded-*, so the
+    deployed loop retried and failed on it forever."""
+    path = tmp_path / "t.db"
+    transcript_path = tmp_path / "t.json"
+    transcript_path.write_text(json.dumps(
+        [{"start": 0.0, "end": 5.0, "text": "a"}, {"start": 5.0, "end": 8.0, "text": "ad copy"}]
+    ))
+    batch = tmp_path / "batch.jsonl"
+    batch.write_text(json.dumps({"episode_id": 1, "ad_spans": [[1, 1]]}) + "\n")
+    conn = db.connect(path)
+    conn.execute("INSERT INTO shows (query) VALUES ('Show A')")
+    conn.execute(
+        "INSERT INTO episodes (show_id, guid, title, transcript_path) VALUES (1, 'g1', 'Ep One', ?)",
+        (str(transcript_path),),
+    )
+    conn.commit()
+    conn.close()
+
+    rc = cli.main(["--db", str(path), "load-ad-detections", str(batch)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "ok    Ep One: 1 ad span(s) loaded" in out
+    assert "loaded 1 episode(s) (0 failed)" in out
+
+    conn = db.connect(path)
+    span = conn.execute(
+        "SELECT start_second, end_second, reason FROM ad_segments WHERE episode_id = 1"
+    ).fetchone()
+    assert (span["start_second"], span["end_second"]) == (5.0, 8.0)
+    assert span["reason"] == ""  # shorthand pairs carry no reason
+
+
 def test_load_ad_detections_missing_file_fails(tmp_path, capsys):
     rc = cli.main(["--db", str(tmp_path / "t.db"), "load-ad-detections", str(tmp_path / "nope.jsonl")])
     assert rc == 1
