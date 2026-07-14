@@ -25,12 +25,30 @@ class ProbeResult:
     error: str | None = None
 
 
+DEFAULT_MIN_TRIALS = 3
+
+
 def select_sample(
-    conn: sqlite3.Connection, per_platform: int = 1, limit: int | None = None
+    conn: sqlite3.Connection,
+    per_platform: int = 1,
+    limit: int | None = None,
+    min_trials: int = DEFAULT_MIN_TRIALS,
 ) -> list[sqlite3.Row]:
-    """Pick up to `per_platform` untested episodes from each distinct
-    hosting_platform, oldest-tested-first within a platform (so a platform
-    already probed doesn't keep getting picked while others go untested).
+    """Pick up to `per_platform` episodes needing another probe from each
+    distinct hosting_platform, prioritizing whichever has the fewest attempts
+    so far within a platform.
+
+    A single probe is not a reliable verdict: acast.com was observed to flip
+    from diverged to byte-identical on an otherwise-identical re-test of the
+    same episode, minutes apart — some platforms' targeting has a
+    randomized/inventory-dependent component this technique can't control
+    for. An episode keeps being selected across separate `dai-probe` runs
+    until it has `min_trials` recorded attempts, not just one — run this
+    command periodically (a scheduled job, not a single one-off) to actually
+    accumulate that many. platform_summary() reports diverged/tested as raw
+    counts specifically so this partial-agreement is visible rather than
+    collapsed into a single yes/no per platform.
+
     Shows with no hosting_platform yet are skipped — run
     hosting.backfill_hosting_platform() first."""
     rows = conn.execute(
@@ -40,15 +58,15 @@ def select_sample(
         FROM episodes e
         JOIN shows s ON s.id = e.show_id
         WHERE e.audio_url IS NOT NULL AND s.hosting_platform IS NOT NULL
+          AND (SELECT COUNT(*) FROM dai_probes p WHERE p.episode_id = e.id) < ?
         ORDER BY probe_count ASC, e.id ASC
-        """
+        """,
+        (min_trials,),
     ).fetchall()
     per_platform_count: dict[str, int] = {}
     sample = []
     for row in rows:
         platform = row["hosting_platform"]
-        if row["probe_count"] > 0:
-            continue  # already probed at least once; a fresh platform is more useful
         if per_platform_count.get(platform, 0) >= per_platform:
             continue
         per_platform_count[platform] = per_platform_count.get(platform, 0) + 1

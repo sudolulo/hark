@@ -44,7 +44,11 @@ def test_select_sample_picks_up_to_per_platform_per_platform(conn):
     assert platforms == ["acast.com", "megaphone.fm"]  # one per platform, not both from A
 
 
-def test_select_sample_skips_already_probed_episodes(conn):
+def test_select_sample_prioritizes_fewest_probes_but_does_not_exclude(conn):
+    """A single probe is not a reliable verdict (acast.com was observed to
+    flip from diverged to identical on an otherwise-identical re-test), so an
+    episode with fewer than min_trials attempts must stay eligible — the
+    least-probed episode just comes first."""
     show = add_show(conn, "Show A", hosting_platform="acast.com")
     ep1 = add_episode(conn, show, "a1")
     add_episode(conn, show, "a2")
@@ -56,7 +60,38 @@ def test_select_sample_skips_already_probed_episodes(conn):
     conn.commit()
 
     sample = dai_probe.select_sample(conn, per_platform=5)
-    assert [ep["guid"] for ep in sample] == ["a2"]
+    # a2 (0 probes) is prioritized over a1 (1 probe), but a1 is still eligible
+    assert [ep["guid"] for ep in sample] == ["a2", "a1"]
+
+
+def test_select_sample_stops_resampling_once_min_trials_reached(conn):
+    show = add_show(conn, "Show A", hosting_platform="acast.com")
+    ep1 = add_episode(conn, show, "a1")
+    for _ in range(3):
+        conn.execute(
+            "INSERT INTO dai_probes (episode_id, platform, tested_at, bytes_compared, diverged)"
+            " VALUES (?, 'acast.com', '2026-01-01T00:00:00Z', 100, 0)",
+            (ep1["id"],),
+        )
+    conn.commit()
+
+    sample = dai_probe.select_sample(conn, per_platform=5, min_trials=3)
+    assert sample == []  # a1 already has 3 of its 3 required trials
+
+
+def test_select_sample_min_trials_is_configurable(conn):
+    show = add_show(conn, "Show A", hosting_platform="acast.com")
+    ep1 = add_episode(conn, show, "a1")
+    conn.execute(
+        "INSERT INTO dai_probes (episode_id, platform, tested_at, bytes_compared, diverged)"
+        " VALUES (?, 'acast.com', '2026-01-01T00:00:00Z', 100, 0)",
+        (ep1["id"],),
+    )
+    conn.commit()
+
+    assert dai_probe.select_sample(conn, per_platform=5, min_trials=1) == []
+    sample = dai_probe.select_sample(conn, per_platform=5, min_trials=2)
+    assert [ep["guid"] for ep in sample] == ["a1"]
 
 
 def test_select_sample_skips_shows_with_no_platform(conn):

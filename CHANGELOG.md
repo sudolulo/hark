@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.3] - 2026-07-14
+
+### Fixed
+
+- **`dai-probe` no longer treats a single probe as a permanent verdict.**
+  `select_sample()` used to exclude any episode after its first probe
+  forever — reasonable before, wrong now that we know results are noisy:
+  acast.com was observed to flip from diverged to byte-identical on an
+  otherwise-identical re-test of the same episode, minutes apart. Episodes
+  now stay eligible until they reach `--min-trials` attempts (default 3),
+  prioritized least-probed-first — new episodes get covered before any one
+  is resampled, then the platform naturally round-robins deeper until every
+  episode is saturated, at which point it stops needing bandwidth on its
+  own. Meant to be run periodically (a scheduled job) rather than once, to
+  actually accumulate that many trials over time.
+
 ## [0.19.2] - 2026-07-14
 
 ### Changed

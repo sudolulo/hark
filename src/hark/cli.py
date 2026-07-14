@@ -758,14 +758,21 @@ def cmd_dai_probe(args: argparse.Namespace) -> int:
     request signals (User-Agent) return genuinely different content? If so, the
     divergence point is an ad boundary found with zero transcription/LLM calls.
     Backfills shows.hosting_platform first (free, keyless), then probes up to
-    --per-platform untested episodes per distinct platform, so results can show
-    which platforms actually support the technique rather than just running it
-    once. See adscrub.dai's own module docstring for what this can and can't do."""
+    --per-platform episodes per distinct platform that haven't reached
+    --min-trials attempts yet, so results can show which platforms actually
+    support the technique rather than just running it once. A single probe is
+    not a reliable verdict — see select_sample()'s own docstring for the
+    real-data example — so this command is meant to be run periodically (a
+    scheduled job), not once, to actually accumulate --min-trials per episode.
+    See adscrub.dai's own module docstring for what the technique can and
+    can't do."""
     conn = db.connect(args.db)
     backfilled = hosting.backfill_hosting_platform(conn)
     print(f"hosting_platform backfill: {backfilled} show(s) newly classified")
 
-    sample = dai_probe.select_sample(conn, per_platform=args.per_platform, limit=args.limit)
+    sample = dai_probe.select_sample(
+        conn, per_platform=args.per_platform, limit=args.limit, min_trials=args.min_trials
+    )
     if args.dry_run:
         by_platform: dict[str, int] = {}
         for ep in sample:
@@ -1152,8 +1159,12 @@ def main(argv: list[str] | None = None) -> int:
              "dynamic ad insertion, per hosting platform",
     )
     p.add_argument("--per-platform", type=int, default=1,
-                    help="max untested episodes to probe per distinct hosting platform (default: 1)")
+                    help="max episodes to probe per distinct hosting platform this run (default: 1)")
     p.add_argument("--limit", type=int, help="cap total episodes probed this run")
+    p.add_argument("--min-trials", type=int, default=dai_probe.DEFAULT_MIN_TRIALS,
+                    help=f"attempts an episode needs before it stops being resampled "
+                         f"(default: {dai_probe.DEFAULT_MIN_TRIALS}) — a single probe isn't a "
+                         f"reliable verdict, run this command periodically to reach it")
     p.add_argument("--dry-run", action="store_true", help="show what would be probed, fetch nothing")
     p.set_defaults(func=cmd_dai_probe)
 
