@@ -5,7 +5,7 @@ requires-python = ">=3.12"
 [[package]]
 name = "adscrub"
 version = "0.6.0"
-source = { git = "https://github.com/sudolulo/adscrub.git?branch=main#d73c384fd4796bba06b71c57f53a1c4581807089" }
+source = { git = "https://github.com/sudolulo/adscrub.git?branch=main#f4f75266434c11a17df9cc9cc6ff170ba8c3ba03" }
 dependencies = [
     { name = "anthropic" },
     { name = "faster-whisper" },
