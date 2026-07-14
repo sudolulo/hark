@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-07-14
+
+### Added
+
+- **`hark repeats` — ad detection that costs nothing, and catches what the model missed.**
+  Wraps adscrub 0.6.0's new repeat tier (`adscrub.repeats`), which matches a transcript against
+  ad reads already confirmed elsewhere in *our own* corpus. Ads arrive in batches: the ad server
+  rotates a small pool of campaigns, and we download each episode once, server-side, from that
+  pool — so the same reads recur near-verbatim across episodes fetched in the same period.
+  Measured leave-one-out on the live corpus: **93.5% of confirmed ad segments are recoverable
+  from other episodes' confirmed ads**, with no model called. On the live database it finds
+  **958 ad spans across 339 episodes in 3.7 seconds — and 259 of those episodes had never been
+  seen by the LLM at all.** At the LLM tier's ~$0.23 an episode, that queue would have cost ~$60
+  to work through.
+  Per-episode via `adscrub.repeats.repeat_episode()`, mirroring how `detect-ads` uses
+  `detect_episode()`, so hark's per-show `ad_stripping_enabled` toggle actually takes effect.
+  Idempotent: re-scanning refreshes rather than duplicates, which matters because the library
+  grows — an episode scanned when ten ad reads were known deserves another look once a thousand
+  are. It never sets `llm_detected_at`: a free pass that never read the words must not retire an
+  episode from the model.
+  Wired into the deployed loop after `transcribe` (new transcripts to scan) and after the
+  `pending-ad-detections` load (the library just grew), but before `cut`, so what it finds is
+  actually removed from the audio.
+
+### Fixed
+
+- Picks up adscrub 0.6.0's fix for `ClaudeAdDetector` **truncating every transcript to its first
+  20,000 characters (~28% of an episode) and then marking the episode detected** — every mid-roll
+  and end-tag ad sat past that cliff, unseen, and the episode never came back. hark's `detect-ads`
+  inherits the chunked replacement. (hark's deployed pipeline uses the session-as-extractor
+  `load-ad-detections` path rather than `detect-ads`, so this was latent here — but it was one
+  `ANTHROPIC_API_KEY` away from silently under-detecting the entire corpus.)
+
 ## [0.17.5] - 2026-07-14
 
 ### Fixed
