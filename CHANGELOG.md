@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.1] - 2026-07-14
+
+### Fixed
+
+- **`hark dai-probe` now uses an independent client per fetch**, matching
+  adscrub 0.7.1's `probe_variance()` signature change (`client_factory`
+  instead of a shared `client`) — a single shared client's cookie jar was
+  silently defeating the whole comparison. See adscrub's own CHANGELOG for
+  the real-data example that caught it.
+
 ## [0.19.0] - 2026-07-14
 
 ### Added

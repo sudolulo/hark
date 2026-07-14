@@ -76,20 +76,20 @@ def test_select_sample_respects_total_limit(conn):
 # --- run_probe ---
 
 
-def client_returning(body_a: bytes, body_b: bytes) -> httpx.Client:
+def client_factory_returning(body_a: bytes, body_b: bytes):
     def handler(request):
         ua = request.headers.get("user-agent", "")
         body = body_a if ua == dai.USER_AGENTS[0] else body_b
         return httpx.Response(200, content=body)
 
-    return httpx.Client(transport=httpx.MockTransport(handler))
+    return lambda: httpx.Client(transport=httpx.MockTransport(handler))
 
 
 def test_run_probe_stores_a_diverged_result(conn):
     show = add_show(conn, "Show A", hosting_platform="acast.com")
     ep = add_episode(conn, show, "a1")
-    with client_returning(b"same start " * 10 + b"AAA", b"same start " * 10 + b"BBB") as client:
-        result = dai_probe.run_probe(client, conn, ep, "acast.com")
+    factory = client_factory_returning(b"same start " * 10 + b"AAA", b"same start " * 10 + b"BBB")
+    result = dai_probe.run_probe(factory, conn, ep, "acast.com")
 
     assert result.error is None
     assert result.result.diverged is True
@@ -104,8 +104,8 @@ def test_run_probe_stores_a_non_diverged_result(conn):
     show = add_show(conn, "Show A", hosting_platform="acast.com")
     ep = add_episode(conn, show, "a1")
     body = b"identical bytes " * 20
-    with client_returning(body, body) as client:
-        result = dai_probe.run_probe(client, conn, ep, "acast.com")
+    factory = client_factory_returning(body, body)
+    result = dai_probe.run_probe(factory, conn, ep, "acast.com")
 
     assert result.result.diverged is False
     row = conn.execute("SELECT * FROM dai_probes WHERE episode_id = ?", (ep["id"],)).fetchone()
@@ -120,8 +120,8 @@ def test_run_probe_records_an_attempt_on_fetch_failure(conn):
     def handler(request):
         return httpx.Response(404)
 
-    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        result = dai_probe.run_probe(client, conn, ep, "acast.com")
+    factory = lambda: httpx.Client(transport=httpx.MockTransport(handler))  # noqa: E731
+    result = dai_probe.run_probe(factory, conn, ep, "acast.com")
 
     assert result.error is not None
     row = conn.execute("SELECT * FROM dai_probes WHERE episode_id = ?", (ep["id"],)).fetchone()

@@ -779,20 +779,24 @@ def cmd_dai_probe(args: argparse.Namespace) -> int:
         return 1
 
     errors = 0
-    with httpx.Client(timeout=60.0, headers={"User-Agent": USER_AGENT}) as client:
-        for ep in sample:
-            r = dai_probe.run_probe(client, conn, ep, ep["hosting_platform"])
-            if r.error or r.result is None:  # run_probe sets exactly one of the two
-                errors += 1
-                print(f"  FAIL  [{r.platform}] {r.title}: {r.error}")
-            elif not r.result.diverged:
-                print(f"  same  [{r.platform}] {r.title}: no divergence in "
-                      f"{r.result.bytes_compared} bytes compared")
-            else:
-                reconv = (f", reconverges at byte {r.result.reconvergence_byte}"
-                          if r.result.reconverged else ", no reconvergence found")
-                print(f"  DIFF  [{r.platform}] {r.title}: diverges at byte "
-                      f"{r.result.divergence_byte}{reconv}")
+    # A fresh client per fetch, not one shared client for the whole run — see
+    # adscrub.dai's own docstring for why a shared client's cookie jar
+    # silently defeats the comparison. User-Agent is set per-fetch by
+    # probe_variance() itself, so no default is needed here.
+    client_factory = lambda: httpx.Client(timeout=60.0)  # noqa: E731
+    for ep in sample:
+        r = dai_probe.run_probe(client_factory, conn, ep, ep["hosting_platform"])
+        if r.error or r.result is None:  # run_probe sets exactly one of the two
+            errors += 1
+            print(f"  FAIL  [{r.platform}] {r.title}: {r.error}")
+        elif not r.result.diverged:
+            print(f"  same  [{r.platform}] {r.title}: no divergence in "
+                  f"{r.result.bytes_compared} bytes compared")
+        else:
+            reconv = (f", reconverges at byte {r.result.reconvergence_byte}"
+                      if r.result.reconverged else ", no reconvergence found")
+            print(f"  DIFF  [{r.platform}] {r.title}: diverges at byte "
+                  f"{r.result.divergence_byte}{reconv}")
     print(f"probed {len(sample) - errors} episode(s) ({errors} failed)")
 
     print()

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from typing import Callable
 
 import httpx
 from adscrub import dai
@@ -58,16 +59,21 @@ def select_sample(
 
 
 def run_probe(
-    client: httpx.Client, conn: sqlite3.Connection, episode: sqlite3.Row, platform: str | None
+    client_factory: Callable[[], httpx.Client],
+    conn: sqlite3.Connection,
+    episode: sqlite3.Row,
+    platform: str | None,
 ) -> ProbeResult:
     """Probe one episode and store the result (an attempt is always recorded,
     even a failure, so a broken/unreachable URL doesn't get retried forever).
     `platform` is passed explicitly rather than read off `episode` — a plain
     `episodes` row has no `hosting_platform` column, only a row joined against
     `shows` (like select_sample()'s) does, and this shouldn't assume its caller
-    used that join."""
+    used that join. `client_factory` is forwarded straight to
+    adscrub.dai.probe_variance() — see its own docstring for why each fetch
+    needs an independently-constructed client, not a shared one."""
     try:
-        result = dai.probe_variance(client, episode["audio_url"])
+        result = dai.probe_variance(client_factory, episode["audio_url"])
     except (httpx.HTTPError, OSError) as exc:
         conn.execute(
             "INSERT INTO dai_probes (episode_id, platform, tested_at, bytes_compared, diverged)"
