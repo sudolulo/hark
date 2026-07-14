@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.4] - 2026-07-14
+
+### Fixed
+
+- **Bumped the pinned `adscrub` commit to 0.5.1**, which fixes transcription
+  crashing on every episode with `RuntimeError: Library libcublas.so.12 is
+  not found or cannot be loaded` — the deployed `transcribe` container's
+  CUDA device was visible to `ctranslate2.get_cuda_device_count()` but its
+  runtime libraries weren't actually loadable, and there was no fallback.
+  `transcribe_episode()` now catches that and retries on CPU. See adscrub's
+  own CHANGELOG for the full fix; nothing changed in hark's own source here.
+
 ## [0.17.3] - 2026-07-14
 
 ### Fixed
