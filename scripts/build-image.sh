@@ -47,6 +47,14 @@ mkdir -p "$STAGE/adscrub"
 git -C "$ADSCRUB_DIR" archive HEAD | tar -x -C "$STAGE/adscrub"
 
 IMAGE="$REGISTRY_IMAGE:$TAG"
+if [ "$GPU" = "0" ]; then
+  # The deploy target reserves a GPU for the transcribe service, so a CPU-only image
+  # there does not fail — it quietly runs Whisper on ~4 CPU cores at roughly 10x the
+  # wall time (shipped by accident in 0.17.2-0.17.4; see CHANGELOG). Anything destined
+  # for the deploy wants --gpu.
+  echo "WARNING: building a CPU-only image (no --gpu). The deployed app passes a GPU" >&2
+  echo "         through, so this image will fall back to slow CPU transcription there." >&2
+fi
 echo "building $IMAGE (GPU=$GPU) from staged context $STAGE"
 docker build -f "$STAGE/hark/Dockerfile" --build-arg "GPU=$GPU" -t "$IMAGE" "$STAGE"
 

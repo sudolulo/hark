@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.5] - 2026-07-14
+
+### Fixed
+
+- **The deployed image is now built with the `gpu` extra, so transcription actually
+  runs on the GPU.** 0.17.2–0.17.4 were all built with the default `GPU=0`, which omits
+  the cuBLAS/cuDNN wheels — but the deployed app *does* reserve the RTX 2070 SUPER, so
+  the container could see the device without being able to use it. faster-whisper picked
+  CUDA, failed at first inference on the missing `libcublas.so.12`, and (as of adscrub
+  0.5.1) fell back to CPU int8: ~3.7 cores saturated continuously against a
+  27k-episode backlog while the GPU sat at 0% utilization. The release image is now
+  built via `scripts/build-image.sh --gpu`.
+- **Bumped the pinned `adscrub` commit to 0.5.2**, which makes that CPU fallback log
+  loudly instead of degrading in silence — the failure above was invisible in the logs
+  and only showed up as unexplained host CPU load.
+
 ## [0.17.4] - 2026-07-14
 
 ### Fixed
