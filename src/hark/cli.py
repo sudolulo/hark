@@ -383,10 +383,15 @@ def cmd_repeats(args: argparse.Namespace) -> int:
 def cmd_detect_ads(args: argparse.Namespace) -> int:
     conn = db.connect(args.db)
     enabled = _enabled_show_ids(conn)
-    pending = _filter_enabled(ad_detect.pending_episodes(conn), enabled, args.limit)
+    # Prioritized before the limit is applied, not after — the point is to spend
+    # whatever budget --limit allows on the episodes most likely to need it, not to
+    # reorder a batch that's already been cut down to size. See prioritize_pending's
+    # own docstring: this changes queue order only, never skips an episode outright.
+    all_pending = _filter_enabled(ad_detect.pending_episodes(conn), enabled)
+    ranked = ad_repeats.prioritize_pending(conn, all_pending, group_column="show_id")
+    pending = ranked[: args.limit]
     if args.dry_run:
-        total_pending = len(_filter_enabled(ad_detect.pending_episodes(conn), enabled))
-        print(f"pending episodes: {total_pending}"
+        print(f"pending episodes: {len(all_pending)}"
               + (f" (would process {len(pending)} this run)" if args.limit else ""))
         return 0
     if not pending:

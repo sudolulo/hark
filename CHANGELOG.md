@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-07-14
+
+### Changed
+
+- **`hark detect-ads` now processes its most-likely-incomplete episodes first.**
+  Wraps adscrub 0.6.1's `repeats.prioritize_pending()`: episodes where the repeat
+  tier's found ad-break count doesn't match the show's typical count are ranked
+  ahead of exact matches, so `--limit` spends whatever budget it's given on the
+  episodes most likely to actually need it. Not a skip — every pending episode
+  still reaches the model eventually, this only changes queue order. Shows without
+  enough `llm_detected_at` history to have a reliable typical count keep their
+  original order, appended after every episode that does have a signal.
+
 ## [0.18.0] - 2026-07-14
 
 ### Added
