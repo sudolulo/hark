@@ -30,6 +30,7 @@ import httpx
 from adscrub import chapters as ad_chapters
 from adscrub import cut as ad_cut
 from adscrub import detect as ad_detect
+from adscrub import repeats as ad_repeats
 from adscrub import transcribe as ad_transcribe
 
 from . import (
@@ -335,6 +336,48 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
     remaining = len(_filter_enabled(remaining_source, enabled))
     print(f"transcribed {ok} episode(s) ({errors} failed, {remaining} still pending)")
     return 1 if errors else 0
+
+
+def cmd_repeats(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db)
+    enabled = _enabled_show_ids(conn)
+    library = ad_repeats.build_library(conn)
+    if not library:
+        print("no confirmed ad spans yet — chapters or detect-ads has to go first",
+              file=sys.stderr)
+        return 1
+
+    episodes = _filter_enabled(
+        conn.execute(
+            "SELECT * FROM episodes WHERE transcript_path IS NOT NULL ORDER BY id"
+        ).fetchall(),
+        enabled,
+        args.limit,
+    )
+    if args.dry_run:
+        print(f"{len(episodes)} transcribed episode(s) scannable against "
+              f"{len(library):,} known ad shingles")
+        return 0
+
+    # Per-episode, like cmd_detect_ads, so the per-show ad_stripping_enabled filter above
+    # actually takes effect — adscrub's bulk apply_repeats() does its own episode query
+    # with no way to restrict it to a chosen set.
+    detector = ad_repeats.RepeatAdDetector(library)
+    found = hit = errors = 0
+    for ep in episodes:
+        try:
+            n = ad_repeats.repeat_episode(conn, ep, detector)
+        except Exception as exc:  # noqa: BLE001 — one bad transcript must not stop the sweep
+            conn.rollback()
+            errors += 1
+            print(f"  FAIL  {ep['title']}: {exc}", file=sys.stderr)
+            continue
+        if n:
+            hit += 1
+            found += n
+    print(f"matched {found} repeated ad span(s) across {hit} of {len(episodes)} episode(s) "
+          f"({errors} failed) — {len(library):,} known ad shingles, no model called")
+    return 0
 
 
 def cmd_detect_ads(args: argparse.Namespace) -> int:
@@ -955,6 +998,13 @@ def main(argv: list[str] | None = None) -> int:
                         "the priority subset claims comparison actually needs, instead "
                         "of every episode with audio (adscrub's default scope)")
     p.set_defaults(func=cmd_transcribe)
+
+    p = sub.add_parser("repeats",
+                       help="match transcripts against ad reads already confirmed elsewhere (free)")
+    p.add_argument("--limit", type=int,
+                   help="scan only the first N episodes by id — ad-hoc/testing only. There is no pending-queue (re-scanning is free and the library grows), so the pipeline runs this UNBOUNDED; a limit in a loop would rescan the same head forever and never reach the tail.")
+    p.add_argument("--dry-run", action="store_true", help="only report what would be scanned")
+    p.set_defaults(func=cmd_repeats)
 
     p = sub.add_parser("detect-ads", help="classify ad spans from transcripts with a Claude model")
     p.add_argument("--limit", type=int, help="max episodes to process this run")
