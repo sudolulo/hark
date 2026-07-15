@@ -341,7 +341,11 @@ def test_topic_page_shows_comparison_available_note(tmp_path):
         cookie = resp.getheader("Set-Cookie").split(";")[0]
         resp, body = request(srv, "GET", "/topic/1", cookie=cookie)
         assert resp.status == 200
-        assert "Cross-show claims comparison available" in body
+        # The comparison itself now renders in full directly on the topic
+        # page (it's topic-scoped data) rather than a note pointing at an
+        # episode page.
+        assert "fact" in body
+        assert 'id="comparison"' in body
         assert "not compared yet" not in body
     finally:
         srv.shutdown()
@@ -415,9 +419,13 @@ def test_notable_page_shows_both_sections(tmp_path):
     try:
         resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
         cookie = resp.getheader("Set-Cookie").split(";")[0]
-        resp, body = request(srv, "GET", "/notable", cookie=cookie)
+        # Contested and rare coverage are separate tabs now (three genuinely
+        # unrelated signals, not stacked on one page) — check each directly.
+        resp, body = request(srv, "GET", "/notable?tab=contested", cookie=cookie)
         assert resp.status == 200
         assert 'href=\'/topic/1\'>Contested Case</a>' in body
+        resp, body = request(srv, "GET", "/notable?tab=rare", cookie=cookie)
+        assert resp.status == 200
         assert 'href=\'/episode/1\'>Rare Episode</a>' in body
     finally:
         srv.shutdown()
@@ -427,9 +435,29 @@ def test_notable_page_handles_empty_state(server):
     cookie = login(server)
     resp, body = request(server, "GET", "/notable", cookie=cookie)
     assert resp.status == 200
-    assert "No claims comparisons loaded yet" in body
     assert "Nothing to recommend yet" in body
     assert "No listening history yet" in body
+    resp, body = request(server, "GET", "/notable?tab=contested", cookie=cookie)
+    assert "No claims comparisons loaded yet" in body
+
+
+def test_notable_page_tabs_default_and_active_state(server):
+    cookie = login(server)
+    resp, body = request(server, "GET", "/notable", cookie=cookie)
+    assert resp.status == 200
+    assert 'class="pill active" href="/notable?tab=recommended"' in body
+    assert "Recommended for you" in body
+    assert "<h2>Most contested</h2>" not in body  # other tabs aren't rendered
+
+    resp, body = request(server, "GET", "/notable?tab=rare", cookie=cookie)
+    assert 'class="pill active" href="/notable?tab=rare"' in body
+    assert "<h2>Rare coverage</h2>" in body
+    assert "<h2>Recommended for you</h2>" not in body
+
+    # An unrecognized tab value falls back to the default instead of 500ing.
+    resp, body = request(server, "GET", "/notable?tab=bogus", cookie=cookie)
+    assert resp.status == 200
+    assert "Recommended for you" in body
 
 
 def test_notable_page_shows_recommendations_and_genre_affinity(tmp_path):
@@ -579,6 +607,43 @@ def test_topic_with_no_co_occurrence_omits_related_topics_section(tmp_path):
         resp, body = request(srv, "GET", "/topic/1", cookie=cookie)
         assert resp.status == 200
         assert "Related topics" not in body
+    finally:
+        srv.shutdown()
+
+
+def test_topic_page_paginates_episodes(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('q', 'Big Show', 'http://x')")
+    conn.execute("INSERT INTO topics (label) VALUES ('Popular Case')")
+    conn.executemany(
+        "INSERT INTO episodes (show_id, guid, title, pubdate) VALUES (1, ?, ?, ?)",
+        [(f"g{i}", f"Episode {i}", f"2020-01-{i:02d}T00:00:00Z") for i in range(1, 61)],
+    )
+    conn.executemany(
+        "INSERT INTO episode_topics (episode_id, topic_id, source) VALUES (?, 1, 't')",
+        [(i,) for i in range(1, 61)],
+    )
+    conn.commit()
+    conn.close()
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
+        cookie = resp.getheader("Set-Cookie").split(";")[0]
+
+        resp, body = request(srv, "GET", "/topic/1", cookie=cookie)
+        assert resp.status == 200
+        assert "60 episodes" in body  # unpaginated total, not the page size
+        assert "1 show" in body  # distinct-show count is also unaffected by pagination
+        assert body.count("<tr><td>") == web.PAGE_SIZE
+        assert "page 1 of 2" in body
+
+        resp, body = request(srv, "GET", "/topic/1?page=2", cookie=cookie)
+        assert resp.status == 200
+        assert body.count("<tr><td>") == 10
+        assert "page 2 of 2" in body
     finally:
         srv.shutdown()
 
@@ -734,6 +799,37 @@ def test_search_no_matches_shows_specific_message(server):
     assert "Nothing here yet." not in body  # generic empty-db message must not leak in
 
 
+def test_search_paginates_episode_results(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('q', 'Show', 'http://x')")
+    conn.executemany(
+        "INSERT INTO episodes (show_id, guid, title, pubdate) VALUES (1, ?, ?, ?)",
+        [(f"g{i}", f"Widget Case {i}", f"2020-01-{i:02d}T00:00:00Z") for i in range(1, 61)],
+    )
+    conn.commit()
+    conn.close()
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
+        cookie = resp.getheader("Set-Cookie").split(";")[0]
+
+        resp, body = request(srv, "GET", "/search?q=Widget", cookie=cookie)
+        assert resp.status == 200
+        assert "60 episode title matches" in body
+        assert body.count("<tr><td>") == web.PAGE_SIZE
+        assert "page 1 of 2" in body
+
+        resp, body = request(srv, "GET", "/search?q=Widget&page=2", cookie=cookie)
+        assert resp.status == 200
+        assert body.count("<tr><td>") == 10
+        assert "page 2 of 2" in body
+    finally:
+        srv.shutdown()
+
+
 def test_home_page_view_all_topics_link(tmp_path):
     conn = db.connect(tmp_path / "hark.db")
     conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('q', 'Show', 'http://x')")
@@ -772,6 +868,30 @@ def test_show_page_shows_feed_url_and_adblock_toggle(server, tmp_path):
     assert f"http://localhost:8710/feed/1/{token}" in body
     assert "<strong>enabled</strong>" in body  # default
     assert "Disable ad-stripping" in body
+    assert 'id="feed-url"' in body and 'data-copy-target="feed-url"' in body
+
+
+def test_show_page_shows_aggregate_genre_pills(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('a', 'Show A', 'http://a')")
+    conn.execute("INSERT INTO topics (label) VALUES ('Case One')")
+    conn.execute("INSERT INTO topic_genres (topic_id, genre) VALUES (1, 'true_crime')")
+    conn.execute("INSERT INTO episodes (show_id, guid, title) VALUES (1, 'g1', 'Ep 1')")
+    conn.execute("INSERT INTO episode_topics (episode_id, topic_id, source) VALUES (1, 1, 't')")
+    conn.commit()
+    conn.close()
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
+        cookie = resp.getheader("Set-Cookie").split(";")[0]
+        resp, body = request(srv, "GET", "/show/1", cookie=cookie)
+        assert resp.status == 200
+        assert 'href="/topics?genre=true_crime">true_crime</a>' in body
+    finally:
+        srv.shutdown()
 
 
 def test_adblock_toggle_flips_state_and_redirects(server):
@@ -982,18 +1102,26 @@ def test_episode_page_renders_stored_comparison(tmp_path):
         resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
         cookie = resp.getheader("Set-Cookie").split(";")[0]
 
+        # The episode page shows the shared facts (still useful, topic-scoped
+        # context) plus *this episode's own* unique claims — not every other
+        # show's unique claims too, which is what the full comparison on the
+        # topic page (/topic/1#comparison) is for.
         resp, body = request(srv, "GET", "/episode/1", cookie=cookie)
         assert resp.status == 200
         assert "the body was never identified" in body
         assert "mentions the Rubaiyat code" in body
-        assert "Show A (this episode)" in body
-        # Show B had no unique claims (empty list) so it shouldn't render a heading
+        assert "Unique to this telling:" in body
+        assert "Unique to Show A" not in body  # no other-show heading by name
         assert "Unique to Show B" not in body
+        assert "/topic/1#comparison" not in body  # Show B has nothing else to point to
 
-        # from the other show's episode, the "(this episode)" tag follows *that* episode
+        # Show B's own episode has no unique claims of its own, and Show A
+        # has one — the pointer to the full comparison should appear here.
         resp, body = request(srv, "GET", "/episode/2", cookie=cookie)
-        assert "Show A (this episode)" not in body
-        assert "Unique to Show A:" in body
+        assert "Nothing unique to this telling." in body
+        assert "Unique to Show A:" not in body
+        assert "1 other show covered this too" in body
+        assert '/topic/1#comparison">see the full comparison</a>' in body
     finally:
         srv.shutdown()
 
@@ -1079,6 +1207,35 @@ def test_post_without_session_drains_body_no_keepalive_desync(server):
     assert resp2.status == 200
     assert resp2.read() == b"ok"
     conn.close()
+
+
+def test_account_page_shows_show_count_and_top_genres(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('a', 'Show A', 'http://a')")
+    conn.execute("INSERT INTO user_shows (user_id, show_id) VALUES (1, 1)")
+    conn.execute("INSERT INTO topics (id, label) VALUES (1, 'Engaged Case')")
+    conn.execute("INSERT INTO topic_genres (topic_id, genre) VALUES (1, 'true_crime')")
+    conn.execute("INSERT INTO episodes (show_id, guid, title) VALUES (1, 'g1', 'Ep 1')")
+    conn.execute("INSERT INTO episode_topics (episode_id, topic_id, source) VALUES (1, 1, 't')")
+    conn.execute(
+        "INSERT INTO listen_actions (user_id, podcast_url, episode_url, episode_guid, action, position, total)"
+        " VALUES (1, 'http://a', '', 'g1', 'play', 900, 1000)"
+    )
+    conn.commit()
+    conn.close()
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
+        cookie = resp.getheader("Set-Cookie").split(";")[0]
+        resp, body = request(srv, "GET", "/account", cookie=cookie)
+        assert resp.status == 200
+        assert 'href="/shows">1 show in your list</a>' in body
+        assert "true_crime" in body
+    finally:
+        srv.shutdown()
 
 
 def test_password_change_revokes_sessions_and_disables_token(server):
@@ -1544,6 +1701,47 @@ def test_shows_page_all_param_shows_everything(server, tmp_path):
     assert "not in my list" in body  # pill on the unsubscribed one
 
 
+def test_shows_page_paginates_and_inline_subscribe_returns_to_shows(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.executemany(
+        "INSERT INTO shows (query, title, feed_url) VALUES (?, ?, ?)",
+        [(f"q{i}", f"Show {i:02d}", f"http://x{i}") for i in range(1, 61)],
+    )
+    conn.commit()
+    conn.close()
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
+        cookie = resp.getheader("Set-Cookie").split(";")[0]
+
+        resp, body = request(srv, "GET", "/shows?all=1", cookie=cookie)
+        assert resp.status == 200
+        assert body.count("<tr><td>") == web.PAGE_SIZE
+        assert "page 1 of 2" in body
+        assert "action='/show/1/subscribe'" in body
+        assert 'name="next" value="/shows?all=1"' in body
+
+        # Subscribing inline from the list redirects back to the list, not
+        # off to the individual show page.
+        resp, _ = request(srv, "POST", "/show/1/subscribe", body={"next": "/shows?all=1"},
+                          cookie=cookie)
+        assert resp.status == 303
+        assert resp.getheader("Location") == "/shows?all=1"
+    finally:
+        srv.shutdown()
+
+
+def test_subscribe_rejects_open_redirect_next(server):
+    cookie = login(server)
+    resp, _ = request(server, "POST", "/show/1/unsubscribe", body={"next": "//evil.example/x"},
+                      cookie=cookie)
+    assert resp.status == 303
+    assert resp.getheader("Location") == "/show/1"  # falls back, doesn't honor the bad value
+
+
 def test_subscribe_adds_show_to_my_list(server, tmp_path):
     conn = db.connect(tmp_path / "hark.db")
     conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('r', 'Other Show', 'http://z')")
@@ -1787,6 +1985,28 @@ def test_admin_remove_user(server, tmp_path):
     assert "alice" not in body
 
 
+def test_admin_users_remove_requires_confirm_click(server, tmp_path):
+    web.Auth(tmp_path / "auth.db", admin_token="letmein").create_user("alice")
+    cookie = login(server)
+
+    # Default state: a link into the confirm step, not an immediate form.
+    resp, body = request(server, "GET", "/admin/users", cookie=cookie)
+    assert 'href="/admin/users?tab=accounts&confirm_remove=alice">Remove</a>' in body
+    assert 'action="/admin/users/remove"' not in body  # no bare remove form yet
+
+    # Clicking through to the confirm step shows the real form plus a cancel.
+    resp, body = request(server, "GET", "/admin/users?confirm_remove=alice", cookie=cookie)
+    assert "Remove alice?" in body
+    assert 'action="/admin/users/remove"' in body
+    assert 'href="/admin/users?tab=accounts">Cancel</a>' in body
+
+    # The actual removal still goes through the same POST endpoint as before.
+    resp, _ = request(server, "POST", "/admin/users/remove", body={"username": "alice"}, cookie=cookie)
+    assert resp.status == 303
+    resp, body = request(server, "GET", "/admin/users", cookie=cookie)
+    assert "alice" not in body
+
+
 def test_admin_cannot_remove_own_account(server):
     cookie = login(server)
     resp, body = request(server, "POST", "/admin/users/remove", body={"username": "admin"}, cookie=cookie)
@@ -1801,7 +2021,8 @@ def test_admin_can_set_base_url_override(server, tmp_path):
     resp, _ = request(server, "POST", "/admin/users/base-url",
                       body={"base_url": "https://hark.example.com"}, cookie=cookie)
     assert resp.status == 303
-    resp, body = request(server, "GET", "/admin/users", cookie=cookie)
+    assert resp.getheader("Location") == "/admin/users?tab=settings"
+    resp, body = request(server, "GET", "/admin/users?tab=settings", cookie=cookie)
     assert "https://hark.example.com" in body
     assert "admin override" in body
 
@@ -1842,9 +2063,10 @@ def test_admin_can_reset_base_url_to_default(server, tmp_path):
            body={"base_url": "https://hark.example.com"}, cookie=cookie)
     resp, _ = request(server, "POST", "/admin/users/base-url/reset", body={}, cookie=cookie)
     assert resp.status == 303
+    assert resp.getheader("Location") == "/admin/users?tab=settings"
     auth = web.Auth(tmp_path / "auth.db", admin_token="letmein")
     assert auth.get_setting("base_url") is None
-    resp, body = request(server, "GET", "/admin/users", cookie=cookie)
+    resp, body = request(server, "GET", "/admin/users?tab=settings", cookie=cookie)
     assert "default from --base-url" in body
 
 
@@ -1877,13 +2099,13 @@ def test_admin_users_page_shows_taddy_configuration_status(server, monkeypatch):
     monkeypatch.delenv("HARK_TADDY_USER_ID", raising=False)
     monkeypatch.delenv("HARK_TADDY_API_KEY", raising=False)
     cookie = login(server)
-    resp, body = request(server, "GET", "/admin/users", cookie=cookie)
+    resp, body = request(server, "GET", "/admin/users?tab=ratings", cookie=cookie)
     assert resp.status == 200
     assert "not configured" in body
 
     monkeypatch.setenv("HARK_TADDY_USER_ID", "test-user-id")
     monkeypatch.setenv("HARK_TADDY_API_KEY", "test-api-key")
-    resp, body = request(server, "GET", "/admin/users", cookie=cookie)
+    resp, body = request(server, "GET", "/admin/users?tab=ratings", cookie=cookie)
     assert "Taddy): <strong>configured</strong>" in body
 
 

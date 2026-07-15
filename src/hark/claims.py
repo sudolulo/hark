@@ -83,6 +83,12 @@ of well-chosen claims is more useful than an exhaustive list — aim for the
 class Comparison:
     shared: list[str] = field(default_factory=list)
     unique_by_show: dict[str, list[str]] = field(default_factory=dict)
+    # Populated by get_comparison() (stored columns, not part of what a
+    # Comparator produces) — optional so every existing construction site
+    # (NullComparator, tests, ClaudeComparator's own return value) stays
+    # valid without passing them.
+    generated_at: str | None = None
+    model: str | None = None
 
 
 class Comparator(Protocol):
@@ -399,10 +405,14 @@ def get_comparison(conn: sqlite3.Connection, topic_id: int) -> Comparison | None
     the table exists (e.g. `hark compare` has never been run yet)."""
     try:
         row = conn.execute(
-            "SELECT shared, unique_by_show FROM topic_comparisons WHERE topic_id = ?", (topic_id,)
+            "SELECT shared, unique_by_show, model, generated_at "
+            "FROM topic_comparisons WHERE topic_id = ?", (topic_id,)
         ).fetchone()
     except sqlite3.OperationalError:
         return None
     if row is None:
         return None
-    return Comparison(shared=json.loads(row["shared"]), unique_by_show=json.loads(row["unique_by_show"]))
+    return Comparison(
+        shared=json.loads(row["shared"]), unique_by_show=json.loads(row["unique_by_show"]),
+        model=row["model"], generated_at=row["generated_at"],
+    )

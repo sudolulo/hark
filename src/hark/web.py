@@ -67,6 +67,7 @@ from .queries import (  # noqa: F401 — re-exported for callers (cli.py, tests)
     topics_query,
 )
 from .templates import (  # noqa: F401 — re-exported for callers (cli.py, tests)
+    APP_JS,
     INVITE_INVALID_PAGE,
     INVITE_PAGE,
     LOGIN_PAGE,
@@ -84,6 +85,18 @@ from .templates import (  # noqa: F401 — re-exported for callers (cli.py, test
     topic_table,
 )
 from .views import COOKIE, App  # noqa: F401 — re-exported for callers (cli.py, tests)
+
+def _safe_next(value: str, default: str) -> str:
+    """Validate a same-origin-relative redirect target from a form's `next`
+    field (used by inline subscribe/unsubscribe buttons so they can return
+    to wherever they were clicked from, e.g. /shows, instead of always
+    landing on /show/<id>). Rejects anything that isn't a plain root-
+    relative path — an absolute URL or a protocol-relative `//host/...`
+    would otherwise be an open redirect."""
+    if value.startswith("/") and not value.startswith("//") and not value.startswith("/\\"):
+        return value
+    return default
+
 
 MAX_FORM_BYTES = 65536
 # AntennaPod batches episode-action uploads at 30 per request (its own
@@ -359,6 +372,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(200, "ok", "text/plain; charset=utf-8")
         if route == "/static/style.css":
             return self.respond(200, STYLE, "text/css; charset=utf-8")
+        if route == "/static/app.js":
+            return self.respond(200, APP_JS, "text/javascript; charset=utf-8")
         if route == "/login":
             return self.respond(200, page("login", LOGIN_PAGE.format(err="")))
         if route.startswith("/invite/"):
@@ -387,13 +402,13 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/topics":
                 return self.respond(200, app.view_topics(user, params))
             if route == "/notable":
-                return self.respond(200, app.view_notable(user))
+                return self.respond(200, app.view_notable(user, params))
             if route.startswith("/topic/"):
                 try:
                     topic_id = int(route.rsplit("/", 1)[1])
                 except ValueError:
                     return self.not_found(user)
-                body = app.view_topic(user, topic_id)
+                body = app.view_topic(user, topic_id, params)
                 if body is None:
                     return self.not_found(user)
                 return self.respond(200, body)
@@ -528,16 +543,16 @@ class Handler(BaseHTTPRequestHandler):
                 parsed = urllib.parse.urlsplit(value)
                 if parsed.scheme not in ("http", "https") or not parsed.netloc:
                     return self.respond(400, app.view_admin_users(
-                        user, {},
+                        user, {"tab": ["settings"]},
                         msg="Base URL must start with http:// or https:// and include a host.",
                     ))
                 app.auth.set_setting(BASE_URL_SETTING, value.rstrip("/"))
-                return self.redirect("/admin/users")
+                return self.redirect("/admin/users?tab=settings")
             if route == "/admin/users/base-url/reset":
                 if not user["is_admin"]:
                     return self.forbidden(user)
                 app.auth.clear_setting(BASE_URL_SETTING)
-                return self.redirect("/admin/users")
+                return self.redirect("/admin/users?tab=settings")
             if route == "/admin/users/rate-shows":
                 if not user["is_admin"]:
                     return self.forbidden(user)
@@ -547,7 +562,7 @@ class Handler(BaseHTTPRequestHandler):
                     msg += f"; ratings: {summary['ratings_ok']} ok, {summary['ratings_errors']} failed"
                 else:
                     msg += " — ratings skipped (Taddy credentials not configured)"
-                return self.respond(200, app.view_admin_users(user, {}, msg=msg))
+                return self.respond(200, app.view_admin_users(user, {"tab": ["ratings"]}, msg=msg))
             if route.startswith("/show/") and route.endswith("/adblock"):
                 if not user["is_admin"]:
                     return self.forbidden(user)
@@ -578,14 +593,14 @@ class Handler(BaseHTTPRequestHandler):
                     return self.not_found(user)
                 if result is False:
                     return self.redirect(f"/show/{show_id}?err=quota")
-                return self.redirect(f"/show/{show_id}")
+                return self.redirect(_safe_next(form.get("next", ""), f"/show/{show_id}"))
             if route.startswith("/show/") and route.endswith("/unsubscribe"):
                 try:
                     show_id = int(route.removeprefix("/show/").removesuffix("/unsubscribe"))
                 except ValueError:
                     return self.not_found(user)
                 app.unsubscribe(user["id"], show_id)
-                return self.redirect(f"/show/{show_id}")
+                return self.redirect(_safe_next(form.get("next", ""), f"/show/{show_id}"))
         except sqlite3.OperationalError:
             return self.db_unavailable(user)
         return self.not_found(user)

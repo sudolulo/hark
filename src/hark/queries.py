@@ -19,7 +19,17 @@ def _topics_filter(genre: str, q: str) -> tuple[str, list]:
     return "", []
 
 
-def topics_query(genre: str = "", q: str = "", limit: int | None = None,
+# Whitelisted sort keys only — never interpolate the raw `sort` query param
+# into SQL. Each maps to a full ORDER BY clause; "shows" is the original
+# (and still default) ordering.
+_SORT_CLAUSES = {
+    "shows": "shows DESC, episodes DESC, t.label",
+    "episodes": "episodes DESC, shows DESC, t.label",
+    "label": "t.label",
+}
+
+
+def topics_query(genre: str = "", q: str = "", sort: str = "shows", limit: int | None = None,
                   offset: int = 0) -> tuple[str, tuple]:
     """Build the shared topic-listing query: base coverage stats, optionally
     filtered by genre or a label/QID search term, optionally paginated."""
@@ -34,7 +44,8 @@ def topics_query(genre: str = "", q: str = "", limit: int | None = None,
         LEFT JOIN topic_genres tg ON tg.topic_id = t.id
     """
     where, params = _topics_filter(genre, q)
-    sql += where + " GROUP BY t.id ORDER BY shows DESC, episodes DESC, t.label"
+    order = _SORT_CLAUSES.get(sort, _SORT_CLAUSES["shows"])
+    sql += where + f" GROUP BY t.id ORDER BY {order}"
     # is not None, not a truthy check: limit=0 must mean "zero rows" (SQL's
     # own LIMIT 0 semantics), not "no limit" — reachable via `hark topics
     # --limit 0`, the same falsy-zero class of bug already fixed in

@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-07-15
+
+### Added
+
+- **UI overhaul: navigation, pagination, and information-architecture pass
+  across the whole dashboard** — no visual re-skin (the dark-serif theme
+  stays), but every page got a consistency pass driven by a fresh read of
+  every view plus the real screenshots in `docs/screenshots/`.
+  - Breadcrumbs (`home / shows / <show> / <episode>`, etc.) and an active
+    top-nav state on every page, so deep pages have a structural way back.
+  - Consistent pagination: `/topic/<id>`'s episode table, `/shows`, and
+    `/search`'s episode results were all unbounded or hard-capped before —
+    now paginated at the same `PAGE_SIZE` as everywhere else.
+  - **Claims comparisons are now topic-primary.** `/topic/<id>` renders the
+    full shared/unique-claims comparison directly (it's topic-scoped data,
+    identical regardless of which episode you arrived from) instead of
+    pointing at "see each episode's page" with no link. `/episode/<id>`
+    keeps a trimmed, episode-scoped view — this episode's own unique claims
+    plus a link to the full comparison — instead of repeating every other
+    show's claims on every single episode of a well-covered topic.
+    `topic_comparisons.generated_at`/`model` are surfaced ("compared 3d
+    ago") for the first time.
+  - `/notable` and `/admin/users` each split three unrelated stacked
+    sections into tabs (`?tab=`) — recommendations/contested/rare on one,
+    accounts/settings/ratings on the other.
+  - Small usability fixes: active/selected state on filter pills, a copy
+    button (new `/static/app.js`, same-origin so the existing strict CSP
+    needs no change) on the ad-stripped feed URL and invite links, inline
+    subscribe/unsubscribe from `/shows`, a two-step confirm on removing a
+    user account, a sort control on `/topics`, aggregate genre pills and a
+    combined two-column settings row on `/show/<id>`, and a subscribed-
+    show-count/top-genres summary on `/account`.
+
 ## [0.19.3] - 2026-07-14
 
 ### Fixed
