@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-07-23
+
+### Changed
+
+- **`detect-ads` now reads the fewest episodes covering every unread CAMPAIGN, not every unread
+  episode.** `pending_episodes` counts every transcribed episode the model hasn't read — a
+  definition written before there was any way to tell which were worth reading. On this corpus
+  that manufactured a **1,262-episode backlog** whose estimated cost was ~$132 and whose data
+  would have been largely redundant: twelve episodes carrying one sponsor read are one thing to
+  learn, and the fingerprint tier recognises the other eleven for free once any is confirmed.
+  It is also measurably lossy — 62% of episodes had a provably-missed ad in adscrub's own
+  validation.
+  - The queue is now adscrub 0.9.0's greedy set cover over unread campaigns. It shrinks as
+    campaigns are confirmed and grows only when a genuinely new one appears. Measured on 40
+    Casual Criminalist episodes: **11 campaigns, 7 episodes to read.**
+  - **Nothing is marked processed and no episode is retired.** An episode that isn't selected
+    simply isn't needed yet — setting `llm_detected_at` without reading would be the adscrub
+    0.6.0 bug (a cost guard laundering an unread episode as a finished one) chosen on purpose.
+  - `--all-pending` restores the episode-wise sweep. With too little downloaded audio for
+    self-recurrence to say anything, it falls back to that sweep automatically rather than
+    silently reading nothing.
+
+
 ## [0.21.0] - 2026-07-23
 
 ### Added
