@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-07-23
+
+### Added
+
+- **`hark fingerprint`** — matches episode AUDIO against ad recordings already confirmed in
+  this corpus (adscrub 0.8.0's fingerprint tier). It costs no tokens and needs no transcript,
+  so it runs while the Claude-driven pipeline stays disabled. Verified against a read-only
+  snapshot of the live database: **337 ad spans across 82 of 82 episodes, 0 failures, no model
+  called.**
+- **`hark discover-ads --show <id>`** — cold start for one show, finding ads by matching that
+  show's episodes against each other, with no confirmed ads to seed from. Scoped to a single
+  show deliberately: recurrence is measured against whatever set it is given, and this database
+  holds ~70 unrelated feeds that share no ad pool. Its `recur` spans are inference and are not
+  cut by default.
+- Both commands go per-episode rather than through adscrub's bulk helpers, so the per-show
+  `ad_stripping_enabled` toggle actually applies — the same reason `repeats` does.
+
+### Fixed
+
+- **`libchromaprint-tools` (fpcalc) added to the image.** Without it the two commands above are
+  not broken but inert: they exit tidily and silently match nothing, behind a container that
+  looks healthy.
+- **`_PrecomputedDetector` accepts the `skip` argument** that `AdSpanDetector.detect` grew in
+  adscrub 0.8.0. `LayeredDetector` passes it positionally, so without this every
+  `load-ad-detections` record failed with a `TypeError`.
+
+### Changed
+
+- adscrub pinned 0.7.2 -> 0.8.0.
+
 ## [0.20.0] - 2026-07-15
 
 ### Added
