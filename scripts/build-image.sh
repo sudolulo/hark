@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Builds hark's Docker image against a multi-repo context: hark depends on
-# adscrub as a local path dependency (../adscrub, editable — see
-# pyproject.toml [tool.uv.sources]), which a plain `docker build .` run from
-# this repo alone can't resolve (the build context wouldn't contain adscrub's
-# source at all). This script stages git-archive-clean copies of both repos
-# (tracked files only — no .venv/, hark.db/data/, .git/) side by side and
-# builds against that staging directory instead.
+# Builds hark's Docker image against a multi-repo context, staging git-archive-clean copies
+# of hark and adscrub (tracked files only — no .venv/, hark.db/data/, .git/) side by side and
+# building against that staging directory.
+#
+# hark's adscrub dependency became a GIT source on 2026-07-13 (pinned commit in uv.lock, see
+# pyproject.toml [tool.uv.sources]) — it was a local `../adscrub` path dependency before that,
+# which is what originally forced this staging. The staging is still what lets you build an
+# image from UNCOMMITTED local adscrub work: point ADSCRUB_DIR at a checkout and it is copied
+# in, rather than the build fetching whatever the pinned commit happens to be from GitHub.
 #
 # Usage:
 #   scripts/build-image.sh [TAG] [--gpu]
