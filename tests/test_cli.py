@@ -324,7 +324,7 @@ def test_detect_ads_dry_run_reports_pending(tmp_path, capsys):
 
     rc = cli.main(["--db", str(path), "detect-ads", "--dry-run"])
     assert rc == 0
-    assert "pending episodes: 1" in capsys.readouterr().out
+    assert "1 pending episode(s)" in capsys.readouterr().out
 
 
 def test_detect_ads_success_path_calls_adscrub_directly(tmp_path, capsys, monkeypatch):
@@ -409,7 +409,7 @@ def test_detect_ads_skips_disabled_shows(tmp_path, capsys):
 
     rc = cli.main(["--db", str(path), "detect-ads", "--dry-run"])
     assert rc == 0
-    assert "pending episodes: 0" in capsys.readouterr().out
+    assert "0 pending episode(s)" in capsys.readouterr().out
 
 
 def test_load_ad_detections_stores_and_marks_processed(tmp_path, capsys):

@@ -477,16 +477,43 @@ def cmd_discover_ads(args: argparse.Namespace) -> int:
 def cmd_detect_ads(args: argparse.Namespace) -> int:
     conn = db.connect(args.db)
     enabled = _enabled_show_ids(conn)
-    # Prioritized before the limit is applied, not after — the point is to spend
-    # whatever budget --limit allows on the episodes most likely to need it, not to
-    # reorder a batch that's already been cut down to size. See prioritize_pending's
-    # own docstring: this changes queue order only, never skips an episode outright.
     all_pending = _filter_enabled(ad_detect.pending_episodes(conn), enabled)
-    ranked = ad_repeats.prioritize_pending(conn, all_pending, group_column="show_id")
-    pending = ranked[: args.limit]
+
+    # WHAT IS ACTUALLY OWED IS CAMPAIGNS, NOT EPISODES.
+    #
+    # `pending_episodes` counts every transcribed episode the model has not read — a definition
+    # written before there was any way to tell which of them were worth reading. It is what
+    # manufactures a 1,262-episode "backlog" on this corpus, and reading it would be both
+    # expensive and largely redundant: twelve episodes carrying one sponsor read are one thing
+    # to learn, not twelve, and the fingerprint tier recognises the other eleven for free once
+    # any one of them is confirmed.
+    #
+    # So the default queue is now the set-cover over UNREAD campaigns: the fewest episodes that
+    # confirm every ad recording the library does not already know. It shrinks as campaigns are
+    # confirmed and grows only when a genuinely new one appears. `--all-pending` restores the
+    # old episode-wise sweep. Nothing is marked processed and no episode is retired — an episode
+    # not selected simply is not needed yet.
+    seeds = []
+    if not args.all_pending and all_pending:
+        seeds = ad_fingerprint.select_seed_episodes(
+            conn, episode_ids=sorted(e["id"] for e in all_pending), limit=args.limit)
+
+    if seeds:
+        by_id = {e["id"]: e for e in all_pending}
+        pending = [by_id[eid] for eid, _ in seeds if eid in by_id]
+        scope = (f"{len(seeds)} episode(s) covering every unread campaign "
+                 f"(of {len(all_pending)} unread episodes)")
+    else:
+        # No campaigns to cover — either --all-pending, or the corpus has too little downloaded
+        # audio for self-recurrence to say anything (see fingerprint.RECUR_MIN_EPISODES). Fall
+        # back to the episode-wise sweep rather than silently doing nothing: without audio there
+        # is no cheaper option, and reading nothing would leave ads in the feed.
+        ranked = ad_repeats.prioritize_pending(conn, all_pending, group_column="show_id")
+        pending = ranked[: args.limit]
+        scope = f"{len(all_pending)} pending episode(s) (no campaign data — episode-wise)"
+
     if args.dry_run:
-        print(f"pending episodes: {len(all_pending)}"
-              + (f" (would process {len(pending)} this run)" if args.limit else ""))
+        print(f"to read: {scope}")
         return 0
     if not pending:
         print("no episodes pending ad-span detection (from an ad-stripping-enabled show)",
@@ -1186,6 +1213,11 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(func=cmd_discover_ads)
 
     p = sub.add_parser("detect-ads", help="classify ad spans from transcripts with a Claude model")
+    p.add_argument("--all-pending", action="store_true",
+                   help="read every unread episode instead of the fewest episodes covering all "
+                        "unread campaigns. The default is campaign set-cover: reading one episode "
+                        "of a campaign teaches the library the rest, so an episode-wise sweep "
+                        "mostly re-reads what fingerprinting already recognises for free.")
     p.add_argument("--limit", type=int, help="max episodes to process this run")
     p.add_argument("--model", default=os.environ.get("HARK_AD_MODEL", ad_detect.DEFAULT_MODEL),
                    help=f"Claude model id (default: $HARK_AD_MODEL or {ad_detect.DEFAULT_MODEL})")
