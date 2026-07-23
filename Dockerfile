@@ -99,7 +99,11 @@ RUN if [ "$GPU" = "1" ]; then \
 # matches TrueNAS SCALE's standard "apps" account, so files land owned by
 # the same user/group as every other app on that host; harmless elsewhere.
 # ffmpeg is for adscrub's cut.py, called as a library (see cli.py).
-RUN apt-get update && apt-get install -y --no-install-recommends gosu ffmpeg \
+# libchromaprint-tools provides fpcalc, which adscrub's fingerprint tier shells out to for
+# `hark fingerprint`/`discover-ads`. Without it those commands are not broken but INERT:
+# fpcalc_available() returns False, the command exits with a tidy message, and a
+# healthy-looking container silently never matches an ad.
+RUN apt-get update && apt-get install -y --no-install-recommends gosu ffmpeg libchromaprint-tools \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 568 hark \
     && useradd --system --uid 568 --gid 568 --no-create-home hark
