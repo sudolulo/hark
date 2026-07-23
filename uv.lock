@@ -4,8 +4,8 @@ requires-python = ">=3.12"
 
 [[package]]
 name = "adscrub"
-version = "0.9.0"
-source = { git = "https://github.com/sudolulo/adscrub.git?branch=main#34a54eaf85874e020a94c04a9d5b15e9ce690cb0" }
+version = "0.11.0"
+source = { git = "https://github.com/sudolulo/adscrub.git?branch=main#c2a22fd29a8766c6db3bcd0cd01ab4a98d388c1b" }
 dependencies = [
     { name = "anthropic" },
     { name = "faster-whisper" },
@@ -242,7 +242,7 @@ wheels = [
 
 [[package]]
 name = "hark"
-version = "0.22.0"
+version = "0.23.0"
 source = { editable = "." }
 dependencies = [
     { name = "adscrub" },

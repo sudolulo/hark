@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-07-23
+
+### Added
+
+- **`hark seeds` — the subscription path's twin of `detect-ads`.** Emits the transcripts worth
+  reading to confirm every unread ad campaign, for a Claude Code session to read and hand back
+  through `load-ad-detections`. Both commands answer "what is worth reading?" with the same
+  campaign set cover; they differ only in who reads. No API key required.
+  - Segments are rendered with adscrub's OWN chunk renderer rather than a hark-side copy, so
+    the `[n]` indices a reader points at are exactly the ones `spans_from_segment_indices`
+    grounds against on the way back in. Regions an earlier tier already covered are omitted,
+    for the same reason the API path omits them.
+  - Verified end to end on 40 real episodes **with zero audio files on disk** (cached
+    fingerprints only): emitted 2 episodes covering 5 campaigns, read one, loaded 3 spans, and
+    watched that episode and its campaigns drop out of the next selection.
+
+### Fixed
+
+- **`fingerprint` no longer downloads audio it wasn't asked to.** It selected every episode
+  with an `audio_url` (~27,865 here) and adscrub's `fingerprint_episode` downloads what isn't
+  cached — an unguarded sweep would have pulled terabytes from podcast CDNs. Now local-audio
+  only, with `--download` to opt in.
+
+
 ## [0.22.0] - 2026-07-23
 
 ### Changed
