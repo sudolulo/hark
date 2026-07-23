@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-07-23
+
+### Changed
+
+- adscrub pinned 0.11.0 -> 0.12.0: `fpmatch` spans are now corroborated against the transcript
+  where one exists, removing music-bed and room-tone matches at zero measured recall cost.
+
+### Added
+
+- Tests for `seeds` — the one command added without them. Covers that only selected episodes are
+  emitted, that covered regions are omitted while indices stay GLOBAL across the omission, that
+  the hand-back contract is printed, and that an empty selection exits non-zero.
+
+
 ## [0.23.0] - 2026-07-23
 
 ### Added

@@ -1113,3 +1113,67 @@ def test_rate_shows_passes_limit_to_both_steps(tmp_path, monkeypatch):
     monkeypatch.setattr(ratings, "refresh_ratings", fake_refresh)
     cli.main(["--db", str(tmp_path / "t.db"), "rate-shows", "--limit", "5"])
     assert seen == {"backfill_limit": 5, "refresh_limit": 5}
+
+
+def _seeds_corpus(tmp_path, n_segments=6):
+    """One show, one unread episode with a transcript."""
+    path = tmp_path / "t.db"
+    tp = tmp_path / "t.json"
+    tp.write_text(json.dumps(
+        [{"start": float(i), "end": float(i + 1), "text": f"segment {i}"} for i in range(n_segments)]
+    ))
+    conn = db.connect(path)
+    conn.execute("INSERT INTO shows (query, ad_stripping_enabled) VALUES ('Show A', 1)")
+    conn.execute("INSERT INTO episodes (show_id, guid, title, transcript_path) "
+                 "VALUES (1, 'g1', 'Ep One', ?)", (str(tp),))
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_seeds_emits_only_the_selected_episodes(tmp_path, capsys, monkeypatch):
+    path = _seeds_corpus(tmp_path)
+    monkeypatch.setattr(cli.ad_fingerprint, "select_seed_episodes",
+                        lambda conn, **kw: [(1, 3)])
+    assert cli.main(["--db", str(path), "seeds"]) == 0
+    out = capsys.readouterr().out
+    assert "# episode_id=1  covers 3 unread campaign(s)" in out
+    assert "load-ad-detections" in out, "must state how to hand results back"
+    for i in range(6):
+        assert f"[{i}] " in out, "every segment should be offered to the reader"
+
+
+def test_seeds_omits_regions_a_cheaper_tier_already_covered(tmp_path, capsys, monkeypatch):
+    """Same reasoning as the API path: nobody should be paid to re-read covered regions."""
+    path = _seeds_corpus(tmp_path)
+    conn = db.connect(path)
+    conn.execute("INSERT INTO ad_segments (episode_id, start_second, end_second, source) "
+                 "VALUES (1, 0.0, 3.0, 'fpmatch')")
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(cli.ad_fingerprint, "select_seed_episodes",
+                        lambda conn, **kw: [(1, 1)])
+    assert cli.main(["--db", str(path), "seeds"]) == 0
+    out = capsys.readouterr().out
+    assert "already identified as ads, omitted" in out
+    for i in (0, 1, 2):
+        assert f"[{i}] " not in out
+    for i in (3, 4, 5):
+        assert f"[{i}] " in out, "indices must stay GLOBAL across the omission"
+
+
+def test_seeds_reports_when_there_is_nothing_worth_reading(tmp_path, capsys, monkeypatch):
+    path = _seeds_corpus(tmp_path)
+    monkeypatch.setattr(cli.ad_fingerprint, "select_seed_episodes", lambda conn, **kw: [])
+    assert cli.main(["--db", str(path), "seeds"]) == 1
+    assert "no unread campaigns" in capsys.readouterr().err
+
+
+def test_seeds_writes_to_a_file(tmp_path, monkeypatch):
+    path = _seeds_corpus(tmp_path)
+    out_file = tmp_path / "drop.txt"
+    monkeypatch.setattr(cli.ad_fingerprint, "select_seed_episodes",
+                        lambda conn, **kw: [(1, 2)])
+    assert cli.main(["--db", str(path), "seeds", "--out", str(out_file)]) == 0
+    body = out_file.read_text()
+    assert "# episode_id=1" in body and "[0] " in body
