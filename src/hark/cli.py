@@ -404,13 +404,17 @@ def cmd_fingerprint(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 1
 
-    episodes = _filter_enabled(
-        conn.execute(
-            "SELECT * FROM episodes WHERE audio_url IS NOT NULL ORDER BY id"
-        ).fetchall(),
-        enabled,
-        args.limit,
-    )
+    # LOCAL AUDIO ONLY, unless asked otherwise. adscrub's fingerprint_episode downloads an
+    # episode whose audio isn't cached — correct for adscrub standalone, catastrophic here:
+    # this corpus has ~27,800 episodes with an audio_url and only ~1,300 downloaded, so an
+    # unguarded sweep would pull terabytes from podcast CDNs and fill the pool. hark manages
+    # audio deliberately (transcribe downloads what it needs), so the default is to fingerprint
+    # what is already on disk and leave acquisition to the tier that owns it.
+    audio_dir = Path(os.environ.get("ADSCRUB_DATA_DIR", "data")) / "audio"
+    rows = conn.execute("SELECT * FROM episodes WHERE audio_url IS NOT NULL ORDER BY id").fetchall()
+    if not args.download:
+        rows = [r for r in rows if (audio_dir / f"{r['id']}.mp3").exists()]
+    episodes = _filter_enabled(rows, enabled, args.limit)
     if args.dry_run:
         print(f"{len(episodes)} episode(s) scannable against a library of "
               f"{library.n_episodes} source episode(s)")
@@ -597,6 +601,68 @@ class _PrecomputedDetector:
             # missing/out-of-range indices the same way, this just extends
             # that tolerance to a shape it can't itself introspect.
         return ad_detect.spans_from_segment_indices(transcript, normalized)
+
+
+def cmd_seeds(args: argparse.Namespace) -> int:
+    """Emit the transcripts a reader must see to confirm every unread campaign.
+
+    This is the subscription-path twin of `detect-ads`. Both answer "what is worth reading?"
+    with the same campaign set cover; they differ only in who does the reading — the API path
+    calls a model from inside the container, this one hands the material to a Claude Code
+    session, which writes the result back through `load-ad-detections`.
+
+    Segments are rendered with adscrub's OWN chunk renderer rather than a hark-side copy, so
+    the indices a reader points at are the exact indices `spans_from_segment_indices` will
+    ground against on the way back in. Regions an earlier tier already covered are omitted,
+    for the same reason the API path omits them: nobody should be paid to re-read them.
+    """
+    import json
+
+    conn = db.connect(args.db)
+    enabled = _enabled_show_ids(conn)
+    all_pending = _filter_enabled(ad_detect.pending_episodes(conn), enabled)
+    if not all_pending:
+        print("nothing unread on an ad-stripping-enabled show", file=sys.stderr)
+        return 1
+    seeds = ad_fingerprint.select_seed_episodes(
+        conn, episode_ids=sorted(e["id"] for e in all_pending), limit=args.limit)
+    if not seeds:
+        print("no unread campaigns — every recording found is already confirmed, or there is "
+              "too little downloaded audio for self-recurrence to say anything", file=sys.stderr)
+        return 1
+
+    by_id = {e["id"]: e for e in all_pending}
+    out = open(args.out, "w", encoding="utf-8") if args.out else sys.stdout
+    try:
+        print(f"# {len(seeds)} episode(s) to read — chosen to cover every unread ad campaign.",
+              file=out)
+        print("# For each, identify contiguous runs of segments that are advertising, not"
+              " editorial.", file=out)
+        print("# Write one JSON object per line to the drop file, then run"
+              " `hark load-ad-detections <file>`:", file=out)
+        print('#   {"episode_id": N, "ad_spans": [{"start_segment": i, "end_segment": j,'
+              ' "reason": "..."}]}', file=out)
+        print("# Indices are the [n] markers below and are GLOBAL — an omitted run is noted"
+              " inline.", file=out)
+        for eid, covers in seeds:
+            row = by_id[eid]
+            try:
+                with open(row["transcript_path"], encoding="utf-8") as fh:
+                    tx = json.load(fh)
+            except (OSError, json.JSONDecodeError) as exc:
+                print(f"  (skipped episode {eid}: {exc})", file=sys.stderr)
+                continue
+            segs = tx["segments"] if isinstance(tx, dict) else tx
+            skip = ad_detect.covered_segment_indices(conn, eid, segs)
+            print(f"\n{'=' * 70}\n# episode_id={eid}  covers {covers} unread campaign(s)"
+                  f"\n# {row['title'] or ''}\n{'=' * 70}", file=out)
+            for chunk in ad_detect._chunks(segs, skip):
+                print(chunk, file=out)
+    finally:
+        if args.out:
+            out.close()
+            print(f"wrote {len(seeds)} episode(s) to {args.out}", file=sys.stderr)
+    return 0
 
 
 def cmd_load_ad_detections(args: argparse.Namespace) -> int:
@@ -1202,6 +1268,11 @@ def main(argv: list[str] | None = None) -> int:
         "fingerprint",
         help="match episode audio against known ad recordings (free, no transcript or model)")
     p.add_argument("--limit", type=int, help="max episodes to scan this run")
+    p.add_argument("--download", action="store_true",
+                   help="also fingerprint episodes whose audio is not on disk yet, downloading "
+                        "it first. OFF by default: this corpus has ~27,800 episodes with an "
+                        "audio_url and only ~1,300 downloaded, so an unguarded sweep would pull "
+                        "terabytes from podcast CDNs.")
     p.add_argument("--dry-run", action="store_true", help="only report how many are scannable")
     p.set_defaults(func=cmd_fingerprint)
 
@@ -1224,6 +1295,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true",
                    help="only report how many episodes are pending")
     p.set_defaults(func=cmd_detect_ads)
+
+    p = sub.add_parser(
+        "seeds",
+        help="emit the transcripts worth reading to confirm every unread ad campaign "
+             "(subscription path: read these, then load-ad-detections the result)",
+    )
+    p.add_argument("--limit", type=int, help="max episodes to emit")
+    p.add_argument("--out", help="write to a file instead of stdout")
+    p.set_defaults(func=cmd_seeds)
 
     p = sub.add_parser(
         "load-ad-detections",
