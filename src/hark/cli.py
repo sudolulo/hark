@@ -30,6 +30,7 @@ import httpx
 from adscrub import chapters as ad_chapters
 from adscrub import cut as ad_cut
 from adscrub import detect as ad_detect
+from adscrub import fingerprint as ad_fingerprint
 from adscrub import repeats as ad_repeats
 from adscrub import transcribe as ad_transcribe
 
@@ -380,6 +381,99 @@ def cmd_repeats(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_fingerprint(args: argparse.Namespace) -> int:
+    """Match episode AUDIO against ad recordings already confirmed in this corpus.
+
+    Costs no tokens and needs no transcript, so unlike detect-ads it can run while hark's
+    Claude-driven pipeline stays disabled.
+    """
+    conn = db.connect(args.db)
+    if not ad_fingerprint.fpcalc_available():
+        print("fpcalc (Chromaprint / libchromaprint-tools) is not installed", file=sys.stderr)
+        return 1
+    enabled = _enabled_show_ids(conn)
+
+    def progress(n: int, total: int) -> None:
+        if n == 1 or n % 50 == 0 or n == total:
+            print(f"  ..    building library: fingerprinted {n}/{total} confirmed ad read(s)",
+                  file=sys.stderr)
+
+    library = ad_fingerprint.build_library(conn, on_progress=progress)
+    if not library:
+        print("no confirmed ad recordings yet — chapters or detect-ads has to go first",
+              file=sys.stderr)
+        return 1
+
+    episodes = _filter_enabled(
+        conn.execute(
+            "SELECT * FROM episodes WHERE audio_url IS NOT NULL ORDER BY id"
+        ).fetchall(),
+        enabled,
+        args.limit,
+    )
+    if args.dry_run:
+        print(f"{len(episodes)} episode(s) scannable against a library of "
+              f"{library.n_episodes} source episode(s)")
+        return 0
+
+    # Per-episode rather than adscrub's bulk apply_fingerprints(), for the same reason as
+    # cmd_repeats: the bulk helper runs its own episode query with no way to restrict it to
+    # the ad-stripping-enabled shows selected above.
+    detector = ad_fingerprint.AudioFingerprintDetector(library)
+    found = hit = errors = 0
+    with make_client() as client:
+        for ep in episodes:
+            try:
+                n = ad_fingerprint.fingerprint_episode(conn, ep, detector, client)
+            except Exception as exc:  # noqa: BLE001 — one bad episode must not stop the sweep
+                conn.rollback()
+                errors += 1
+                print(f"  FAIL  {ep['title'] or ''}: {exc}", file=sys.stderr)
+                continue
+            if n:
+                hit += 1
+                found += n
+                print(f"  ok    {ep['title'] or ''}: {n} fingerprinted ad span(s)")
+    print(f"matched {found} ad span(s) across {hit} of {len(episodes)} episode(s) "
+          f"({errors} failed) — no transcript, no model")
+    return 0
+
+
+def cmd_discover_ads(args: argparse.Namespace) -> int:
+    """Cold start for ONE show: find its ads by matching its episodes against each other.
+
+    Scoped to a single show on purpose. Recurrence is measured against whatever set it is
+    given, and hark holds ~70 unrelated feeds in one database — pooling them would build one
+    enormous index and compute the stop-list over a corpus that shares no ad pool.
+    """
+    conn = db.connect(args.db)
+    if not ad_fingerprint.fpcalc_available():
+        print("fpcalc (Chromaprint / libchromaprint-tools) is not installed", file=sys.stderr)
+        return 1
+    ids = [r["id"] for r in conn.execute(
+        "SELECT id FROM episodes WHERE show_id = ? AND audio_url IS NOT NULL", (args.show,))]
+    if len(ids) < ad_fingerprint.RECUR_MIN_EPISODES:
+        print(f"show {args.show} has {len(ids)} episode(s) with audio; need at least "
+              f"{ad_fingerprint.RECUR_MIN_EPISODES} to tell recurring audio from content",
+              file=sys.stderr)
+        return 1
+
+    def report(r: ad_fingerprint.DiscoverResult) -> None:
+        if r.error:
+            print(f"  FAIL  {r.title}: {r.error}", file=sys.stderr)
+        elif r.found:
+            print(f"  ok    {r.title}: {r.found} recurring region(s)")
+
+    results = ad_fingerprint.discover_recurring(
+        conn, limit=args.limit, on_result=report, episode_ids=ids)
+    found = sum(r.found for r in results)
+    hit = sum(1 for r in results if r.found)
+    print(f"found {found} recurring region(s) across {hit} of {len(results)} episode(s) — "
+          "no library, no transcript, no model. These are INFERENCE (source='recur') and are "
+          "NOT cut by default; roughly 1 in 10 may not be an ad.")
+    return 0
+
+
 def cmd_detect_ads(args: argparse.Namespace) -> int:
     conn = db.connect(args.db)
     enabled = _enabled_show_ids(conn)
@@ -460,7 +554,12 @@ class _PrecomputedDetector:
     def __init__(self, raw_spans: list):
         self._raw_spans = raw_spans
 
-    def detect(self, transcript: list[dict]) -> list[ad_detect.DetectedAdSpan]:
+    def detect(
+        self, transcript: list[dict], skip: frozenset[int] = frozenset()
+    ) -> list[ad_detect.DetectedAdSpan]:
+        # `skip` (adscrub >= 0.8.0) lets a per-token tier ignore transcript a cheaper tier
+        # already covered. Ignored here for the same reason repeats ignores it: these spans are
+        # already computed and cost nothing to return, so looking away could only lose coverage.
         normalized = []
         for raw in self._raw_spans:
             if isinstance(raw, dict):
@@ -1071,6 +1170,20 @@ def main(argv: list[str] | None = None) -> int:
                    help="scan only the first N episodes by id — ad-hoc/testing only. There is no pending-queue (re-scanning is free and the library grows), so the pipeline runs this UNBOUNDED; a limit in a loop would rescan the same head forever and never reach the tail.")
     p.add_argument("--dry-run", action="store_true", help="only report what would be scanned")
     p.set_defaults(func=cmd_repeats)
+
+    p = sub.add_parser(
+        "fingerprint",
+        help="match episode audio against known ad recordings (free, no transcript or model)")
+    p.add_argument("--limit", type=int, help="max episodes to scan this run")
+    p.add_argument("--dry-run", action="store_true", help="only report how many are scannable")
+    p.set_defaults(func=cmd_fingerprint)
+
+    p = sub.add_parser(
+        "discover-ads",
+        help="cold start for one show: find ads by matching its episodes against each other")
+    p.add_argument("--show", type=int, required=True, help="show id to scan")
+    p.add_argument("--limit", type=int, help="max episodes to consider")
+    p.set_defaults(func=cmd_discover_ads)
 
     p = sub.add_parser("detect-ads", help="classify ad spans from transcripts with a Claude model")
     p.add_argument("--limit", type=int, help="max episodes to process this run")
