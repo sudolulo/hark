@@ -1248,6 +1248,27 @@ def test_seeds_emits_only_the_selected_episodes(tmp_path, capsys, monkeypatch):
         assert f"[{i}] " in out, "every segment should be offered to the reader"
 
 
+def test_sync_history_refetches_all_when_nothing_is_stored(tmp_path, monkeypatch):
+    """A non-zero cursor with an empty listen_actions means an earlier sync advanced past all
+    history without ingesting it (the live truenas bug). Re-fetch from since=0, not the cursor."""
+    path = tmp_path / "t.db"
+    conn = db.connect(path)
+    conn.execute("INSERT INTO sync_state (key, value) VALUES ('gpodder_episode_action_since', '9999')")
+    conn.commit()
+    conn.close()
+    captured = {}
+
+    def fake_fetch(client, url, auth, since=0):
+        captured["since"] = since
+        return ([], 10000)
+
+    monkeypatch.setattr(cli.nextcloud, "fetch_episode_actions", fake_fetch)
+    rc = cli.main(["--db", str(path), "sync-history", "--nextcloud-url", "http://nc",
+                   "--nextcloud-user", "u", "--nextcloud-password", "p"])
+    assert rc == 0
+    assert captured["since"] == 0     # ignored the 9999 cursor and re-fetched everything
+
+
 def test_seeds_count_persists_the_llm_seed_set_for_the_ui(tmp_path, monkeypatch):
     """`seeds --count` persists the campaign set-cover to llm_ad_seeds so the read-only web can
     show EXACTLY which episodes detect-ads would read (and that it's these few, not all pending)."""

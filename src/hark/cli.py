@@ -196,6 +196,13 @@ def cmd_sync_history(args: argparse.Namespace) -> int:
         "SELECT value FROM sync_state WHERE key = 'gpodder_episode_action_since'"
     ).fetchone()
     since = int(cursor_row["value"]) if cursor_row else 0
+    # Self-heal (and --full): a non-zero cursor with ZERO stored actions means an earlier sync
+    # advanced the cursor past all of Nextcloud's history without ingesting it — seen live on the
+    # truenas Nextcloud, which held 2960 episode actions while listen_actions was empty. Re-fetch
+    # from the start until we actually have data (then normal incremental takes over).
+    if getattr(args, "full", False) or conn.execute(
+            "SELECT COUNT(*) FROM listen_actions").fetchone()[0] == 0:
+        since = 0
     auth = (args.nextcloud_user, args.nextcloud_password)
     with make_nextcloud_client(args) as client:
         try:
@@ -1460,6 +1467,9 @@ def main(argv: list[str] | None = None) -> int:
         help="M3: pull new AntennaPod listen-history events (for future M4 scoring)",
     )
     _add_nextcloud_args(p)
+    p.add_argument("--full", action="store_true",
+                   help="ignore the incremental cursor and re-fetch ALL history from the start "
+                        "(also happens automatically while listen_actions is empty)")
     p.set_defaults(func=cmd_sync_history)
 
     p = sub.add_parser(

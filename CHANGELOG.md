@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.1] - 2026-07-24
+
+### Fixed
+
+- **Listen history now actually ingests.** The real bug (a live probe found 2,960 episode actions
+  on the Nextcloud GpodderSync server while `listen_actions` was empty): an early `sync-history`
+  advanced the incremental cursor past all of history without storing any of it, and every later
+  run fetched `since=<now>` → nothing. `sync-history` now re-fetches from the start whenever
+  `listen_actions` is empty (self-heal), and gains a `--full` flag to force it. This un-hollows the
+  recommendation feed — it was never an AntennaPod/Nextcloud config problem, as first assumed.
+
 ## [0.34.0] - 2026-07-24
 
 ### Added
