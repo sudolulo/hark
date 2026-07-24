@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-07-24
+
+### Fixed
+
+- **Transcription no longer head-of-line-stalls on dead audio URLs.** A show's expired-CDN back
+  catalogue (repeated `410 Gone`) sat at the front of the queue and tripped the consecutive-
+  failure abort every cycle, so `transcribe` produced 0 new transcripts while 26.5k stayed
+  pending — starving the `llm`/`repeat` ground-truth supply. `cmd_transcribe` now recognises a
+  permanently-gone URL (adscrub 0.15.0's `is_audio_gone`), quarantines it (`mark_audio_gone` →
+  new `audio_gone_at` column, added by migration), and does NOT count it toward the abort, so a
+  live episode behind it still runs. The cross-show queue excludes quarantined audio too.
+- **`transcribe`/`cut`/`detect-ads` exit 0 when the queue is simply empty** instead of 1 — a
+  nothing-to-do state is success, not failure. Now that the pipeline heartbeat surfaces exit
+  codes, this stops every idle cycle logging a misleading `(exit 1)` (and stops future
+  stage-failure alerting from crying wolf).
+
+### Added
+
+- **`hark seeds --count`** and an `ad-seeds` pipeline stage: reports how many ad campaigns still
+  lack a ground-truth confirmation, and how few seed episodes would retire them — free, no key,
+  no reading. Makes the library-bootstrap gap visible every cycle (campaigns are recomputed live
+  from the fingerprint cache, so it needs no persisted `recur` rows).
+- **Cut-quality signal in `cmd_cut`:** a cut removing more than 35% of a known-duration episode
+  (adscrub 0.15.0's `is_anomalous_cut`) is WARNed and counted as flagged — a likely false
+  positive to review, rather than a silently gutted episode. The audio is still served; the run
+  still succeeds (a flag is not a failure).
+
+### Changed
+
+- Bump adscrub 0.14.0 → 0.15.0. `episodes` gains an `audio_gone_at` migration.
+- `discover-ads` (the `recur` tier) is documented as deliberately NOT a pipeline stage — its
+  spans are neither cut nor a library seed, and the campaign machinery recomputes recurrence
+  live, so wiring it would only write rows nothing reads.
+
 ## [0.27.0] - 2026-07-24
 
 ### Changed

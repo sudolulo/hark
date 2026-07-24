@@ -65,10 +65,18 @@ STAGES: list[Stage] = [
     Stage("transcribe-cross", ["transcribe", "--cross-show-only", "--limit", "5"], FAST),
     Stage("transcribe", ["transcribe", "--limit", "20"], FAST),
     Stage("fp-match", ["fingerprint"], SLOW),
+    # Free visibility into the library-bootstrap gap: logs how many ad campaigns still await a
+    # ground-truth read. No key, no spend — just surfaces the number so it never goes unseen.
+    Stage("ad-seeds", ["seeds", "--count"], SLOW),
     Stage("repeats", ["repeats"], FAST),
     Stage("detect-ads", ["detect-ads", "--limit", "5"], SLOW, needs_key=True, budget=llm_budget.ADS),
     Stage("cut", ["cut"], FAST),
 ]
+# Deliberately NOT a stage: `discover-ads` (the `recur` tier). Its spans are neither cut
+# (not in adscrub's CUT_SOURCES) nor a fingerprint-library seed (not in FP_LIBRARY_SOURCES), and
+# the campaign machinery the pipeline DOES use (`ad-seeds` / `detect-ads` via find_campaigns)
+# recomputes recurrence live from the fingerprint cache rather than from persisted `recur` rows.
+# So wiring it would only write DB rows nothing reads. It stays a manual discovery tool.
 
 # Session-as-extractor drop files: the monthly-Claude path. Loaded every cycle if present, then
 # archived. Free (no key), and unchanged from the old loop — this is what keeps ad/topic work

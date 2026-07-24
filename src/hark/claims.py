@@ -252,6 +252,7 @@ def episodes_needing_transcription(conn: sqlite3.Connection) -> list[sqlite3.Row
         )
         AND e.audio_url IS NOT NULL
         AND e.transcript_path IS NULL
+        AND e.audio_gone_at IS NULL
         ORDER BY e.id
         """
     ).fetchall()

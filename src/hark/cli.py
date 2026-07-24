@@ -311,12 +311,12 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
     if not pending:
         print("no episodes pending transcription (from an ad-stripping-enabled show)",
               file=sys.stderr)
-        return 1
+        return 0                       # nothing to do is success, not failure
 
     # Consecutive-failure abort mirrors cmd_detect_ads: a transient outage
     # (rate limit, network) otherwise burns through the entire pending list
     # every run, guaranteed to fail on every remaining episode.
-    ok = errors = 0
+    ok = errors = gone = 0
     consecutive_errors = 0
     max_consecutive_errors = 5
     with make_client() as client:
@@ -324,6 +324,15 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             try:
                 path = ad_transcribe.transcribe_episode(conn, ep, client, model_size=args.model)
             except (httpx.HTTPError, OSError) as exc:
+                # A permanently-gone URL (404/410) is handled, not failed: quarantine it so it
+                # never blocks the queue again, and DON'T count it toward the consecutive-abort
+                # (else a few dead URLs at the head starve every live episode behind them).
+                if ad_transcribe.is_audio_gone(exc):
+                    ad_transcribe.mark_audio_gone(conn, ep["id"])
+                    gone += 1
+                    consecutive_errors = 0
+                    print(f"  GONE  {ep['title'] or ''}: {exc} — audio quarantined")
+                    continue
                 errors += 1
                 consecutive_errors += 1
                 print(f"  FAIL  {ep['title'] or ''}: {exc}")
@@ -337,7 +346,8 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
     remaining_source = claims.episodes_needing_transcription(conn) if args.cross_show_only \
         else ad_transcribe.pending_episodes(conn)
     remaining = len(_filter_enabled(remaining_source, enabled))
-    print(f"transcribed {ok} episode(s) ({errors} failed, {remaining} still pending)")
+    gone_note = f", {gone} quarantined (gone)" if gone else ""
+    print(f"transcribed {ok} episode(s) ({errors} failed{gone_note}, {remaining} still pending)")
     return 1 if errors else 0
 
 
@@ -573,7 +583,7 @@ def cmd_detect_ads(args: argparse.Namespace) -> int:
     if not pending:
         print("no episodes pending ad-span detection (from an ad-stripping-enabled show)",
               file=sys.stderr)
-        return 1
+        return 0                       # nothing to do is success, not failure
 
     import anthropic  # deferred: other commands must work without a key
 
@@ -685,6 +695,19 @@ def cmd_seeds(args: argparse.Namespace) -> int:
     conn = db.connect(args.db)
     enabled = _enabled_show_ids(conn)
     all_pending = _filter_enabled(ad_detect.pending_episodes(conn), enabled)
+
+    if args.count:
+        # Free visibility into the bootstrap gap: how many ad campaigns still lack a
+        # ground-truth confirmation, and how few episodes would retire them. No key, no reading,
+        # no writes — safe to run every pipeline cycle so the number never goes silently unseen.
+        seeds = (ad_fingerprint.select_seed_episodes(
+            conn, episode_ids=sorted(e["id"] for e in all_pending)) if all_pending else [])
+        campaigns = sum(covers for _, covers in seeds)
+        print(f"{campaigns} unread ad campaign(s); {len(seeds)} seed episode(s) would confirm "
+              f"them — run `hark detect-ads` (needs a key + ads budget), or `hark seeds --out "
+              f"FILE` to read them in a session")
+        return 0
+
     if not all_pending:
         print("nothing unread on an ad-stripping-enabled show", file=sys.stderr)
         return 1
@@ -776,12 +799,12 @@ def cmd_cut(args: argparse.Namespace) -> int:
         return 0
     if not pending:
         print("no episodes pending cutting (from an ad-stripping-enabled show)", file=sys.stderr)
-        return 1
+        return 0                       # nothing to do is success, not failure
 
     # Uses cut_episode directly (not the bulk cut_pending) — same reason as
     # cmd_detect_ads above. cut_pending never had a consecutive-failure abort
     # to begin with, so no equivalent is needed here.
-    errors = 0
+    errors = anomalies = 0
     with make_client() as client:
         for ep in pending:
             try:
@@ -790,9 +813,20 @@ def cmd_cut(args: argparse.Namespace) -> int:
                 errors += 1
                 print(f"  FAIL  {ep['title'] or ''}: {exc}")
                 continue
-            print(f"  ok    {ep['title'] or ''}: removed {ad_seconds:.1f}s of ads")
+            # Cut-quality signal: a cut removing an implausibly large share of the episode is
+            # almost certainly a false positive eating editorial. The audio is still served —
+            # this just FLAGS it loudly for review instead of shipping a gutted episode silently.
+            if ad_cut.is_anomalous_cut(ad_seconds, ep["duration_seconds"]):
+                anomalies += 1
+                pct = 100 * ad_seconds / ep["duration_seconds"]
+                print(f"  WARN  {ep['title'] or ''}: cut {ad_seconds:.1f}s = {pct:.0f}% of "
+                      f"episode — anomalous, likely a false positive; review before trusting")
+            else:
+                print(f"  ok    {ep['title'] or ''}: removed {ad_seconds:.1f}s of ads")
     remaining = len(_filter_enabled(ad_cut.pending_episodes(conn), enabled))
-    print(f"cut {len(pending) - errors} episode(s) ({errors} failed, {remaining} still pending)")
+    anom_note = f", {anomalies} flagged (anomalous cut fraction)" if anomalies else ""
+    print(f"cut {len(pending) - errors} episode(s) ({errors} failed{anom_note}, "
+          f"{remaining} still pending)")
     return 1 if errors else 0
 
 
@@ -1404,6 +1438,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--limit", type=int, help="max episodes to emit")
     p.add_argument("--out", help="write to a file instead of stdout")
+    p.add_argument("--count", action="store_true",
+                   help="just report how many unread ad campaigns remain (free, no reading) — "
+                        "makes the library-bootstrap gap visible in the pipeline log")
     p.set_defaults(func=cmd_seeds)
 
     p = sub.add_parser(

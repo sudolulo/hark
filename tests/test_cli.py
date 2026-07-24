@@ -1,5 +1,7 @@
 import json
 
+import httpx
+
 from adscrub import cut as ad_cut
 from adscrub import detect as ad_detect
 from adscrub import transcribe as ad_transcribe
@@ -182,9 +184,9 @@ def test_chapters_skips_disabled_shows(tmp_path, capsys):
     assert "no episodes" in capsys.readouterr().err
 
 
-def test_transcribe_with_nothing_pending_fails(tmp_path, capsys):
+def test_transcribe_with_nothing_pending_is_clean(tmp_path, capsys):
     rc = cli.main(["--db", str(tmp_path / "t.db"), "transcribe"])
-    assert rc == 1
+    assert rc == 0                     # nothing to do is success, not failure
     assert "no episodes pending" in capsys.readouterr().err
 
 
@@ -259,6 +261,41 @@ def test_transcribe_success_path_calls_adscrub_directly(tmp_path, capsys, monkey
     assert "transcribed 1 episode(s) (0 failed, 0 still pending)" in out
 
 
+def test_transcribe_quarantines_gone_url_and_keeps_going(tmp_path, capsys, monkeypatch):
+    """A 404/410 audio URL at the head of the queue must be quarantined, NOT counted toward the
+    consecutive-failure abort — so a live episode behind it still gets transcribed (the
+    head-of-line stall fix). Quarantining is a clean run: rc == 0."""
+    path = tmp_path / "t.db"
+    conn = db.connect(path)
+    conn.execute("INSERT INTO shows (query) VALUES ('Show A')")
+    conn.executemany(
+        "INSERT INTO episodes (show_id, guid, title, audio_url) VALUES (1, ?, ?, ?)",
+        [("dead", "Dead Ep", "http://a/1.mp3"), ("live", "Live Ep", "http://a/2.mp3")],
+    )
+    conn.commit()
+    conn.close()
+
+    def fake_transcribe_episode(conn, ep, client, model_size=None):
+        if ep["guid"] == "dead":
+            req = httpx.Request("GET", ep["audio_url"])
+            raise httpx.HTTPStatusError("gone", request=req,
+                                        response=httpx.Response(410, request=req))
+        conn.execute("UPDATE episodes SET transcript_path = 'x.json' WHERE id = ?", (ep["id"],))
+        conn.commit()
+        return "x.json"
+
+    monkeypatch.setattr(ad_transcribe, "transcribe_episode", fake_transcribe_episode)
+
+    rc = cli.main(["--db", str(path), "transcribe"])
+    assert rc == 0                                          # a quarantine is not a failure
+    out = capsys.readouterr().out
+    assert "GONE  Dead Ep" in out and "quarantined" in out
+    assert "ok    Live Ep -> x.json" in out                # the episode BEHIND the dead one ran
+    assert "1 quarantined (gone)" in out
+    conn = db.connect(path)
+    assert [e["guid"] for e in ad_transcribe.pending_episodes(conn)] == []  # dead now skipped
+
+
 def test_transcribe_skips_disabled_shows(tmp_path, capsys):
     path = tmp_path / "t.db"
     conn = db.connect(path)
@@ -303,9 +340,9 @@ def test_transcribe_aborts_after_consecutive_failures(tmp_path, capsys, monkeypa
     assert "transcribed 0 episode(s) (5 failed, 7 still pending)" in captured.out
 
 
-def test_detect_ads_with_nothing_pending_fails(tmp_path, capsys):
+def test_detect_ads_with_nothing_pending_is_clean(tmp_path, capsys):
     rc = cli.main(["--db", str(tmp_path / "t.db"), "detect-ads"])
-    assert rc == 1
+    assert rc == 0                     # nothing to do is success, not failure
     assert "no episodes pending" in capsys.readouterr().err
 
 
@@ -558,10 +595,18 @@ def test_cut_skips_disabled_shows(tmp_path, capsys):
     assert "pending episodes: 0" in capsys.readouterr().out
 
 
-def test_cut_with_nothing_pending_fails(tmp_path, capsys):
+def test_cut_with_nothing_pending_is_clean(tmp_path, capsys):
     rc = cli.main(["--db", str(tmp_path / "t.db"), "cut"])
-    assert rc == 1
+    assert rc == 0                     # nothing to do is success, not failure
     assert "no episodes pending cutting" in capsys.readouterr().err
+
+
+def test_seeds_count_reports_zero_on_empty_and_exits_clean(tmp_path, capsys):
+    """`seeds --count` surfaces the bootstrap gap for free — 0 campaigns on an empty corpus is
+    a clean result (exit 0), not the 'nothing to read' failure the render path returns."""
+    rc = cli.main(["--db", str(tmp_path / "t.db"), "seeds", "--count"])
+    assert rc == 0
+    assert "0 unread ad campaign(s)" in capsys.readouterr().out
 
 
 def test_cut_dry_run_reports_pending(tmp_path, capsys):
@@ -607,6 +652,31 @@ def test_cut_success_path_calls_adscrub_directly(tmp_path, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "ok    Ep One: removed 5.0s of ads" in out
     assert "cut 1 episode(s) (0 failed, 0 still pending)" in out
+
+
+def test_cut_flags_anomalous_fraction(tmp_path, capsys, monkeypatch):
+    """A cut removing an implausible share of a known-duration episode is WARNed and counted,
+    but the run still succeeds (the audio is served; this is a review signal, not a failure)."""
+    path = tmp_path / "t.db"
+    conn = db.connect(path)
+    conn.execute("INSERT INTO shows (query) VALUES ('Show A')")
+    conn.execute("INSERT INTO episodes (show_id, guid, title, audio_url, duration_seconds) "
+                 "VALUES (1, 'g1', 'Gutted Ep', 'http://a/1.mp3', 1000)")
+    conn.execute("INSERT INTO ad_segments (episode_id, start_second, end_second, source) "
+                 "VALUES (1, 0, 5, 'chapter')")
+    conn.commit()
+    conn.close()
+
+    def fake_cut_episode(conn, ep, client, data_dir=None):
+        return "x.mp3", 500.0                          # 500s of a 1000s episode = 50% -> anomalous
+
+    monkeypatch.setattr(ad_cut, "cut_episode", fake_cut_episode)
+
+    rc = cli.main(["--db", str(path), "cut"])
+    assert rc == 0                                     # a flag is not a failure
+    out = capsys.readouterr().out
+    assert "WARN  Gutted Ep" in out and "50% of episode" in out
+    assert "1 flagged (anomalous cut fraction)" in out
 
 
 def test_fsck_reports_dangling_transcript_paths_without_fix(tmp_path, capsys):
