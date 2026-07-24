@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-07-24
+
+### Changed
+
+- **LLM budgets are now two independent pools — ads vs comparisons — instead of one shared cap.**
+  `detect-ads` (ad-span classification) draws from `HARK_LLM_ADS_BUDGET`; the topic-index /
+  treatment-comparison LLM work (`extract` today, a future `compare`) draws from
+  `HARK_LLM_COMPARISONS_BUDGET`. Each is dollars/day, default 0 = that pool off, metered
+  separately in `llm_spend(day, category)`. This replaces the pre-0.27 ads-first split of one
+  `HARK_LLM_DAILY_BUDGET`, so ad-stripping can run hot while topic extraction stays on a tight
+  leash (or off) without the two competing for a single cap.
+  - `HARK_LLM_DAILY_BUDGET` is kept as a back-compat alias that funds **ads only**; the
+    ads-specific var wins when both are set.
+  - The old single-column `llm_spend` table is migrated in place on first use (its rows are
+    throwaway intra-day state, so the migration just recreates it with the `category` column).
+
+### Added
+
+- **`extract` is now a pipeline stage**, gated on a key **and** the comparisons budget (dormant
+  until funded, like `detect-ads`), and it enforces that budget per episode — stopping before
+  the next episode once the day's comparisons spend is used up. Runs before `canon` so freshly
+  minted topics are canonicalised the same cycle.
+
 ## [0.26.1] - 2026-07-24
 
 ### Added

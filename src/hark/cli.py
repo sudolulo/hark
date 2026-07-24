@@ -598,20 +598,20 @@ def cmd_detect_ads(args: argparse.Namespace) -> int:
     # set, remaining() is 0 -> this command still runs when invoked by hand, but the PIPELINE
     # never schedules it (its needs_budget gate skips it). Spend is estimated from the transcript
     # actually sent, not read back from the API — enough to STOP in time.
-    cap = llm_budget.daily_cap()
+    cap = llm_budget.daily_cap(llm_budget.ADS)
     ok = errors = 0
     consecutive_errors = 0
     max_consecutive_errors = 5
     for ep in pending:
-        if cap and llm_budget.remaining(conn) <= 0:
-            print(f"  stop  daily LLM budget ${cap:.2f} reached "
-                  f"(spent ${llm_budget.spent_today(conn):.2f}); {ep['title'] or ''} deferred")
+        if cap and llm_budget.remaining(conn, llm_budget.ADS) <= 0:
+            print(f"  stop  daily ads budget ${cap:.2f} reached "
+                  f"(spent ${llm_budget.spent_today(conn, llm_budget.ADS):.2f}); {ep['title'] or ''} deferred")
             break
         try:
             spend = _estimate_episode_dollars(ep)
             found = ad_detect.detect_episode(conn, ep, detector)
             if cap:
-                llm_budget.record(conn, spend)
+                llm_budget.record(conn, llm_budget.ADS, spend)
         except Exception as exc:  # noqa: BLE001 — per-episode isolation, matches detect_pending
             conn.rollback()
             errors += 1
@@ -907,11 +907,27 @@ def cmd_extract(args: argparse.Namespace) -> int:
     extractor = extract.ClaudeExtractor(client, model=args.model)
     report, counts = make_reporter()
 
+    # Comparisons budget: its own pool, independent of ads (see llm_budget.py). With a cap set,
+    # stop before the next episode once today's comparisons spend is used up; with no cap, a
+    # hand-run still works but the pipeline never schedules extract (its budget gate skips it).
+    # Spend is estimated from title+description (the extraction prompt) — small per episode.
+    cap = llm_budget.daily_cap(llm_budget.COMPARISONS)
+
+    def _budget_gate(row) -> bool:
+        if cap and llm_budget.remaining(conn, llm_budget.COMPARISONS) <= 0:
+            print(f"  stop  daily comparisons budget ${cap:.2f} reached "
+                  f"(spent ${llm_budget.spent_today(conn, llm_budget.COMPARISONS):.2f})")
+            return False
+        if cap:
+            chars = len(row["title"] or "") + len(row["description"] or "")
+            llm_budget.record(conn, llm_budget.COMPARISONS, llm_budget.estimate_dollars(chars))
+        return True
+
     with make_client() as http_client:
         canon = wikidata.Canonicalizer(http_client)
         pipeline.extract_pending(
             conn, extractor, canon.canonicalize, source=args.model,
-            limit=args.limit, on_result=report,
+            limit=args.limit, on_result=report, on_before=_budget_gate,
         )
     remaining = conn.execute(
         "SELECT COUNT(*) FROM episodes WHERE extracted_at IS NULL"

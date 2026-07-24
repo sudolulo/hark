@@ -46,7 +46,7 @@ class Stage:
     argv: list[str]          # the `hark ...` subcommand + flags
     every: float = FAST
     needs_key: bool = False   # requires ANTHROPIC_API_KEY
-    needs_budget: bool = False  # requires daily budget remaining
+    budget: str | None = None  # None = free; else the llm_budget category it draws from
 
 
 # Order matters: index before match, transcribe before repeats/detect, detect before cut so new
@@ -55,6 +55,9 @@ STAGES: list[Stage] = [
     Stage("sync-subscriptions", ["sync-subscriptions"], SLOW),
     Stage("sync-history", ["sync-history"], SLOW),
     Stage("ingest", ["ingest"], SLOW),
+    # extract (topic index / comparison LLM) before canon, so topics it mints get canonicalised
+    # the same cycle. Gated on the COMPARISONS budget — its own pool, independent of ads.
+    Stage("extract", ["extract", "--limit", "20"], SLOW, needs_key=True, budget=llm_budget.COMPARISONS),
     Stage("canon", ["canon", "--limit", "50"], SLOW),
     Stage("chapters", ["chapters"], SLOW),
     Stage("dai-probe", ["dai-probe", "--per-platform", "1"], SLOW),
@@ -63,7 +66,7 @@ STAGES: list[Stage] = [
     Stage("transcribe", ["transcribe", "--limit", "20"], FAST),
     Stage("fp-match", ["fingerprint"], SLOW),
     Stage("repeats", ["repeats"], FAST),
-    Stage("detect-ads", ["detect-ads", "--limit", "5"], SLOW, needs_key=True, needs_budget=True),
+    Stage("detect-ads", ["detect-ads", "--limit", "5"], SLOW, needs_key=True, budget=llm_budget.ADS),
     Stage("cut", ["cut"], FAST),
 ]
 
@@ -166,7 +169,7 @@ def run_cycle(
         if st.needs_key and not key_present:
             outcomes.append((st.name, "skipped:no-key"))
             continue
-        if st.needs_budget and llm_budget.remaining(conn) <= 0:
+        if st.budget is not None and llm_budget.remaining(conn, st.budget) <= 0:
             outcomes.append((st.name, "skipped:budget"))
             continue
         log(f"→ {st.name}")                        # start heartbeat, before the slow work
@@ -190,7 +193,8 @@ def run_loop(db_path: str, interval: float = 60.0, data_dir: str | None = None) 
     except ValueError:
         log_max = DEFAULT_LOG_MAX_BYTES
     _log(f"starting; interval={interval:.0f}s, key={'yes' if os.environ.get('ANTHROPIC_API_KEY') else 'no'}, "
-         f"daily_budget=${llm_budget.daily_cap():.2f}")
+         f"ads_budget=${llm_budget.daily_cap(llm_budget.ADS):.2f}/day, "
+         f"comparisons_budget=${llm_budget.daily_cap(llm_budget.COMPARISONS):.2f}/day")
     while True:
         # Rotate BETWEEN cycles, while no stage subprocess is writing to the log.
         if rotate_log(log_path, log_max):

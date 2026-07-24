@@ -137,15 +137,20 @@ def extract_pending(
     source: str,
     limit: int | None = None,
     on_result: Callable[[ExtractResult], None] | None = None,
+    on_before: Callable[[sqlite3.Row], bool] | None = None,
     max_consecutive_errors: int = 5,
 ) -> list[ExtractResult]:
     """Extract topics for pending episodes; stops early on repeated failures.
 
-    Failed episodes keep extracted_at NULL and are retried on the next run.
+    `on_before(row)`, if given, is called before each episode is sent to the model; returning
+    False stops the run (the daily-budget gate uses this — same shape as detect-ads' per-episode
+    stop). Failed episodes keep extracted_at NULL and are retried on the next run.
     """
     results: list[ExtractResult] = []
     consecutive_errors = 0
     for row in pending_episodes(conn, limit):
+        if on_before is not None and not on_before(row):
+            break
         result = ExtractResult(episode_id=row["id"], show=row["show"], title=row["title"] or "")
         try:
             topics = extractor.extract(row["title"] or "", row["description"])

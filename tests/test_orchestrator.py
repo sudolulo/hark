@@ -45,7 +45,8 @@ def test_llm_stage_needs_a_key(tmp_path):
 
 def test_llm_stage_needs_budget_even_with_a_key(tmp_path, monkeypatch):
     db = _db(tmp_path)
-    monkeypatch.delenv("HARK_LLM_DAILY_BUDGET", raising=False)  # no budget -> remaining()==0
+    monkeypatch.delenv("HARK_LLM_ADS_BUDGET", raising=False)
+    monkeypatch.delenv("HARK_LLM_DAILY_BUDGET", raising=False)   # no ads budget -> remaining()==0
     out = dict(orchestrator.run_cycle(db, now=1_000_000.0, data_dir=str(tmp_path),
                                       run=lambda a: 0, key_present=True))
     assert out["detect-ads"] == "skipped:budget"
@@ -53,11 +54,40 @@ def test_llm_stage_needs_budget_even_with_a_key(tmp_path, monkeypatch):
 
 def test_llm_stage_runs_with_key_and_budget(tmp_path, monkeypatch):
     db = _db(tmp_path)
-    monkeypatch.setenv("HARK_LLM_DAILY_BUDGET", "5")
+    monkeypatch.setenv("HARK_LLM_ADS_BUDGET", "5")
     ran = []
     orchestrator.run_cycle(db, now=1_000_000.0, data_dir=str(tmp_path),
                            run=lambda a: ran.append(a[0]) or 0, key_present=True)
     assert "detect-ads" in ran
+
+
+def test_ads_and_comparisons_budgets_are_independent(tmp_path, monkeypatch):
+    """Funding ads must NOT enable the comparisons stage, and vice versa — separate pools."""
+    db = _db(tmp_path)
+    monkeypatch.setenv("HARK_LLM_ADS_BUDGET", "5")
+    monkeypatch.delenv("HARK_LLM_COMPARISONS_BUDGET", raising=False)
+    out = dict(orchestrator.run_cycle(db, now=1_000_000.0, data_dir=str(tmp_path),
+                                      run=lambda a: 0, key_present=True))
+    assert out["detect-ads"] == "ran"                 # ads pool funded
+    assert out["extract"] == "skipped:budget"         # comparisons pool is not
+
+    monkeypatch.delenv("HARK_LLM_ADS_BUDGET", raising=False)
+    monkeypatch.delenv("HARK_LLM_DAILY_BUDGET", raising=False)
+    monkeypatch.setenv("HARK_LLM_COMPARISONS_BUDGET", "5")
+    out = dict(orchestrator.run_cycle(db, now=2_000_000.0, data_dir=str(tmp_path),
+                                      run=lambda a: 0, key_present=True))
+    assert out["extract"] == "ran"                    # comparisons pool funded
+    assert out["detect-ads"] == "skipped:budget"      # ads pool is not
+
+
+def test_legacy_daily_budget_still_funds_ads(tmp_path, monkeypatch):
+    db = _db(tmp_path)
+    monkeypatch.delenv("HARK_LLM_ADS_BUDGET", raising=False)
+    monkeypatch.setenv("HARK_LLM_DAILY_BUDGET", "5")   # pre-0.27 shared knob -> ads
+    out = dict(orchestrator.run_cycle(db, now=1_000_000.0, data_dir=str(tmp_path),
+                                      run=lambda a: 0, key_present=True))
+    assert out["detect-ads"] == "ran"
+    assert out["extract"] == "skipped:budget"          # but does NOT fund comparisons
 
 
 def test_drop_files_are_loaded_and_archived(tmp_path):
@@ -76,22 +106,44 @@ def test_drop_files_are_loaded_and_archived(tmp_path):
 
 
 def test_budget_off_without_a_cap(tmp_path, monkeypatch):
+    monkeypatch.delenv("HARK_LLM_ADS_BUDGET", raising=False)
     monkeypatch.delenv("HARK_LLM_DAILY_BUDGET", raising=False)
     conn = sqlite3.connect(_db(tmp_path))
-    assert llm_budget.daily_cap() == 0.0
-    assert llm_budget.remaining(conn) == 0.0        # a key alone must not spend
+    assert llm_budget.daily_cap(llm_budget.ADS) == 0.0
+    assert llm_budget.remaining(conn, llm_budget.ADS) == 0.0     # a key alone must not spend
 
 
 def test_budget_records_and_depletes(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARK_LLM_DAILY_BUDGET", "1.00")
+    monkeypatch.setenv("HARK_LLM_ADS_BUDGET", "1.00")
     conn = sqlite3.connect(_db(tmp_path))
-    assert llm_budget.remaining(conn) == pytest.approx(1.0)
-    llm_budget.record(conn, 0.30)
-    llm_budget.record(conn, 0.30)
-    assert llm_budget.spent_today(conn) == pytest.approx(0.60)
-    assert llm_budget.remaining(conn) == pytest.approx(0.40)
-    llm_budget.record(conn, 0.50)
-    assert llm_budget.remaining(conn) == 0.0        # clamped, never negative
+    assert llm_budget.remaining(conn, llm_budget.ADS) == pytest.approx(1.0)
+    llm_budget.record(conn, llm_budget.ADS, 0.30)
+    llm_budget.record(conn, llm_budget.ADS, 0.30)
+    assert llm_budget.spent_today(conn, llm_budget.ADS) == pytest.approx(0.60)
+    assert llm_budget.remaining(conn, llm_budget.ADS) == pytest.approx(0.40)
+    llm_budget.record(conn, llm_budget.ADS, 0.50)
+    assert llm_budget.remaining(conn, llm_budget.ADS) == 0.0     # clamped, never negative
+
+
+def test_budget_pools_meter_separately(tmp_path, monkeypatch):
+    monkeypatch.setenv("HARK_LLM_ADS_BUDGET", "1.00")
+    monkeypatch.setenv("HARK_LLM_COMPARISONS_BUDGET", "2.00")
+    conn = sqlite3.connect(_db(tmp_path))
+    llm_budget.record(conn, llm_budget.ADS, 0.40)
+    assert llm_budget.spent_today(conn, llm_budget.COMPARISONS) == 0.0   # ads spend != comparisons
+    assert llm_budget.remaining(conn, llm_budget.ADS) == pytest.approx(0.60)
+    assert llm_budget.remaining(conn, llm_budget.COMPARISONS) == pytest.approx(2.00)
+
+
+def test_budget_schema_migrates_from_pre_0_27(tmp_path):
+    """A pre-0.27 llm_spend (PK day, no category) is migrated, not crashed on."""
+    conn = sqlite3.connect(_db(tmp_path))
+    conn.executescript("CREATE TABLE llm_spend (day TEXT PRIMARY KEY, dollars REAL);")
+    conn.execute("INSERT INTO llm_spend VALUES ('2020-01-01', 9.0)")
+    conn.commit()
+    llm_budget.record(conn, llm_budget.ADS, 0.10)                # must not raise
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(llm_spend)")}
+    assert "category" in cols
 
 
 # --- heartbeat + log rotation ---
