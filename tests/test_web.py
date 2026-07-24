@@ -48,6 +48,7 @@ def server(tmp_path):
     conn.execute("INSERT INTO user_shows (user_id, show_id) VALUES (1, 1)")
     conn.commit()
     conn.close()
+    db.connect(tmp_path / "hark.db").close()  # a write-connect backfills feed_tokens, like the pipeline
 
     srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
                           bind="127.0.0.1:0", admin_token="letmein")
@@ -85,7 +86,7 @@ def login(srv, password="letmein"):
 
 
 def test_everything_gated_except_allowlist(server):
-    for path in ("/", "/topics", "/topic/1", "/notable", "/pipeline", "/search", "/shows",
+    for path in ("/", "/topics", "/topic/1", "/notable", "/pipeline", "/feeds", "/search", "/shows",
                  "/show/1", "/episode/1", "/account"):
         resp, _ = request(server, "GET", path)
         assert resp.status == 303, path
@@ -109,10 +110,19 @@ def test_no_inline_styles(server):
     # is silently no-op'd by the browser rather than erroring — easy to miss
     # without actually rendering the page. Guard against it creeping back in.
     cookie = login(server)
-    for path in ("/login", "/", "/topics", "/topic/1", "/notable", "/pipeline", "/shows",
+    for path in ("/login", "/", "/topics", "/topic/1", "/notable", "/pipeline", "/feeds", "/shows",
                  "/show/1", "/search", "/account"):
         _, body = request(server, "GET", path, cookie=cookie)
         assert 'style="' not in body, path
+
+
+def test_feeds_hub_lists_recommendation_and_show_feeds(server):
+    cookie = login(server)
+    resp, body = request(server, "GET", "/feeds", cookie=cookie)
+    assert resp.status == 200
+    assert "Your feeds" in body
+    assert "/recommended/" in body            # the personal recommendation feed
+    assert "/feed/1/" in body and "Show A" in body   # the subscribed show's ad-stripped feed
 
 
 def test_pipeline_page_lists_every_stage(server):
@@ -126,6 +136,98 @@ def test_pipeline_page_lists_every_stage(server):
     assert "never run" in body                       # no pipeline_runs yet in this fixture
     assert "No ad spans found yet" in body           # no ad_segments yet — guarded, not a 500
     assert "What the LLM would run" in body          # the funding-transparency section is present
+
+
+def test_recommendation_feed_by_token(tmp_path):
+    from hark.auth import Auth
+    conn = db.connect(tmp_path / "hark.db")
+    conn.close()
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        login(srv, "t")                                   # bootstraps the admin account (id 1)
+        token = Auth(str(tmp_path / "auth.db"), admin_token="t").feed_token_for(1)
+        assert token                                       # a personal feed token was minted
+        resp, body = request(srv, "GET", f"/recommended/{token}")   # UNAUTHENTICATED, like /feed
+        assert resp.status == 200
+        assert "<rss" in body and "recommended for admin" in body
+        resp, _ = request(srv, "GET", "/recommended/deadbeefdeadbeef")
+        assert resp.status == 404                          # unknown token
+    finally:
+        srv.shutdown()
+
+
+def test_episode_ad_transparency_and_admin_marking(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('q', 'Show A', 'http://x')")
+    conn.execute("INSERT INTO episodes (show_id, guid, title, audio_url, transcript_path, cut_path) "
+                 "VALUES (1, 'g1', 'Ep One', 'http://a/1.mp3', 't.json', 'cut/1.mp3')")
+    conn.execute("INSERT INTO ad_segments (episode_id, start_second, end_second, source, reason) "
+                 "VALUES (1, 65, 95, 'fpmatch', 'matched a known read')")
+    conn.commit()
+    conn.close()
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
+        cookie = resp.getheader("Set-Cookie").split(";")[0]
+
+        # (#1) transparency: the removed ad is shown with mm:ss, tier, and time saved
+        _, body = request(srv, "GET", "/episode/1", cookie=cookie)
+        assert "Ads in this episode" in body
+        assert "1:05–1:35" in body and "fpmatch" in body    # 65s–95s, its tier
+        assert "0:30 saved" in body                              # 30s cut from the episode
+        assert "Mark as ad" in body                              # (#4) admin marking form
+
+        # (#4) hand-mark an ad -> a 'manual' ground-truth span, and the episode is re-cut
+        resp, _ = request(srv, "POST", "/episode/1/mark-ad",
+                          body={"start": "2:00", "end": "2:30"}, cookie=cookie)
+        assert resp.status in (302, 303)
+        conn = db.connect(tmp_path / "hark.db")
+        rows = conn.execute("SELECT id, source, start_second, end_second FROM ad_segments "
+                            "WHERE episode_id = 1 ORDER BY start_second").fetchall()
+        marked = [r for r in rows if r["source"] == "manual"]
+        assert marked and marked[0]["start_second"] == 120.0 and marked[0]["end_second"] == 150.0
+        assert conn.execute("SELECT cut_path FROM episodes WHERE id = 1").fetchone()[0] is None
+        fp_id = [r["id"] for r in rows if r["source"] == "fpmatch"][0]
+        conn.close()
+
+        # (#4) remove a false positive
+        resp, _ = request(srv, "POST", "/episode/1/remove-span",
+                          body={"span_id": str(fp_id)}, cookie=cookie)
+        assert resp.status in (302, 303)
+        conn = db.connect(tmp_path / "hark.db")
+        assert conn.execute("SELECT COUNT(*) FROM ad_segments WHERE id = ?",
+                            (fp_id,)).fetchone()[0] == 0
+        conn.close()
+    finally:
+        srv.shutdown()
+
+
+def test_episode_marking_requires_auth(tmp_path):
+    """An unauthenticated mark is bounced to login and writes nothing (marking is admin-gated,
+    and every write route requires a session first)."""
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('q', 'Show A', 'http://x')")
+    conn.execute("INSERT INTO episodes (show_id, guid, title) VALUES (1, 'g1', 'Ep One')")
+    conn.commit()
+    conn.close()
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp, _ = request(srv, "POST", "/episode/1/mark-ad", body={"start": "0", "end": "5"})
+        assert resp.status in (302, 303)              # no session -> redirected to /login
+        conn = db.connect(tmp_path / "hark.db")
+        assert conn.execute("SELECT COUNT(*) FROM ad_segments").fetchone()[0] == 0
+        conn.close()
+    finally:
+        srv.shutdown()
 
 
 def test_pipeline_page_shows_which_episodes_the_llm_would_read(tmp_path):

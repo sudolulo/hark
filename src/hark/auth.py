@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS users (
     is_admin          INTEGER NOT NULL DEFAULT 0,
     invite_token      TEXT,
     invite_expires_at TEXT,
+    feed_token        TEXT,
     created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 CREATE TABLE IF NOT EXISTS sessions (
@@ -58,6 +59,7 @@ _AUTH_MIGRATIONS = (
     ("users", "is_admin", "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0"),
     ("users", "invite_token", "ALTER TABLE users ADD COLUMN invite_token TEXT"),
     ("users", "invite_expires_at", "ALTER TABLE users ADD COLUMN invite_expires_at TEXT"),
+    ("users", "feed_token", "ALTER TABLE users ADD COLUMN feed_token TEXT"),
 )
 
 
@@ -266,6 +268,33 @@ class Auth:
         with contextlib.closing(self._connect()) as conn:
             conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
             conn.commit()
+
+    def feed_token_for(self, user_id: int) -> str | None:
+        """The user's personal feed token, minted on first use — gates their unauthenticated
+        /recommended feed the way a show's feed_token gates /feed (a podcast app can't log in).
+        Returns None only if the user doesn't exist."""
+        with contextlib.closing(self._connect()) as conn:
+            row = conn.execute("SELECT feed_token FROM users WHERE id = ?", (user_id,)).fetchone()
+            if row is None:
+                return None
+            if row["feed_token"]:
+                return row["feed_token"]
+            token = secrets.token_hex(16)
+            conn.execute("UPDATE users SET feed_token = ? WHERE id = ?", (token, user_id))
+            conn.commit()
+            return token
+
+    def user_id_by_feed_token(self, token: str) -> int | None:
+        if not token:
+            return None
+        with contextlib.closing(self._connect()) as conn:
+            row = conn.execute("SELECT id FROM users WHERE feed_token = ?", (token,)).fetchone()
+            return row["id"] if row else None
+
+    def username_for(self, user_id: int) -> str | None:
+        with contextlib.closing(self._connect()) as conn:
+            row = conn.execute("SELECT username FROM users WHERE id = ?", (user_id,)).fetchone()
+            return row["username"] if row else None
 
     def set_password(self, user_id: int, password: str) -> None:
         """Set a new password and revoke every session *for this account*

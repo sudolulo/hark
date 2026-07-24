@@ -108,6 +108,7 @@ NAV_ITEMS = [
     ("shows", "/shows", "shows"),
     ("notable", "/notable", "notable"),
     ("search", "/search", "search"),
+    ("feeds", "/feeds", "feeds"),
     ("pipeline", "/pipeline", "pipeline"),
 ]
 
@@ -276,6 +277,14 @@ def pipeline_status_html(transcribe_pending: int, detect_pending: int,
 
 def conf(value) -> str:
     return f"{value:.2f}" if value is not None else "–"
+
+
+def mmss(seconds) -> str:
+    """Seconds → m:ss (or h:mm:ss past an hour) for ad-span timestamps."""
+    s = int(seconds or 0)
+    if s >= 3600:
+        return f"{s // 3600}:{(s % 3600) // 60:02d}:{s % 60:02d}"
+    return f"{s // 60}:{s % 60:02d}"
 
 
 def stage_status_badge(status: str | None, exit_code=None) -> str:

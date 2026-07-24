@@ -98,6 +98,23 @@ def _safe_next(value: str, default: str) -> str:
     return default
 
 
+def _parse_time(value: str) -> float | None:
+    """Parse an ad-span timestamp from a form field: `m:ss`, `h:mm:ss`, or plain seconds.
+    Returns None on anything unparseable, so a bad hand-mark is a no-op, not a crash."""
+    value = (value or "").strip()
+    if not value:
+        return None
+    try:
+        if ":" in value:
+            total = 0.0
+            for part in value.split(":"):
+                total = total * 60 + float(part)
+            return total
+        return float(value)
+    except ValueError:
+        return None
+
+
 MAX_FORM_BYTES = 65536
 # AntennaPod batches episode-action uploads at 30 per request (its own
 # UPLOAD_BULK_SIZE) — plenty of headroom over that for a JSON body.
@@ -385,6 +402,11 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(200, page("invite", body))
         if route.startswith("/feed/"):
             return self._serve_feed(route)
+        if route.startswith("/recommended/"):
+            rss = app.recommendation_feed(route.removeprefix("/recommended/"))
+            if rss is None:
+                return self.respond(404, "not found", "text/plain; charset=utf-8")
+            return self.respond_bytes(200, rss, "application/rss+xml; charset=utf-8")
         if route.startswith("/audio/"):
             return self._serve_audio(route)
         if route == "/index.php/apps/gpoddersync/subscriptions":
@@ -405,6 +427,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(200, app.view_notable(user, params))
             if route == "/pipeline":
                 return self.respond(200, app.view_pipeline(user))
+            if route == "/feeds":
+                return self.respond(200, app.view_feeds(user))
             if route.startswith("/topic/"):
                 try:
                     topic_id = int(route.rsplit("/", 1)[1])
@@ -603,6 +627,28 @@ class Handler(BaseHTTPRequestHandler):
                     return self.not_found(user)
                 app.unsubscribe(user["id"], show_id)
                 return self.redirect(_safe_next(form.get("next", ""), f"/show/{show_id}"))
+            if route.startswith("/episode/") and route.endswith("/mark-ad"):
+                if not user["is_admin"]:
+                    return self.forbidden(user)
+                try:
+                    ep_id = int(route.removeprefix("/episode/").removesuffix("/mark-ad"))
+                except ValueError:
+                    return self.not_found(user)
+                start, end = _parse_time(form.get("start", "")), _parse_time(form.get("end", ""))
+                if start is None or end is None:
+                    return self.redirect(f"/episode/{ep_id}")   # bad input → no-op
+                app.mark_ad(ep_id, start, end)
+                return self.redirect(f"/episode/{ep_id}")
+            if route.startswith("/episode/") and route.endswith("/remove-span"):
+                if not user["is_admin"]:
+                    return self.forbidden(user)
+                try:
+                    ep_id = int(route.removeprefix("/episode/").removesuffix("/remove-span"))
+                    span_id = int(form.get("span_id", ""))
+                except ValueError:
+                    return self.not_found(user)
+                app.remove_span(ep_id, span_id)
+                return self.redirect(f"/episode/{ep_id}")
         except sqlite3.OperationalError:
             return self.db_unavailable(user)
         return self.not_found(user)

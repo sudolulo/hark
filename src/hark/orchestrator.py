@@ -67,6 +67,8 @@ STAGES: list[Stage] = [
     Stage("fp-index", ["fingerprint", "--index", "--limit", "30"], FAST),
     Stage("transcribe-cross", ["transcribe", "--cross-show-only", "--limit", "5"], FAST),
     Stage("transcribe", ["transcribe", "--limit", "20"], FAST),
+    # Index new transcripts into the FTS table that /search queries (bounded slice per cycle).
+    Stage("index-transcripts", ["index-transcripts", "--limit", "50"], FAST),
     Stage("fp-match", ["fingerprint"], SLOW),
     # Free visibility into the library-bootstrap gap: logs how many ad campaigns still await a
     # ground-truth read. No key, no spend — just surfaces the number so it never goes unseen.

@@ -13,7 +13,8 @@ from pathlib import Path
 
 import httpx
 
-from . import claims, gpodder_server, llm_budget, orchestrator, podcast_feed, ratings, resolve, scoring
+from . import (claims, gpodder_server, llm_budget, orchestrator, podcast_feed, ratings, resolve,
+               scoring, transcript_search)
 from .auth import BASE_URL_SETTING, Auth, parse_iso, utcnow
 from .extract import GENRES as GENRES_FILTER
 from .queries import (
@@ -35,6 +36,7 @@ from .templates import (
     episode_cell,
     esc,
     index_status_html,
+    mmss,
     page,
     pagination_html,
     pipeline_status_html,
@@ -174,6 +176,64 @@ class App:
                 "DELETE FROM user_shows WHERE user_id = ? AND show_id = ?", (user_id, show_id)
             )
             conn.commit()
+        finally:
+            conn.close()
+
+    def mark_ad(self, episode_id: int, start: float, end: float) -> bool | None:
+        """Hand-mark an ad span (source='manual' — ground truth, so it seeds the fingerprint
+        library and is cut). Clears cut_path/cut_held_at so the pipeline re-cuts the episode with
+        the new span. Admin-gated at the route. Returns None if the episode doesn't exist or the
+        span is invalid. Global data, same re-cut-on-next-cycle model as the show toggles."""
+        if not (end > start >= 0):
+            return None
+        conn = sqlite3.connect(self.db_path)
+        try:
+            if conn.execute("SELECT 1 FROM episodes WHERE id = ?", (episode_id,)).fetchone() is None:
+                return None
+            conn.execute(
+                "INSERT INTO ad_segments (episode_id, start_second, end_second, source, reason) "
+                "VALUES (?, ?, ?, 'manual', 'marked by hand')", (episode_id, start, end))
+            conn.execute("UPDATE episodes SET cut_path = NULL, cut_held_at = NULL WHERE id = ?",
+                         (episode_id,))
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
+    def remove_span(self, episode_id: int, span_id: int) -> bool | None:
+        """Remove an ad span (a false positive, or an unwanted manual mark) and re-cut. Scoped to
+        the episode so a bad id can't touch another episode's spans. Also drops any fingerprint the
+        span seeded, so a removed ground-truth ad stops matching elsewhere. Admin-gated."""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cur = conn.execute("DELETE FROM ad_segments WHERE id = ? AND episode_id = ?",
+                               (span_id, episode_id))
+            if cur.rowcount == 0:
+                return None
+            try:
+                conn.execute("DELETE FROM ad_fingerprints WHERE ad_segment_id = ?", (span_id,))
+            except sqlite3.OperationalError:
+                pass  # adscrub's table may not exist yet on this db
+            conn.execute("UPDATE episodes SET cut_path = NULL, cut_held_at = NULL WHERE id = ?",
+                         (episode_id,))
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
+    def recommendation_feed(self, token: str) -> bytes | None:
+        """Build one user's 'recommended for you' RSS, resolved from their feed_token
+        (unauthenticated, like the show feeds). None if the token matches no user."""
+        user_id = self.auth.user_id_by_feed_token(token)
+        if user_id is None:
+            return None
+        username = self.auth.username_for(user_id) or "you"
+        conn = self.db()
+        try:
+            rec = scoring.recommendations_for_user(conn, user_id, limit=25)
+            episode_ids = [r["id"] for r in rec["recommended"]]
+            return podcast_feed.build_recommendation_feed(
+                conn, username, self.base_url, episode_ids, token)
         finally:
             conn.close()
 
@@ -456,6 +516,43 @@ class App:
         )
         return page("pipeline", body, user["username"], bool(user["is_admin"]), section="pipeline")
 
+    def view_feeds(self, user) -> str:
+        """One place for every feed URL this account can subscribe to in a podcast app: the
+        personal 'recommended for you' feed, and an ad-stripped feed per subscribed show."""
+        rec_token = self.auth.feed_token_for(user["id"])
+        conn = self.db()
+        try:
+            shows = conn.execute(
+                "SELECT s.id, COALESCE(s.title, s.query) AS show, s.feed_token, "
+                "       s.ad_stripping_enabled "
+                "FROM user_shows us JOIN shows s ON s.id = us.show_id "
+                "WHERE us.user_id = ? ORDER BY show", (user["id"],)).fetchall()
+        finally:
+            conn.close()
+
+        def feed_row(uid: str, url: str) -> str:
+            return (f'<div class="copy-row"><code id="feed-{esc(uid)}">{esc(url)}</code>'
+                    f'{copy_button(f"feed-{uid}")}</div>')
+
+        body = ("<h1>Your feeds</h1>"
+                "<p class=\"dim\">Add these URLs in your podcast app (AntennaPod, Overcast, …) — "
+                "each is gated by a private token, so keep them to yourself.</p>"
+                "<h2>Recommended for you</h2>"
+                "<p class=\"dim\">Episodes ranked from your own listening, ad-stripped where a cut "
+                "exists. Updates as you listen.</p>"
+                + feed_row("rec", f"{self.base_url}/recommended/{rec_token}")
+                + "<h2>Ad-stripped shows</h2>")
+        if not shows:
+            body += ('<p class="dim">Subscribe to shows (from a show\'s page) and an ad-stripped '
+                     'feed for each appears here.</p>')
+        for s in shows:
+            if not s["feed_token"]:
+                continue  # not tokenised yet (mid-ingest) — no working feed URL to show
+            off = "" if s["ad_stripping_enabled"] else ' <span class="dim">— ad-stripping off</span>'
+            body += (f"<p><a href='/show/{s['id']}'>{esc(s['show'])}</a>{off}</p>"
+                     + feed_row(f"show-{s['id']}", f"{self.base_url}/feed/{s['id']}/{s['feed_token']}"))
+        return page("feeds", body, user["username"], bool(user["is_admin"]), section="feeds")
+
     def view_topics(self, user, params) -> str:
         genre = params.get("genre", [""])[0]
         if genre not in GENRES_FILTER:
@@ -712,6 +809,7 @@ class App:
         q = params.get("q", [""])[0].strip()
         page_num = paginate(params)
         topics, episodes, topic_total, episode_total = [], [], 0, 0
+        transcript_hits: list = []
         if q:
             like = f"%{q}%"
             conn = self.db()
@@ -736,6 +834,7 @@ class App:
                     """,
                     (like, PAGE_SIZE, (page_num - 1) * PAGE_SIZE),
                 ).fetchall()
+                transcript_hits = transcript_search.search(conn, q, limit=25)
             finally:
                 conn.close()
         body = (
@@ -762,6 +861,16 @@ class App:
                                               "episode title matches")
             body += (f"<h2>{plural(episode_total, 'episode title match', 'episode title matches')}"
                      f"</h2>{eps_table}{episodes_pager}")
+            # Full-text transcript matches (only shown when there are any — an empty/unbuilt FTS
+            # index shouldn't read as "searched the transcripts, found nothing").
+            if transcript_hits:
+                th = "".join(
+                    f"<tr><td><a href='/episode/{r['id']}'>{esc(r['title'])}</a> "
+                    f"<span class='dim'>&middot; {esc(r['show'])}</span>"
+                    f"<br><span class='dim'>{esc(r['snip'])}</span></td></tr>"
+                    for r in transcript_hits)
+                body += (f"<h2>{plural(len(transcript_hits), 'transcript match', 'transcript matches')}"
+                         f"</h2><table>{th}</table>")
         return page("search", body, user["username"], bool(user["is_admin"]), section="search")
 
     def view_shows(self, user, params: dict) -> str:
@@ -997,7 +1106,8 @@ class App:
             episode = conn.execute(
                 """
                 SELECT e.id, e.title, e.pubdate, e.audio_url, e.transcript_path,
-                       e.extracted_at, s.id AS show_id, COALESCE(s.title, s.query) AS show
+                       e.extracted_at, e.cut_path, e.cut_held_at,
+                       s.id AS show_id, COALESCE(s.title, s.query) AS show
                 FROM episodes e JOIN shows s ON s.id = e.show_id
                 WHERE e.id = ?
                 """,
@@ -1005,6 +1115,9 @@ class App:
             ).fetchone()
             if episode is None:
                 return None
+            ad_spans = conn.execute(
+                "SELECT id, start_second, end_second, source, reason FROM ad_segments "
+                "WHERE episode_id = ? ORDER BY start_second", (episode_id,)).fetchall()
             topics = conn.execute(
                 """
                 SELECT t.id AS topic_id, t.label, et.confidence
@@ -1048,6 +1161,51 @@ class App:
             f" &middot; {esc((episode['pubdate'] or '')[:10])}{play}</h2>"
             + (f"<p>{pills}</p>" if pills else "")
         )
+        # --- Per-episode ad transparency (+ admin hand-marking) ---
+        from adscrub.cut import CUT_SOURCES
+        is_admin = bool(user["is_admin"])
+        cuttable = [s for s in ad_spans if s["source"] in CUT_SOURCES]
+        total_cut = sum((s["end_second"] - s["start_second"]) for s in cuttable)
+        body += "<h2>Ads in this episode</h2>"
+        if ad_spans:
+            if episode["cut_held_at"]:
+                body += ('<p class="pending">An anomalous cut was HELD for review — serving the '
+                         'ORIGINAL audio for this episode.</p>')
+            elif episode["cut_path"]:
+                body += (f'<p>Serving the ad-stripped version — {plural(len(cuttable), "ad")} '
+                         f'removed, {mmss(total_cut)} saved.</p>')
+            else:
+                body += (f'<p class="dim">{plural(len(cuttable), "ad")} detected '
+                         f'({mmss(total_cut)}), not cut yet.</p>')
+
+            def remove_cell(span_id: int) -> str:
+                if not is_admin:
+                    return ""
+                return (f'<td><form method="post" action="/episode/{episode_id}/remove-span">'
+                        f'<input type="hidden" name="span_id" value="{span_id}">'
+                        f'<button class="ghost">remove</button></form></td>')
+            span_rows = "".join(
+                f"<tr><td class='num'>{mmss(s['start_second'])}–{mmss(s['end_second'])}</td>"
+                f"<td><code>{esc(s['source'])}</code></td>"
+                f"<td class='dim'>{esc(s['reason'] or '')}</td>{remove_cell(s['id'])}</tr>"
+                for s in ad_spans)
+            body += ("<table><tr><th>when</th><th>tier</th><th>why</th>"
+                     + ("<th></th>" if is_admin else "")
+                     + f"</tr>{span_rows}</table>")
+        else:
+            body += ('<p class="dim">No ad spans found yet — the pipeline hasn\'t detected any, '
+                     'or hasn\'t processed this episode.</p>')
+        if is_admin:
+            body += (
+                '<form class="search" method="post" action="/episode/'
+                f'{episode_id}/mark-ad">'
+                '<input type="text" name="start" placeholder="ad start (m:ss or seconds)">'
+                '<input type="text" name="end" placeholder="ad end">'
+                '<button>Mark as ad</button></form>'
+                '<p class="dim">A hand-marked ad is ground truth: it\'s cut, it seeds the '
+                'fingerprint library (so the same read is caught elsewhere for free), and the '
+                'episode is re-cut. Use “remove” to drop a false positive.</p>')
+
         if not topic_sections:
             note = "not yet indexed" if not episode["extracted_at"] else "no subject identified"
             body += f'<p class="dim">{note}</p>'

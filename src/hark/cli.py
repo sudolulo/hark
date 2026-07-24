@@ -38,7 +38,7 @@ from adscrub import transcribe as ad_transcribe
 from . import (
     __version__, claims, dai_probe, db, discover, extract, gpodder_server,
     hosting, ingest, llm_budget, nextcloud, opml, orchestrator, pipeline,
-    ratings, resolve, wikidata,
+    ratings, resolve, transcript_search, wikidata,
 )
 
 DEFAULT_DB = os.environ.get("HARK_DB", "hark.db")
@@ -788,6 +788,15 @@ def cmd_seeds(args: argparse.Namespace) -> int:
 # product judgement hark makes about how it uses adscrub, not adscrub's own taxonomy.
 _INFERENCE_SOURCES = ("repeat", "fpmatch", "dai", "recur")
 _SUSPECT_SHORT_SECONDS = 5.0  # sub-5s inference spans are disproportionately fragments/false-positives
+
+
+def cmd_index_transcripts(args: argparse.Namespace) -> int:
+    """Index un-indexed transcripts into the FTS table that /search queries. Free, incremental —
+    a bounded slice per pipeline cycle, like the fingerprint index."""
+    conn = db.connect(args.db)
+    indexed, pending = transcript_search.index_transcripts(conn, limit=args.limit)
+    print(f"indexed {indexed} transcript(s), {pending} still pending")
+    return 0
 
 
 def cmd_verify_inference(args: argparse.Namespace) -> int:
@@ -1566,6 +1575,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--sample", type=int, default=0,
                    help="also render the transcript under N random inference spans for review")
     p.set_defaults(func=cmd_verify_inference)
+
+    p = sub.add_parser("index-transcripts",
+                       help="index transcripts into the FTS table that /search queries (bounded)")
+    p.add_argument("--limit", type=int, default=None, help="max transcripts to index this run")
+    p.set_defaults(func=cmd_index_transcripts)
 
     p = sub.add_parser(
         "load-ad-detections",

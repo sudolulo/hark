@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-07-24
+
+Surfacing what the pipeline does, and closing the feedback loop.
+
+### Added
+
+- **Per-episode ad transparency.** Each episode page now shows the ads found/removed — a table of
+  timestamp (m:ss), tier, and reason, with the total time saved and whether it's serving the cut
+  or original (or a held anomalous cut). The ad-stripping is finally visible, not just applied.
+- **Hand-marking ads (admin).** A "Mark as ad" form and per-span "remove" buttons on the episode
+  page. A hand-mark is a `manual` ground-truth span (adscrub 0.18.0): it's cut, it seeds the
+  fingerprint library (so the same read is caught elsewhere for free), and the episode is re-cut.
+  "Remove" drops a false positive (and its library fingerprint) and re-cuts. Global data, so
+  admin-gated like the show toggles.
+- **Personal recommendation feed.** A subscribable "recommended for you" RSS at
+  `/recommended/<token>` (per-user `feed_token`, unauthenticated like the show feeds), built from
+  scoring.py's ranking and served ad-stripped where a cut exists.
+- **"My feeds" hub** (`/feeds`): one place for every feed URL this account can subscribe to — the
+  recommendation feed and an ad-stripped feed per subscribed show — with copy buttons.
+- **Full-text transcript search.** `/search` now searches inside transcripts (SQLite FTS5), with a
+  context snippet per match — not just titles/topics. A new `index-transcripts` pipeline stage
+  builds the index incrementally; the search path is read-only-safe (guarded, phrase-matched).
+
 ## [0.32.1] - 2026-07-24
 
 ### Fixed
