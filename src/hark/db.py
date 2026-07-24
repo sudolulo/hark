@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS episodes (
     llm_detected_at     TEXT,
     cut_path            TEXT,
     audio_gone_at       TEXT,
+    cut_held_at         TEXT,
     created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     updated_at          TEXT,
     UNIQUE (show_id, guid)
@@ -246,6 +247,7 @@ _MIGRATIONS = (
     ("episodes", "llm_detected_at", "ALTER TABLE episodes ADD COLUMN llm_detected_at TEXT"),
     ("episodes", "cut_path", "ALTER TABLE episodes ADD COLUMN cut_path TEXT"),
     ("episodes", "audio_gone_at", "ALTER TABLE episodes ADD COLUMN audio_gone_at TEXT"),
+    ("episodes", "cut_held_at", "ALTER TABLE episodes ADD COLUMN cut_held_at TEXT"),
     ("shows", "feed_token", "ALTER TABLE shows ADD COLUMN feed_token TEXT"),
     ("shows", "ad_stripping_enabled",
      "ALTER TABLE shows ADD COLUMN ad_stripping_enabled INTEGER NOT NULL DEFAULT 1"),

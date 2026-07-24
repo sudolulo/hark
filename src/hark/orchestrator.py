@@ -28,10 +28,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable
 
-from . import llm_budget
+from . import alert, llm_budget
 
 FAST = 0.0
 SLOW = 1800.0  # 30 min — the "occasional" cadence for ingest/canon/chapters/dai/fingerprint-match
+ALERT_COOLDOWN = 3600.0  # at most one ntfy alert per key (cycle / a given stage) per hour
 
 # The container runs `hark pipeline >> /app/data/transcribe.log`, so the log grows unbounded
 # unless the pipeline trims its own tail. Defaults picked for a homelab pool that runs near-full;
@@ -68,6 +69,8 @@ STAGES: list[Stage] = [
     # Free visibility into the library-bootstrap gap: logs how many ad campaigns still await a
     # ground-truth read. No key, no spend — just surfaces the number so it never goes unseen.
     Stage("ad-seeds", ["seeds", "--count"], SLOW),
+    # Free drift signal for the inference tiers (span counts, median duration, suspect-short %).
+    Stage("verify-inference", ["verify-inference"], SLOW),
     Stage("repeats", ["repeats"], FAST),
     Stage("detect-ads", ["detect-ads", "--limit", "5"], SLOW, needs_key=True, budget=llm_budget.ADS),
     Stage("cut", ["cut"], FAST),
@@ -137,6 +140,7 @@ def run_cycle(
     run: Callable[[list[str]], int] | None = None,
     key_present: bool | None = None,
     log: Callable[[str], None] | None = None,
+    on_stage_error: Callable[[str, int], None] | None = None,
 ) -> list[tuple[str, str]]:
     """One pass. Returns (stage, "ran"|"skipped:<reason>") for each stage considered.
 
@@ -190,6 +194,10 @@ def run_cycle(
         conn.commit()
         outcomes.append((st.name, "ran"))
         log(f"ran {st.name}" + ("" if rc == 0 else f" (exit {rc})"))
+        # A non-zero exit here now genuinely means a real error: empty queues and quarantined/
+        # held episodes all exit 0 (see cli.py). So this is worth paging on.
+        if rc != 0 and on_stage_error is not None:
+            on_stage_error(st.name, rc)
     conn.close()
     return outcomes
 
@@ -202,14 +210,32 @@ def run_loop(db_path: str, interval: float = 60.0, data_dir: str | None = None) 
         log_max = DEFAULT_LOG_MAX_BYTES
     _log(f"starting; interval={interval:.0f}s, key={'yes' if os.environ.get('ANTHROPIC_API_KEY') else 'no'}, "
          f"ads_budget=${llm_budget.daily_cap(llm_budget.ADS):.2f}/day, "
-         f"comparisons_budget=${llm_budget.daily_cap(llm_budget.COMPARISONS):.2f}/day")
+         f"comparisons_budget=${llm_budget.daily_cap(llm_budget.COMPARISONS):.2f}/day, "
+         f"alerts={'on' if alert.enabled() else 'off'}")
+
+    last_alert: dict[str, float] = {}
+
+    def _maybe_alert(key: str, title: str, message: str) -> None:
+        # Dedup so a persistently-broken stage (or a wedged loop) pages at most once per hour,
+        # not every 60s cycle. Only stamp on a successful send, so a transient ntfy blip doesn't
+        # swallow a real alert.
+        if time.time() - last_alert.get(key, 0.0) < ALERT_COOLDOWN:
+            return
+        if alert.notify(title, message):
+            last_alert[key] = time.time()
+            _log(f"alerted: {title}")
+
+    def _on_stage_error(name: str, rc: int) -> None:
+        _maybe_alert(f"stage:{name}", f"hark pipeline: {name} failed", f"stage '{name}' exited {rc}")
+
     while True:
         # Rotate BETWEEN cycles, while no stage subprocess is writing to the log.
         if rotate_log(log_path, log_max):
             _log(f"log rotated (> {log_max} bytes); previous kept at {log_path}.1")
         try:
             # run_cycle streams its own per-stage heartbeat via this hook.
-            run_cycle(db_path, data_dir=data_dir, log=_log)
+            run_cycle(db_path, data_dir=data_dir, log=_log, on_stage_error=_on_stage_error)
         except Exception as exc:  # noqa: BLE001 — a bad cycle must not kill the loop
             _log(f"cycle error: {exc}")
+            _maybe_alert("cycle", "hark pipeline: cycle error", str(exc))
         time.sleep(interval)

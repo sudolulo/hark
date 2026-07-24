@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-07-24
+
+### Added
+
+- **Anomalous cuts are now HELD, not just flagged — the original audio is served.** When `cmd_cut`
+  hits an anomalous cut (>35% of an episode; adscrub 0.16.0's `hold_cut`), it reverts `cut_path`
+  to NULL so the feed falls back to the ORIGINAL episode and stamps `cut_held_at` (new migration)
+  so it isn't re-cut. A likely false-positive cut no longer reaches the player; the cut file
+  stays on disk for review. This turns 0.28.0's warning into actual listener protection.
+- **`hark verify-inference` + a free `verify-inference` pipeline stage** — a drift signal for the
+  inference tiers (repeat/fpmatch/dai/recur): per-source span count, median duration, and the
+  share of suspect-short (<5s) spans. Deliberately NOT called precision (an inference span that
+  misses ground truth may be a real ad the model missed), just the distribution that false-
+  positive drift shows up in. `--sample N` renders the transcript under N random inference spans
+  so a human — or a funded model — can make the ad-vs-editorial call the numbers can't.
+- **Opt-in ntfy alerting (`alert.py`).** Dormant unless `HARK_NTFY_URL` is set (optional
+  `HARK_NTFY_TOKEN` for bearer auth) — same deliberate-switch pattern as the budgets/key. The
+  pipeline pages on a `cycle error` (loop-level exception) or any stage exiting non-zero, deduped
+  to at most once per key per hour so a persistent failure doesn't spam. Non-zero now genuinely
+  means a real error (empty queues and quarantined/held episodes all exit 0). Never raises — an
+  alert-channel failure can't take down the loop. Startup line reports `alerts=on|off`.
+
+### Changed
+
+- Bump adscrub 0.15.0 → 0.16.0; `episodes` gains a `cut_held_at` migration.
+
 ## [0.28.0] - 2026-07-24
 
 ### Fixed

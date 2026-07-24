@@ -191,6 +191,18 @@ def test_rotate_log_missing_or_disabled_is_a_noop(tmp_path):
     assert present.read_text() == "x" * 100
 
 
+def test_on_stage_error_fires_only_on_nonzero_exit(tmp_path):
+    db = _db(tmp_path)
+    errs = []
+    # 'repeats' fails (exit 7); every other stage succeeds.
+    orchestrator.run_cycle(
+        db, now=1_000_000.0, data_dir=str(tmp_path), key_present=False,
+        run=lambda a: 7 if a[0] == "repeats" else 0,
+        on_stage_error=lambda name, rc: errs.append((name, rc)))
+    assert ("repeats", 7) in errs                       # the failing stage paged
+    assert all(name != "cut" for name, _ in errs)       # a clean stage did not
+
+
 def test_default_run_spawns_a_real_hark_process(tmp_path):
     """The orchestrator shells out via `python -m hark`; prove that entry point exists and a
     harmless stage returns 0 (guards against a missing __main__.py breaking every stage)."""

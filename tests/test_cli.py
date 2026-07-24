@@ -609,6 +609,26 @@ def test_seeds_count_reports_zero_on_empty_and_exits_clean(tmp_path, capsys):
     assert "0 unread ad campaign(s)" in capsys.readouterr().out
 
 
+def test_verify_inference_reports_per_source_distribution(tmp_path, capsys):
+    path = tmp_path / "t.db"
+    conn = db.connect(path)
+    conn.execute("INSERT INTO shows (query) VALUES ('Show A')")
+    conn.execute("INSERT INTO episodes (show_id, guid, title, audio_url) "
+                 "VALUES (1, 'g1', 'Ep', 'http://a/1.mp3')")
+    conn.executemany(
+        "INSERT INTO ad_segments (episode_id, start_second, end_second, source) "
+        "VALUES (1, ?, ?, 'fpmatch')", [(0, 20), (30, 32)])   # one 20s, one suspect-short 2s
+    conn.commit()
+    conn.close()
+
+    rc = cli.main(["--db", str(path), "verify-inference"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "fpmatch" in out and "2 spans" in out
+    assert "1 suspect-short" in out and "50%" in out
+    assert "repeat" in out and "0 spans" in out                 # empty sources still reported
+
+
 def test_cut_dry_run_reports_pending(tmp_path, capsys):
     path = tmp_path / "t.db"
     conn = db.connect(path)
@@ -654,9 +674,10 @@ def test_cut_success_path_calls_adscrub_directly(tmp_path, capsys, monkeypatch):
     assert "cut 1 episode(s) (0 failed, 0 still pending)" in out
 
 
-def test_cut_flags_anomalous_fraction(tmp_path, capsys, monkeypatch):
-    """A cut removing an implausible share of a known-duration episode is WARNed and counted,
-    but the run still succeeds (the audio is served; this is a review signal, not a failure)."""
+def test_cut_holds_anomalous_fraction_and_serves_original(tmp_path, capsys, monkeypatch):
+    """A cut removing an implausible share of a known-duration episode is HELD: cut_path is
+    reverted to NULL (feed serves the ORIGINAL) and cut_held_at is stamped so it isn't re-cut.
+    The run still succeeds (a hold is not a failure)."""
     path = tmp_path / "t.db"
     conn = db.connect(path)
     conn.execute("INSERT INTO shows (query) VALUES ('Show A')")
@@ -668,15 +689,23 @@ def test_cut_flags_anomalous_fraction(tmp_path, capsys, monkeypatch):
     conn.close()
 
     def fake_cut_episode(conn, ep, client, data_dir=None):
-        return "x.mp3", 500.0                          # 500s of a 1000s episode = 50% -> anomalous
+        # mimic the real cut_episode: it writes cut_path before returning
+        conn.execute("UPDATE episodes SET cut_path = 'cut/1.mp3' WHERE id = ?", (ep["id"],))
+        conn.commit()
+        return "cut/1.mp3", 500.0                       # 500s of a 1000s episode = 50% -> anomalous
 
     monkeypatch.setattr(ad_cut, "cut_episode", fake_cut_episode)
 
     rc = cli.main(["--db", str(path), "cut"])
-    assert rc == 0                                     # a flag is not a failure
+    assert rc == 0                                     # a hold is not a failure
     out = capsys.readouterr().out
-    assert "WARN  Gutted Ep" in out and "50% of episode" in out
-    assert "1 flagged (anomalous cut fraction)" in out
+    assert "HELD  Gutted Ep" in out and "50% of episode" in out and "serving ORIGINAL" in out
+    assert "1 held (anomalous, serving original)" in out
+    conn = db.connect(path)
+    row = conn.execute("SELECT cut_path, cut_held_at FROM episodes WHERE id = 1").fetchone()
+    assert row["cut_path"] is None                     # reverted -> feed serves the original
+    assert row["cut_held_at"] is not None              # marked so it is not re-cut every cycle
+    assert ad_cut.pending_episodes(conn) == []         # held episode drops out of the cut queue
 
 
 def test_fsck_reports_dangling_transcript_paths_without_fix(tmp_path, capsys):

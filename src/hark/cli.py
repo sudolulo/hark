@@ -752,6 +752,63 @@ def cmd_seeds(args: argparse.Namespace) -> int:
     return 0
 
 
+# The tiers that INFER ad spans rather than confirm them (evidence lives in GROUND_TRUTH_SOURCES).
+# These are the ones with no per-span human/model confirmation, so they're what a drift check
+# watches. Kept here, not imported from adscrub, because "which sources are inference" is a
+# product judgement hark makes about how it uses adscrub, not adscrub's own taxonomy.
+_INFERENCE_SOURCES = ("repeat", "fpmatch", "dai", "recur")
+_SUSPECT_SHORT_SECONDS = 5.0  # sub-5s inference spans are disproportionately fragments/false-positives
+
+
+def cmd_verify_inference(args: argparse.Namespace) -> int:
+    """Free, no-key drift signal for the inference tiers (repeat/fpmatch/dai/recur).
+
+    Deliberately NOT called 'precision': an inference span that doesn't overlap a ground-truth
+    one may be a real ad the model MISSED (the repeat tier exists partly for that), so agreement
+    is ambiguous. What IS honest and free is the distribution — a rising share of very short
+    spans, or a sudden jump in count, is the shape false-positive drift takes. `--sample N`
+    renders the transcript under N random inference spans so a human (or a funded model) can do
+    the actual ad-vs-editorial call the numbers can't."""
+    conn = db.connect(args.db)
+    ph = ",".join("?" * len(_INFERENCE_SOURCES))
+    print("inference-span drift signal (distribution, not precision — see --sample to judge):")
+    for src in _INFERENCE_SOURCES:
+        durs = [r[0] for r in conn.execute(
+            "SELECT end_second - start_second AS d FROM ad_segments WHERE source = ? ORDER BY d",
+            (src,)).fetchall()]
+        n = len(durs)
+        if not n:
+            print(f"  {src:8} 0 spans")
+            continue
+        median = durs[n // 2]
+        short = sum(1 for d in durs if d < _SUSPECT_SHORT_SECONDS)
+        print(f"  {src:8} {n:6} spans  median {median:5.1f}s  "
+              f"{short} suspect-short (<{_SUSPECT_SHORT_SECONDS:.0f}s, {100 * short / n:.0f}%)")
+
+    if getattr(args, "sample", 0):
+        import json
+        rows = conn.execute(
+            f"SELECT s.episode_id, s.source, s.start_second, s.end_second, e.title, "
+            f"       e.transcript_path "
+            f"FROM ad_segments s JOIN episodes e ON e.id = s.episode_id "
+            f"WHERE s.source IN ({ph}) AND e.transcript_path IS NOT NULL "
+            f"ORDER BY RANDOM() LIMIT ?", (*_INFERENCE_SOURCES, args.sample)).fetchall()
+        for r in rows:
+            print(f"\n{'-' * 70}\n[{r['source']}] {r['title'] or ''}  "
+                  f"{r['start_second']:.0f}-{r['end_second']:.0f}s")
+            try:
+                with open(r["transcript_path"], encoding="utf-8") as fh:
+                    tx = json.load(fh)
+            except (OSError, json.JSONDecodeError) as exc:
+                print(f"  (transcript unreadable: {exc})")
+                continue
+            segs = tx["segments"] if isinstance(tx, dict) else tx
+            text = " ".join(s.get("text", "").strip() for s in segs
+                            if s.get("end", 0) > r["start_second"] and s.get("start", 0) < r["end_second"])
+            print(f"  {text or '(no transcript text in span)'}")
+    return 0
+
+
 def cmd_load_ad_detections(args: argparse.Namespace) -> int:
     import json
 
@@ -804,7 +861,7 @@ def cmd_cut(args: argparse.Namespace) -> int:
     # Uses cut_episode directly (not the bulk cut_pending) — same reason as
     # cmd_detect_ads above. cut_pending never had a consecutive-failure abort
     # to begin with, so no equivalent is needed here.
-    errors = anomalies = 0
+    errors = held = 0
     with make_client() as client:
         for ep in pending:
             try:
@@ -813,19 +870,21 @@ def cmd_cut(args: argparse.Namespace) -> int:
                 errors += 1
                 print(f"  FAIL  {ep['title'] or ''}: {exc}")
                 continue
-            # Cut-quality signal: a cut removing an implausibly large share of the episode is
-            # almost certainly a false positive eating editorial. The audio is still served —
-            # this just FLAGS it loudly for review instead of shipping a gutted episode silently.
+            # Cut-quality gate: a cut removing an implausibly large share of the episode is
+            # almost certainly a false positive eating editorial. Don't ship a gutted episode —
+            # HOLD it: revert to serving the original audio (hold_cut clears cut_path) and flag
+            # for review. The cut file stays on disk so a human can see what would have been cut.
             if ad_cut.is_anomalous_cut(ad_seconds, ep["duration_seconds"]):
-                anomalies += 1
+                ad_cut.hold_cut(conn, ep["id"])
+                held += 1
                 pct = 100 * ad_seconds / ep["duration_seconds"]
-                print(f"  WARN  {ep['title'] or ''}: cut {ad_seconds:.1f}s = {pct:.0f}% of "
-                      f"episode — anomalous, likely a false positive; review before trusting")
+                print(f"  HELD  {ep['title'] or ''}: cut was {ad_seconds:.1f}s = {pct:.0f}% of "
+                      f"episode — anomalous; serving ORIGINAL, held for review")
             else:
                 print(f"  ok    {ep['title'] or ''}: removed {ad_seconds:.1f}s of ads")
     remaining = len(_filter_enabled(ad_cut.pending_episodes(conn), enabled))
-    anom_note = f", {anomalies} flagged (anomalous cut fraction)" if anomalies else ""
-    print(f"cut {len(pending) - errors} episode(s) ({errors} failed{anom_note}, "
+    held_note = f", {held} held (anomalous, serving original)" if held else ""
+    print(f"cut {len(pending) - errors - held} episode(s) ({errors} failed{held_note}, "
           f"{remaining} still pending)")
     return 1 if errors else 0
 
@@ -1442,6 +1501,15 @@ def main(argv: list[str] | None = None) -> int:
                    help="just report how many unread ad campaigns remain (free, no reading) — "
                         "makes the library-bootstrap gap visible in the pipeline log")
     p.set_defaults(func=cmd_seeds)
+
+    p = sub.add_parser(
+        "verify-inference",
+        help="drift signal for the inference tiers (repeat/fpmatch/dai/recur): per-source count, "
+             "median duration, suspect-short share; --sample N renders spans to eyeball",
+    )
+    p.add_argument("--sample", type=int, default=0,
+                   help="also render the transcript under N random inference spans for review")
+    p.set_defaults(func=cmd_verify_inference)
 
     p = sub.add_parser(
         "load-ad-detections",
