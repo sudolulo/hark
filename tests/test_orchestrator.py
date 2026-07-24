@@ -94,6 +94,51 @@ def test_budget_records_and_depletes(tmp_path, monkeypatch):
     assert llm_budget.remaining(conn) == 0.0        # clamped, never negative
 
 
+# --- heartbeat + log rotation ---
+
+
+def test_run_cycle_streams_a_per_stage_heartbeat(tmp_path):
+    db = _db(tmp_path)
+    beats = []
+    orchestrator.run_cycle(db, now=1_000_000.0, data_dir=str(tmp_path),
+                           run=lambda a: 0, key_present=False, log=beats.append)
+    assert "→ repeats" in beats and "ran repeats" in beats      # start (→) then done
+    assert beats.index("→ repeats") < beats.index("ran repeats")
+    assert not any("detect-ads" in b for b in beats)                # a skipped stage is silent
+
+
+def test_run_cycle_heartbeat_flags_a_nonzero_exit(tmp_path):
+    db = _db(tmp_path)
+    beats = []
+    orchestrator.run_cycle(db, now=1_000_000.0, data_dir=str(tmp_path),
+                           run=lambda a: 3, key_present=False, log=beats.append)
+    assert "ran repeats (exit 3)" in beats                           # a failed stage is visible
+
+
+def test_rotate_log_copytruncates_when_over_cap(tmp_path):
+    log = tmp_path / "transcribe.log"
+    log.write_text("x" * 100)
+    assert orchestrator.rotate_log(str(log), max_bytes=50) is True
+    assert log.read_text() == ""                                     # original truncated IN PLACE
+    assert (tmp_path / "transcribe.log.1").read_text() == "x" * 100  # exactly one backup kept
+
+
+def test_rotate_log_leaves_a_small_log_alone(tmp_path):
+    log = tmp_path / "transcribe.log"
+    log.write_text("x" * 40)
+    assert orchestrator.rotate_log(str(log), max_bytes=50) is False
+    assert log.read_text() == "x" * 40
+    assert not (tmp_path / "transcribe.log.1").exists()
+
+
+def test_rotate_log_missing_or_disabled_is_a_noop(tmp_path):
+    assert orchestrator.rotate_log(str(tmp_path / "nope.log"), max_bytes=1) is False
+    present = tmp_path / "transcribe.log"
+    present.write_text("x" * 100)
+    assert orchestrator.rotate_log(str(present), max_bytes=0) is False   # <=0 disables rotation
+    assert present.read_text() == "x" * 100
+
+
 def test_default_run_spawns_a_real_hark_process(tmp_path):
     """The orchestrator shells out via `python -m hark`; prove that entry point exists and a
     harmless stage returns 0 (guards against a missing __main__.py breaking every stage)."""

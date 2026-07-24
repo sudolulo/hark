@@ -19,6 +19,7 @@ on its own; a crash in one is caught and logged, never kills the loop.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sqlite3
 import sys
@@ -31,6 +32,12 @@ from . import llm_budget
 
 FAST = 0.0
 SLOW = 1800.0  # 30 min — the "occasional" cadence for ingest/canon/chapters/dai/fingerprint-match
+
+# The container runs `hark pipeline >> /app/data/transcribe.log`, so the log grows unbounded
+# unless the pipeline trims its own tail. Defaults picked for a homelab pool that runs near-full;
+# override via env. LOG_MAX_BYTES <= 0 disables rotation entirely.
+DEFAULT_LOG_PATH = "/app/data/transcribe.log"
+DEFAULT_LOG_MAX_BYTES = 25 * 1024 * 1024  # 25 MB, then one .1 backup is kept
 
 
 @dataclass(frozen=True)
@@ -90,18 +97,46 @@ def _default_run(db_path: str, argv: list[str]) -> int:
         return 1
 
 
+def rotate_log(path: str, max_bytes: int) -> bool:
+    """copytruncate rotation: if `path` is over `max_bytes`, copy it to `path.1` (one backup) and
+    truncate the original IN PLACE. In-place truncation is required, not a rename: the container's
+    shell holds the log open with O_APPEND (`>> transcribe.log`), so after an ftruncate its next
+    write simply resumes at offset 0 — whereas a rename would leave the shell writing forever to
+    the renamed-away inode and never touch the fresh file. Call it BETWEEN cycles, when no stage
+    subprocess is writing, so there is no concurrent writer to race. Returns True if it rotated."""
+    try:
+        if max_bytes <= 0 or os.path.getsize(path) < max_bytes:
+            return False
+    except OSError:
+        return False  # missing file (e.g. running without the `>>` redirect) — nothing to rotate
+    try:
+        with open(path, "rb") as src, open(path + ".1", "wb") as dst:
+            shutil.copyfileobj(src, dst)
+        os.truncate(path, 0)
+        return True
+    except OSError:
+        return False
+
+
 def run_cycle(
     db_path: str,
     *,
     now: float | None = None,
     data_dir: str | None = None,
-    run: Callable[[str, list[str]], int] | None = None,
+    run: Callable[[list[str]], int] | None = None,
     key_present: bool | None = None,
+    log: Callable[[str], None] | None = None,
 ) -> list[tuple[str, str]]:
-    """One pass. Returns (stage, "ran"|"skipped:<reason>") for each stage considered."""
+    """One pass. Returns (stage, "ran"|"skipped:<reason>") for each stage considered.
+
+    `log`, if given, is called with a heartbeat the moment each stage STARTS (`→ <stage>`) and
+    again when it finishes (`ran <stage>`) — so a long stage (whisper can take many minutes) is
+    observable in real time instead of the whole cycle's outcomes landing in one burst at the end.
+    The return value is unchanged, so `--once` and the tests don't need it."""
     now = time.time() if now is None else now
     data_dir = data_dir if data_dir is not None else os.environ.get("HARK_DATA_DIR", "/app/data")
     run = run or (lambda argv: _default_run(db_path, argv))
+    log = log or (lambda _msg: None)
     key_present = (bool(os.environ.get("ANTHROPIC_API_KEY"))
                    if key_present is None else key_present)
 
@@ -122,6 +157,7 @@ def run_cycle(
                 except OSError:
                     pass
             outcomes.append((fname, "ran"))
+            log(f"ran {fname}")
 
     for st in STAGES:
         if now - last.get(st.name, 0.0) < st.every:
@@ -133,7 +169,8 @@ def run_cycle(
         if st.needs_budget and llm_budget.remaining(conn) <= 0:
             outcomes.append((st.name, "skipped:budget"))
             continue
-        run(st.argv)
+        log(f"→ {st.name}")                        # start heartbeat, before the slow work
+        rc = run(st.argv)
         conn.execute(
             "INSERT INTO pipeline_runs (stage, last_run) VALUES (?, ?) "
             "ON CONFLICT(stage) DO UPDATE SET last_run = excluded.last_run",
@@ -141,18 +178,26 @@ def run_cycle(
         )
         conn.commit()
         outcomes.append((st.name, "ran"))
+        log(f"ran {st.name}" + ("" if rc == 0 else f" (exit {rc})"))
     conn.close()
     return outcomes
 
 
 def run_loop(db_path: str, interval: float = 60.0, data_dir: str | None = None) -> None:
+    log_path = os.environ.get("HARK_LOG_PATH", DEFAULT_LOG_PATH)
+    try:
+        log_max = int(os.environ.get("HARK_LOG_MAX_BYTES", str(DEFAULT_LOG_MAX_BYTES)))
+    except ValueError:
+        log_max = DEFAULT_LOG_MAX_BYTES
     _log(f"starting; interval={interval:.0f}s, key={'yes' if os.environ.get('ANTHROPIC_API_KEY') else 'no'}, "
          f"daily_budget=${llm_budget.daily_cap():.2f}")
     while True:
+        # Rotate BETWEEN cycles, while no stage subprocess is writing to the log.
+        if rotate_log(log_path, log_max):
+            _log(f"log rotated (> {log_max} bytes); previous kept at {log_path}.1")
         try:
-            for name, outcome in run_cycle(db_path, data_dir=data_dir):
-                if outcome == "ran":
-                    _log(f"ran {name}")
+            # run_cycle streams its own per-stage heartbeat via this hook.
+            run_cycle(db_path, data_dir=data_dir, log=_log)
         except Exception as exc:  # noqa: BLE001 — a bad cycle must not kill the loop
             _log(f"cycle error: {exc}")
         time.sleep(interval)

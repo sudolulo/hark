@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.1] - 2026-07-24
+
+### Added
+
+- **Per-stage pipeline heartbeat.** `run_cycle` now streams a `→ <stage>` line the moment a
+  stage starts and a `ran <stage>` line when it finishes, instead of the whole cycle's outcomes
+  landing in one burst at cycle-end. The first cycle can take ~18 min (whisper transcription
+  dominates); previously nothing was logged until it completed, so a long stage was
+  indistinguishable from a hung process. A non-zero exit is now surfaced too (`ran <stage>
+  (exit N)`). `run_cycle`'s return value is unchanged, so `--once` and the tests are unaffected.
+- **Self log-rotation.** The container appends the pipeline log via `>> transcribe.log`, so it
+  grew unbounded. `rotate_log` now copytruncates between cycles: over `HARK_LOG_MAX_BYTES`
+  (default 25 MB) the log is copied to `.1` and truncated **in place** — required because the
+  shell holds the file open with `O_APPEND`, so a rename would leak writes to the old inode.
+  `HARK_LOG_PATH` overrides the path; `HARK_LOG_MAX_BYTES <= 0` disables rotation.
+
 ## [0.26.0] - 2026-07-24
 
 ### Added
