@@ -337,6 +337,9 @@ class App:
                 "SELECT COUNT(*) FROM episodes WHERE cut_path IS NULL AND cut_held_at IS NULL "
                 "AND EXISTS (SELECT 1 FROM ad_segments WHERE episode_id=episodes.id)"
             ).fetchone()[0]
+            extract_pending = conn.execute(
+                "SELECT COUNT(*) FROM episodes e JOIN shows s ON s.id = e.show_id "
+                "WHERE e.extracted_at IS NULL AND s.topic_index_enabled = 1").fetchone()[0]
             compare_pending = claims.count_pending_topics(conn)
         finally:
             conn.close()
@@ -403,6 +406,40 @@ class App:
         tiers_table = ("<table><tr><th>tier</th><th class='num'>spans</th><th>role</th></tr>"
                        + tier_rows + "</table>")
 
+        # --- What the LLM would actually run on (so funding the key holds no surprises) ---
+        ad_seeds = st["ad_seeds"]
+        unread_pending = ad_seeds[0]["unread_pending"] if ad_seeds else 0
+        seed_est = sum((s["est_dollars"] or 0.0) for s in ad_seeds)
+        if ad_seeds:
+            seed_rows = "".join(
+                f"<tr><td><a href='/episode/{s['episode_id']}'>{esc(s['title'])}</a></td>"
+                f"<td class='num'>{s['campaigns']}</td>"
+                f"<td class='num dim'>${(s['est_dollars'] or 0.0):.3f}</td></tr>" for s in ad_seeds)
+            free_left = max(0, unread_pending - len(ad_seeds))
+            ads_llm = (
+                '<div class="status active"><p><strong>Ad detection</strong> (ads pool): the model '
+                f'would read only <span class="pending">{plural(len(ad_seeds), "seed episode")}</span> '
+                '— the fewest that cover <em>every</em> unread ad campaign — for an estimated '
+                f'<span class="pending">${seed_est:.2f}</span>. The other {free_left} pending '
+                'episode(s) are caught for FREE by fingerprinting once these are confirmed, so the '
+                'model never reads them.</p></div>'
+                '<table><tr><th>episode detect-ads would read next</th>'
+                '<th class="num">campaigns</th><th class="num">est.&nbsp;$</th></tr>'
+                f'{seed_rows}</table>')
+        else:
+            ads_llm = ('<div class="status"><p><strong>Ad detection</strong> (ads pool): no unread ad '
+                       'campaigns to read right now — the free tiers have it covered, or too little '
+                       'audio is fingerprinted yet to find any.</p></div>')
+        other_llm = (
+            '<div class="status"><p><strong>Topic extraction</strong> (comparisons pool): '
+            f'{plural(extract_pending, "episode")} pending — the model reads each episode\'s title '
+            'and description (cheap, metadata only).</p>'
+            '<p><strong>Cross-show comparison</strong> (comparisons pool): '
+            f'{plural(compare_pending, "topic")} ready — the model reads the full transcripts of the '
+            '2+ shows on a shared topic (the priciest LLM call).</p></div>')
+        llm_section = ("<h2>What the LLM would run (once a key + budget is set)</h2>"
+                       + ads_llm + other_llm)
+
         queues = (
             "<h2>Work queues</h2><table>"
             f"<tr><td>transcription</td><td class='num'>{transcribe_pending}</td></tr>"
@@ -412,7 +449,7 @@ class App:
             "</table>")
 
         body = (
-            "<h1>Pipeline</h1>" + cards + budgets
+            "<h1>Pipeline</h1>" + cards + budgets + llm_section
             + "<h2>Stages</h2>" + stage_table + legend
             + "<h2>Ad-detection tiers</h2>" + tiers_table
             + queues

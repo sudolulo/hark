@@ -709,11 +709,30 @@ def cmd_seeds(args: argparse.Namespace) -> int:
 
     if args.count:
         # Free visibility into the bootstrap gap: how many ad campaigns still lack a
-        # ground-truth confirmation, and how few episodes would retire them. No key, no reading,
-        # no writes — safe to run every pipeline cycle so the number never goes silently unseen.
+        # ground-truth confirmation, and how few episodes would retire them.
         seeds = (ad_fingerprint.select_seed_episodes(
             conn, episode_ids=sorted(e["id"] for e in all_pending)) if all_pending else [])
         campaigns = sum(covers for _, covers in seeds)
+        # Persist the seed set (episode + campaigns covered + estimated $) so the read-only web
+        # /pipeline can show EXACTLY which episodes detect-ads would read — and that it is these
+        # few, campaign-deduplicated, not the thousands merely "pending". select_seed_episodes
+        # writes via ensure_schema, so the web can't recompute this itself.
+        from datetime import datetime, timezone
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        by_id = {e["id"]: e for e in all_pending}
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS llm_ad_seeds (episode_id INTEGER PRIMARY KEY, title TEXT, "
+            "campaigns INTEGER, est_dollars REAL, unread_pending INTEGER, updated_at TEXT)")
+        conn.execute("DELETE FROM llm_ad_seeds")
+        for eid, covers in seeds:
+            ep = by_id.get(eid)
+            conn.execute(
+                "INSERT OR REPLACE INTO llm_ad_seeds "
+                "(episode_id, title, campaigns, est_dollars, unread_pending, updated_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (eid, (ep["title"] if ep else None), covers,
+                 _estimate_episode_dollars(ep) if ep else 0.0, len(all_pending), now_iso))
+        conn.commit()
         print(f"{campaigns} unread ad campaign(s); {len(seeds)} seed episode(s) would confirm "
               f"them — run `hark detect-ads` (needs a key + ads budget), or `hark seeds --out "
               f"FILE` to read them in a session")

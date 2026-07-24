@@ -125,6 +125,35 @@ def test_pipeline_page_lists_every_stage(server):
         assert meta["name"] in body, meta["name"]
     assert "never run" in body                       # no pipeline_runs yet in this fixture
     assert "No ad spans found yet" in body           # no ad_segments yet — guarded, not a 500
+    assert "What the LLM would run" in body          # the funding-transparency section is present
+
+
+def test_pipeline_page_shows_which_episodes_the_llm_would_read(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('q', 'Show A', 'http://x')")
+    conn.execute("INSERT INTO episodes (show_id, guid, title, audio_url, transcript_path) "
+                 "VALUES (1, 'g1', 'Seed Ep', 'http://a/1.mp3', 't.json')")
+    # what the seeds --count stage persists: 1 seed covering 4 campaigns, out of 30 unread pending
+    conn.execute("CREATE TABLE llm_ad_seeds (episode_id INTEGER PRIMARY KEY, title TEXT, "
+                 "campaigns INTEGER, est_dollars REAL, unread_pending INTEGER, updated_at TEXT)")
+    conn.execute("INSERT INTO llm_ad_seeds VALUES (1, 'Seed Ep', 4, 0.12, 30, '2026-01-01T00:00:00Z')")
+    conn.commit()
+    conn.close()
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
+        cookie = resp.getheader("Set-Cookie").split(";")[0]
+        resp, body = request(srv, "GET", "/pipeline", cookie=cookie)
+        assert resp.status == 200
+        assert "Seed Ep" in body                       # the actual episode detect-ads would read
+        assert "1 seed episode" in body                # campaign-deduped, not "30"
+        assert "caught for FREE" in body               # the other 29 are free via fingerprinting
+        assert "$0.12" in body                         # estimated spend, shown before you fund it
+    finally:
+        srv.shutdown()
 
 
 def test_login_with_admin_token_and_browse(server):

@@ -186,6 +186,15 @@ def pipeline_status(conn: sqlite3.Connection) -> dict:
             "SELECT COUNT(*) FROM episodes WHERE cut_held_at IS NOT NULL").fetchone()[0]
     except sqlite3.OperationalError:
         pass
+    # Exactly which episodes detect-ads would read (campaign set-cover), persisted by the
+    # `seeds --count` stage — so the read-only web can show it (select_seed_episodes writes).
+    out["ad_seeds"] = []
+    try:
+        out["ad_seeds"] = conn.execute(
+            "SELECT episode_id, title, campaigns, est_dollars, unread_pending FROM llm_ad_seeds "
+            "ORDER BY campaigns DESC, episode_id").fetchall()
+    except sqlite3.OperationalError:
+        pass
     return out
 
 

@@ -1248,6 +1248,21 @@ def test_seeds_emits_only_the_selected_episodes(tmp_path, capsys, monkeypatch):
         assert f"[{i}] " in out, "every segment should be offered to the reader"
 
 
+def test_seeds_count_persists_the_llm_seed_set_for_the_ui(tmp_path, monkeypatch):
+    """`seeds --count` persists the campaign set-cover to llm_ad_seeds so the read-only web can
+    show EXACTLY which episodes detect-ads would read (and that it's these few, not all pending)."""
+    path = _seeds_corpus(tmp_path)
+    monkeypatch.setattr(cli.ad_fingerprint, "select_seed_episodes", lambda conn, **kw: [(1, 3)])
+    assert cli.main(["--db", str(path), "seeds", "--count"]) == 0
+    conn = db.connect(path)
+    rows = conn.execute(
+        "SELECT episode_id, title, campaigns, unread_pending FROM llm_ad_seeds").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["episode_id"] == 1 and rows[0]["campaigns"] == 3
+    assert rows[0]["title"] == "Ep One"
+    assert rows[0]["unread_pending"] == 1     # 1 detect-pending episode, deduped to this 1 seed
+
+
 def test_seeds_omits_regions_a_cheaper_tier_already_covered(tmp_path, capsys, monkeypatch):
     """Same reasoning as the API path: nobody should be paid to re-read covered regions."""
     path = _seeds_corpus(tmp_path)

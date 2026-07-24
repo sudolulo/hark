@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-07-24
+
+### Added
+
+- **`/pipeline` now shows exactly which episodes the LLM would run on** — a "What the LLM would
+  run" panel making the cost of turning on a key transparent up front. For ad detection it lists
+  the actual **seed episodes** `detect-ads` would read — the campaign set-cover, the fewest that
+  cover every unread ad campaign — each with the campaigns it covers and its estimated \$, and
+  states plainly that the *other* N pending episodes are caught for free by fingerprinting once
+  these are confirmed (so the model never reads them). Topic-extraction and comparison queues are
+  shown with a one-line note on what each reads (metadata vs full transcripts).
+- **`seeds --count` persists the campaign set-cover** to a new `llm_ad_seeds` table, so the
+  read-only web can display it — `select_seed_episodes` writes (via `ensure_schema`), so the web
+  can't recompute it on a page load.
+
+### Docs
+
+- `docs/PLAN.md` updated with an "Ad-stripping pipeline — matured (0.18–0.32)" section and a
+  current-status banner; the remaining work is not code — it's the `ANTHROPIC_API_KEY`.
+
 ## [0.31.0] - 2026-07-24
 
 ### Added

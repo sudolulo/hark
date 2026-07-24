@@ -2,6 +2,11 @@
 
 Milestones. Each one ships something usable and gets a CHANGELOG version.
 
+> **Status (2026-07-24, v0.32.0, deployed):** M0–M4 done; the ad-stripping pipeline is mature and
+> fully autonomous (`hark pipeline`), with a `/pipeline` UI dashboard. The one thing gating the LLM
+> tiers (`detect-ads`, `extract`, `compare`) is an `ANTHROPIC_API_KEY` — everything downstream is
+> built, budget-gated, and dormant. See **"Ad-stripping pipeline — matured (0.18–0.32)"** below.
+
 ## M0 — scaffold + ingest (done, 0.1.0)
 
 - Project scaffold: uv/pyproject, src layout, pytest.
@@ -579,6 +584,47 @@ of this page"); this pass upgrades it rather than adding a new page.
   Automatic/scheduled runs (via `claude-fleet`, same mechanism the other pipeline
   commands use) are still a deliberate follow-up — explicitly deferred again on request,
   not forgotten.
+
+## Ad-stripping pipeline — matured (0.18–0.32)
+
+The ad-stripping feature grew from "chapters + a manual LLM path" into a layered, autonomous,
+observable pipeline. Highlights, newest last:
+
+- **Layered tier taxonomy (adscrub).** Ad spans carry a `source`; hark treats them by role:
+  - **evidence** (`GROUND_TRUTH_SOURCES` = `llm`, `chapter`) — the only tiers trusted to seed the
+    fingerprint library or the text-repeat library.
+  - **inference** (`repeat`, `fpmatch`, `dai`, `recur`) — cheap, keyless, never seed the library.
+  - `FP_LIBRARY_SOURCES` = evidence + `dai` (DAI boundaries are structural, trustworthy enough to
+    fingerprint against); `CUT_SOURCES` = `chapter`/`llm`/`repeat`/`fpmatch` (what actually gets
+    cut). `recur` is discovery-only and deliberately NOT a pipeline stage.
+- **Acoustic fingerprinting (Chromaprint).** `fingerprint.py` matches our own corpus against a
+  library of CONFIRMED ad recordings — ~89% duration recall on Casefile, generalises cross-show,
+  zero tokens/transcript. Split into a bounded **index** step (fpcalc-once-and-cache) and a cheap
+  **match** step. A **streaming index** (`--stream`, 0.30/0.17.0) fingerprints un-downloaded
+  episodes by fetch-and-discard, so coverage reaches the whole ~27.8k corpus without storing audio.
+- **DAI probe** (`dai.py`): two independently-targeted fetches; where they diverge is provably
+  server-inserted. Escalates to a larger window to find a long ad's end (0.30). `dai-probe` skips
+  platforms proven non-DAI so probe budget lands where insertion actually happens.
+- **The pipeline is autonomous, tested Python** (`orchestrator.py`, `hark pipeline`, 0.26.0),
+  replacing a 1,755-char shell string. Per-stage cadence (every cycle / ~30 min) + gates; single
+  SQLite writer; crash-isolated stages. Per-stage **heartbeat** and **self log-rotation** (0.26.1).
+- **Two independent LLM budget pools (0.27.0):** `HARK_LLM_ADS_BUDGET` (detect-ads) and
+  `HARK_LLM_COMPARISONS_BUDGET` (extract, compare). Each dollars/day, default 0 = off; a key alone
+  never spends. `detect-ads` reads the **campaign set-cover** — the fewest episodes covering every
+  unread ad campaign — not all pending, so the LLM cost is bounded and the fingerprint tier
+  amplifies each confirmed campaign for free.
+- **Robustness:** dead-audio (404/410) quarantine so an expired URL can't head-of-line-block the
+  transcription queue (0.28.0); anomalous cuts (>35%) are HELD and the original is served (0.29.0);
+  exit-code hygiene (nothing-to-do ≠ failure); opt-in ntfy alerting on cycle/stage errors (0.29.0);
+  an inference-drift signal (`verify-inference`).
+- **`/pipeline` UI dashboard (0.31.0–0.32.0):** every stage's cadence/gate/last-run/status, ad-tier
+  roles, work queues, today's spend — and a **"what the LLM would run"** panel showing the exact
+  seed episodes `detect-ads` would read (campaign-deduped) with per-episode cost, so funding the
+  key holds no surprises.
+
+**What's left is not code:** provide an `ANTHROPIC_API_KEY` (+ fund whichever budget pools you
+want) and the LLM tiers auto-enable; optionally set `HARK_NTFY_URL` for alerts. The transcription
+and fingerprint backfills over the ~27.8k corpus are slow-but-flowing, bounded per cycle.
 
 ## Seed shows (feeds.txt)
 
