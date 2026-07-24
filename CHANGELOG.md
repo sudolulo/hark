@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-07-24
+
+### Added
+
+- **`hark pipeline` — the ad/topic loop as tested Python, replacing the 1,755-char shell string
+  that lived in the container's compose command.** The orchestration (stage order, cadence,
+  gating) is now first-class code (`orchestrator.py`): versioned, tested, shipped in the image,
+  changed by rebuild-and-deploy instead of string surgery on production. Still single-process /
+  one-stage-at-a-time (the right shape for one SQLite writer); `--once` runs a pass (cron/test),
+  the default loops. Compose command becomes just `hark pipeline`.
+  - Each stage declares a cadence (every cycle vs a 30-min slow gate) and gates. Free stages
+    always run. `detect-ads` is gated on **both** `ANTHROPIC_API_KEY` and a daily budget, so a
+    key alone never spends — "auto-enabled" means on the moment both are set, not before.
+  - **Budget (`llm_budget.py`): ads-first, capped.** `HARK_LLM_DAILY_BUDGET` (dollars/day,
+    default 0 = LLM off). `detect-ads` stops before the next episode once the day's estimated
+    spend would exceed it (estimate from the transcript sent — conservative, stops sooner not
+    later). Resets at UTC midnight.
+  - Session-as-extractor drop files (`pending-*.jsonl`) are still loaded and archived every
+    cycle — the monthly-Claude path is unchanged and needs no key.
+- **`hark fingerprint --index`** — bounded indexing (adscrub 0.14.0's `index_episodes`): fpcalc
+  up to `--limit` un-indexed local-audio episodes and cache them. The default match is now
+  `indexed_only` (cache hits, no download), so the pipeline indexes a slice per cycle and matches
+  everything cached — the one-time backfill spreads across cycles instead of stalling. Pinned
+  adscrub 0.13.0 -> 0.14.0.
+
+
 ## [0.25.0] - 2026-07-24
 
 ### Added

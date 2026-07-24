@@ -37,7 +37,8 @@ from adscrub import transcribe as ad_transcribe
 
 from . import (
     __version__, claims, dai_probe, db, discover, extract, gpodder_server,
-    hosting, ingest, nextcloud, opml, pipeline, ratings, resolve, wikidata,
+    hosting, ingest, llm_budget, nextcloud, opml, orchestrator, pipeline,
+    ratings, resolve, wikidata,
 )
 
 DEFAULT_DB = os.environ.get("HARK_DB", "hark.db")
@@ -393,6 +394,16 @@ def cmd_fingerprint(args: argparse.Namespace) -> int:
         print("fpcalc (Chromaprint / libchromaprint-tools) is not installed", file=sys.stderr)
         return 1
     enabled = _enabled_show_ids(conn)
+    enabled_ids = [r["id"] for r in conn.execute(
+        "SELECT id, show_id FROM episodes WHERE audio_url IS NOT NULL") if r["show_id"] in enabled]
+
+    if args.index:
+        # INDEX MODE: bounded fpcalc of un-indexed local audio (a shrinking pending queue). This
+        # is the tier's one expensive step; the pipeline runs it a slice at a time so the
+        # one-time backfill spreads across cycles instead of stalling. Matching (below) is cheap.
+        r = ad_fingerprint.index_episodes(conn, episode_ids=enabled_ids, limit=args.limit)
+        print(f"indexed {r.indexed} episode(s), {r.pending} still pending (fpcalc'd once, cached)")
+        return 0
 
     def progress(n: int, total: int) -> None:
         if n == 1 or n % 50 == 0 or n == total:
@@ -424,23 +435,32 @@ def cmd_fingerprint(args: argparse.Namespace) -> int:
     # Per-episode rather than adscrub's bulk apply_fingerprints(), for the same reason as
     # cmd_repeats: the bulk helper runs its own episode query with no way to restrict it to
     # the ad-stripping-enabled shows selected above.
+    # MATCH MODE (default): indexed_only, so it only touches episodes already fingerprinted —
+    # no download, no fpcalc, cheap enough to run every cycle. An un-indexed episode is skipped
+    # (returns -1), left to the bounded --index stage. `--download` restores the old
+    # index-on-match behaviour for a manual full run.
     detector = ad_fingerprint.AudioFingerprintDetector(library)
-    found = hit = errors = 0
+    found = hit = errors = skipped = 0
     with make_client() as client:
         for ep in episodes:
             try:
-                n = ad_fingerprint.fingerprint_episode(conn, ep, detector, client)
+                n = ad_fingerprint.fingerprint_episode(conn, ep, detector, client,
+                                                        indexed_only=not args.download)
             except Exception as exc:  # noqa: BLE001 — one bad episode must not stop the sweep
                 conn.rollback()
                 errors += 1
                 print(f"  FAIL  {ep['title'] or ''}: {exc}", file=sys.stderr)
                 continue
+            if n < 0:
+                skipped += 1
+                continue
             if n:
                 hit += 1
                 found += n
                 print(f"  ok    {ep['title'] or ''}: {n} fingerprinted ad span(s)")
-    print(f"matched {found} ad span(s) across {hit} of {len(episodes)} episode(s) "
-          f"({errors} failed) — no transcript, no model")
+    tail = f", {skipped} not indexed yet" if skipped else ""
+    print(f"matched {found} ad span(s) across {hit} of {len(episodes) - skipped} indexed "
+          f"episode(s) ({errors} failed{tail}) — no transcript, no model")
     return 0
 
 
@@ -476,6 +496,36 @@ def cmd_discover_ads(args: argparse.Namespace) -> int:
     print(f"found {found} recurring region(s) across {hit} of {len(results)} episode(s) — "
           "no library, no transcript, no model. These are INFERENCE (source='recur') and are "
           "NOT cut by default; roughly 1 in 10 may not be an ad.")
+    return 0
+
+
+def _estimate_episode_dollars(ep) -> float:
+    """Conservative $ estimate for reading one episode: the whole transcript's character count
+    priced as input tokens. Ignores that covered regions are omitted (an overestimate), which is
+    the safe direction for a budget cap — it stops sooner, never later."""
+    import json
+    try:
+        with open(ep["transcript_path"], encoding="utf-8") as fh:
+            data = json.load(fh)
+        segs = data.get("segments", data) if isinstance(data, dict) else data
+        chars = sum(len(s.get("text", "")) for s in segs)
+    except (OSError, json.JSONDecodeError, TypeError):
+        chars = 0
+    return llm_budget.estimate_dollars(chars)
+
+
+def cmd_pipeline(args: argparse.Namespace) -> int:
+    """Run the whole ad/topic pipeline: ingest -> transcribe -> fingerprint -> repeats -> cut,
+    plus the drop-file loads, and (with a key + budget) detect-ads. See orchestrator.py.
+
+    `--once` runs a single pass and exits (what tests and a cron would call); the default loops.
+    Free stages always run; LLM stages are gated on ANTHROPIC_API_KEY and HARK_LLM_DAILY_BUDGET,
+    so nothing spends until both are set."""
+    if args.once:
+        for name, outcome in orchestrator.run_cycle(args.db):
+            print(f"  {outcome:16} {name}")
+        return 0
+    orchestrator.run_loop(args.db, interval=args.interval)
     return 0
 
 
@@ -543,12 +593,25 @@ def cmd_detect_ads(args: argparse.Namespace) -> int:
     # restrict it to a specific episode set. The consecutive-failure abort
     # below is copied from detect_pending's own logic (adscrub/detect.py) to
     # preserve that behavior, since bypassing detect_pending drops it otherwise.
+    # Daily budget: when a cap is set ($HARK_LLM_DAILY_BUDGET) the loop stops before the next
+    # episode once today's spend would exceed it, so 'auto-enabled' can't run away. With no cap
+    # set, remaining() is 0 -> this command still runs when invoked by hand, but the PIPELINE
+    # never schedules it (its needs_budget gate skips it). Spend is estimated from the transcript
+    # actually sent, not read back from the API — enough to STOP in time.
+    cap = llm_budget.daily_cap()
     ok = errors = 0
     consecutive_errors = 0
     max_consecutive_errors = 5
     for ep in pending:
+        if cap and llm_budget.remaining(conn) <= 0:
+            print(f"  stop  daily LLM budget ${cap:.2f} reached "
+                  f"(spent ${llm_budget.spent_today(conn):.2f}); {ep['title'] or ''} deferred")
+            break
         try:
+            spend = _estimate_episode_dollars(ep)
             found = ad_detect.detect_episode(conn, ep, detector)
+            if cap:
+                llm_budget.record(conn, spend)
         except Exception as exc:  # noqa: BLE001 — per-episode isolation, matches detect_pending
             conn.rollback()
             errors += 1
@@ -1277,11 +1340,16 @@ def main(argv: list[str] | None = None) -> int:
         "fingerprint",
         help="match episode audio against known ad recordings (free, no transcript or model)")
     p.add_argument("--limit", type=int, help="max episodes to scan this run")
+    p.add_argument("--index", action="store_true",
+                   help="INDEX mode: fpcalc up to --limit un-indexed local-audio episodes and "
+                        "cache them (a shrinking pending queue), instead of matching. This is "
+                        "the tier's one expensive step; the pipeline runs it a slice per cycle.")
     p.add_argument("--download", action="store_true",
-                   help="also fingerprint episodes whose audio is not on disk yet, downloading "
-                        "it first. OFF by default: this corpus has ~27,800 episodes with an "
-                        "audio_url and only ~1,300 downloaded, so an unguarded sweep would pull "
-                        "terabytes from podcast CDNs.")
+                   help="match episodes whose audio isn't on disk yet, downloading + fpcalc'ing "
+                        "them inline (the old index-on-match behaviour). OFF by default: the "
+                        "default match is indexed-only (cache hits, no download); ~27,800 "
+                        "episodes have an audio_url and only ~1,300 are downloaded, so an "
+                        "unguarded sweep would pull terabytes from podcast CDNs.")
     p.add_argument("--dry-run", action="store_true", help="only report how many are scannable")
     p.set_defaults(func=cmd_fingerprint)
 
@@ -1291,6 +1359,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--show", type=int, required=True, help="show id to scan")
     p.add_argument("--limit", type=int, help="max episodes to consider")
     p.set_defaults(func=cmd_discover_ads)
+
+    p = sub.add_parser(
+        "pipeline",
+        help="run the whole ad/topic pipeline on a loop (the container's entrypoint). Free "
+             "stages always run; LLM stages need ANTHROPIC_API_KEY + HARK_LLM_DAILY_BUDGET.")
+    p.add_argument("--once", action="store_true", help="run one pass and exit (cron/test)")
+    p.add_argument("--interval", type=float, default=60.0, help="seconds between passes (default 60)")
+    p.set_defaults(func=cmd_pipeline)
 
     p = sub.add_parser("detect-ads", help="classify ad spans from transcripts with a Claude model")
     p.add_argument("--all-pending", action="store_true",
