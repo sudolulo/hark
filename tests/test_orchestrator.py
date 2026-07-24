@@ -92,3 +92,11 @@ def test_budget_records_and_depletes(tmp_path, monkeypatch):
     assert llm_budget.remaining(conn) == pytest.approx(0.40)
     llm_budget.record(conn, 0.50)
     assert llm_budget.remaining(conn) == 0.0        # clamped, never negative
+
+
+def test_default_run_spawns_a_real_hark_process(tmp_path):
+    """The orchestrator shells out via `python -m hark`; prove that entry point exists and a
+    harmless stage returns 0 (guards against a missing __main__.py breaking every stage)."""
+    from hark import db as _db
+    p = str(tmp_path / "t.db"); _db.connect(p).close()
+    assert orchestrator._default_run(p, ["stats"]) == 0
