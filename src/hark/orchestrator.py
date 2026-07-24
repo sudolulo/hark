@@ -61,8 +61,14 @@ STAGES: list[Stage] = [
     Stage("extract", ["extract", "--limit", "20"], SLOW, needs_key=True, budget=llm_budget.COMPARISONS),
     Stage("canon", ["canon", "--limit", "50"], SLOW),
     Stage("chapters", ["chapters"], SLOW),
-    Stage("dai-probe", ["dai-probe", "--per-platform", "1"], SLOW),
+    # per-platform 3 (was 1): more depth per cycle, and select_sample now skips proven-non-DAI
+    # platforms so that budget lands on platforms that actually do dynamic insertion (5b).
+    Stage("dai-probe", ["dai-probe", "--per-platform", "3"], SLOW),
     Stage("fp-index", ["fingerprint", "--index", "--limit", "30"], FAST),
+    # STREAMING index (SLOW, small limit): fingerprint un-downloaded episodes by fetch-and-discard
+    # so coverage reaches the whole corpus, not just the ~1.3k on disk. Bounded because each is a
+    # full audio fetch — bandwidth, not storage. Local-audio index above stays FAST/cheap.
+    Stage("fp-stream-index", ["fingerprint", "--index", "--stream", "--limit", "20"], SLOW),
     Stage("transcribe-cross", ["transcribe", "--cross-show-only", "--limit", "5"], FAST),
     Stage("transcribe", ["transcribe", "--limit", "20"], FAST),
     Stage("fp-match", ["fingerprint"], SLOW),
@@ -73,6 +79,9 @@ STAGES: list[Stage] = [
     Stage("verify-inference", ["verify-inference"], SLOW),
     Stage("repeats", ["repeats"], FAST),
     Stage("detect-ads", ["detect-ads", "--limit", "5"], SLOW, needs_key=True, budget=llm_budget.ADS),
+    # compare (treatment comparison across shows) — needs transcripts, so it runs after transcribe;
+    # draws from the COMPARISONS pool, same as extract. Dormant until that budget is funded.
+    Stage("compare", ["compare", "--limit", "3"], SLOW, needs_key=True, budget=llm_budget.COMPARISONS),
     Stage("cut", ["cut"], FAST),
 ]
 # Deliberately NOT a stage: `discover-ads` (the `recur` tier). Its spans are neither cut

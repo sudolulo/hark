@@ -408,11 +408,22 @@ def cmd_fingerprint(args: argparse.Namespace) -> int:
         "SELECT id, show_id FROM episodes WHERE audio_url IS NOT NULL") if r["show_id"] in enabled]
 
     if args.index:
-        # INDEX MODE: bounded fpcalc of un-indexed local audio (a shrinking pending queue). This
-        # is the tier's one expensive step; the pipeline runs it a slice at a time so the
-        # one-time backfill spreads across cycles instead of stalling. Matching (below) is cheap.
-        r = ad_fingerprint.index_episodes(conn, episode_ids=enabled_ids, limit=args.limit)
-        print(f"indexed {r.indexed} episode(s), {r.pending} still pending (fpcalc'd once, cached)")
+        # INDEX MODE: bounded fpcalc of un-indexed audio (a shrinking pending queue). This is the
+        # tier's one expensive step; the pipeline runs it a slice at a time so the one-time
+        # backfill spreads across cycles instead of stalling. Matching (below) is cheap.
+        if args.stream:
+            # STREAM: fetch-and-discard each episode's audio to fingerprint it, so coverage
+            # reaches episodes never downloaded (the corpus has ~27.8k episodes, only ~1.3k on
+            # disk). One full fetch per streamed episode — bounded by --limit + a slow cadence,
+            # and scoped to ad-stripping-enabled shows so we only index what we would cut.
+            with make_client() as client:
+                r = ad_fingerprint.stream_index_episodes(
+                    conn, client, episode_ids=enabled_ids, limit=args.limit)
+            print(f"stream-indexed {r.indexed} episode(s), {r.pending} still pending "
+                  f"(audio streamed, never stored)")
+        else:
+            r = ad_fingerprint.index_episodes(conn, episode_ids=enabled_ids, limit=args.limit)
+            print(f"indexed {r.indexed} episode(s), {r.pending} still pending (fpcalc'd once, cached)")
         return 0
 
     def progress(n: int, total: int) -> None:
@@ -924,7 +935,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
     if not pending:
         print("no topics pending comparison (need 2+ shows' transcripts on the same topic)",
               file=sys.stderr)
-        return 1
+        return 0                       # nothing to do is success, not failure
 
     import anthropic  # deferred: other commands must work without a key
 
@@ -944,7 +955,28 @@ def cmd_compare(args: argparse.Namespace) -> int:
         else:
             print(f"  ok    {r.label}: {r.shared_count} shared claim(s)")
 
-    results = claims.compare_pending(conn, comparator, limit=args.limit, on_result=report)
+    # Comparisons budget (its own pool — see llm_budget/extract). Comparison sends whole
+    # transcripts, so it's the pricier LLM path; estimate a topic's cost from its transcript FILE
+    # sizes (a cheap stat, and JSON-over-text overestimates → stops sooner, the safe direction).
+    cap = llm_budget.daily_cap(llm_budget.COMPARISONS)
+
+    def _budget_gate(item: dict) -> bool:
+        if cap and llm_budget.remaining(conn, llm_budget.COMPARISONS) <= 0:
+            print(f"  stop  daily comparisons budget ${cap:.2f} reached "
+                  f"(spent ${llm_budget.spent_today(conn, llm_budget.COMPARISONS):.2f})")
+            return False
+        if cap:
+            chars = 0
+            for e in item["episodes"]:
+                try:
+                    chars += os.path.getsize(e["transcript_path"])
+                except OSError:
+                    pass
+            llm_budget.record(conn, llm_budget.COMPARISONS, llm_budget.estimate_dollars(chars))
+        return True
+
+    results = claims.compare_pending(conn, comparator, limit=args.limit,
+                                     on_result=report, on_before=_budget_gate)
     errors = sum(1 for r in results if r.error)
     remaining = len(claims.pending_topics(conn))
     print(f"compared {len(results) - errors} topic(s) ({errors} failed, {remaining} still pending)")
@@ -1459,6 +1491,11 @@ def main(argv: list[str] | None = None) -> int:
                         "default match is indexed-only (cache hits, no download); ~27,800 "
                         "episodes have an audio_url and only ~1,300 are downloaded, so an "
                         "unguarded sweep would pull terabytes from podcast CDNs.")
+    p.add_argument("--stream", action="store_true",
+                   help="with --index: fingerprint episodes whose audio ISN'T on disk by "
+                        "streaming (fetch-and-discard) it, so coverage reaches the whole corpus "
+                        "without storing ~830GB of audio. One full fetch per episode — bound it "
+                        "with --limit and a slow cadence.")
     p.add_argument("--dry-run", action="store_true", help="only report how many are scannable")
     p.set_defaults(func=cmd_fingerprint)
 

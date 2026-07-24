@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-07-24
+
+### Added
+
+- **`compare` is now a pipeline stage**, gated on a key **and** the comparisons budget (dormant
+  until funded, like `extract`/`detect-ads`) and enforcing that budget per topic — stopping before
+  the next topic once the day's comparisons spend is used up (cost estimated from transcript file
+  sizes). Runs after transcribe, so the transcripts it compares exist. This lights up the "compare
+  treatments across shows" half of the product the moment `HARK_LLM_COMPARISONS_BUDGET` is set.
+- **Streaming fingerprint index (`fingerprint --index --stream` + a bounded `fp-stream-index`
+  stage).** Fingerprints episodes whose audio isn't on disk by streaming (fetch-and-discard) it
+  (adscrub 0.17.0), so coverage reaches the whole ~27.8k-episode corpus instead of only the ~1.3k
+  downloaded — without storing ~830GB. Bounded (SLOW cadence, small limit) because each is a full
+  fetch (bandwidth, not storage), and scoped to ad-stripping-enabled shows. The FAST local-audio
+  index is unchanged.
+
+### Changed
+
+- **DAI probing does more per cycle and wastes less of it.** `dai-probe --per-platform` raised
+  1→3, and `select_sample` now skips platforms proven non-DAI (`PROVEN_NON_DAI_TRIALS`=40 probes
+  with zero divergence) so that budget lands on platforms that actually do dynamic insertion.
+  Reversible (derived live from `dai_probes`); opt out with `skip_proven_non_dai=False`. Long ads
+  also get their end found now (adscrub 0.17.0's escalating probe).
+- `compare` exits 0 on an empty queue (nothing-to-do ≠ failure), matching the other stages.
+- Bump adscrub 0.16.0 → 0.17.0.
+
 ## [0.29.0] - 2026-07-24
 
 ### Added

@@ -28,11 +28,27 @@ class ProbeResult:
 DEFAULT_MIN_TRIALS = 3
 
 
+# After this many probes on a platform with ZERO divergence, treat it as non-DAI and stop
+# spending probe budget on its new episodes — that budget goes to platforms that actually
+# diverge (5b). Reversible: it's derived live from dai_probes, so clearing those rows re-opens
+# the platform. Well above DEFAULT_MIN_TRIALS so a platform gets a real chance to show DAI first.
+PROVEN_NON_DAI_TRIALS = 40
+
+
+def _proven_non_dai(conn: sqlite3.Connection, threshold: int = PROVEN_NON_DAI_TRIALS) -> set[str]:
+    return {
+        r["platform"] for r in conn.execute(
+            "SELECT platform FROM dai_probes GROUP BY platform "
+            "HAVING COUNT(*) >= ? AND COALESCE(SUM(diverged), 0) = 0", (threshold,))
+    }
+
+
 def select_sample(
     conn: sqlite3.Connection,
     per_platform: int = 1,
     limit: int | None = None,
     min_trials: int = DEFAULT_MIN_TRIALS,
+    skip_proven_non_dai: bool = True,
 ) -> list[sqlite3.Row]:
     """Pick up to `per_platform` episodes needing another probe from each
     distinct hosting_platform, prioritizing whichever has the fewest attempts
@@ -63,10 +79,13 @@ def select_sample(
         """,
         (min_trials,),
     ).fetchall()
+    skip = _proven_non_dai(conn) if skip_proven_non_dai else set()
     per_platform_count: dict[str, int] = {}
     sample = []
     for row in rows:
         platform = row["hosting_platform"]
+        if platform in skip:                       # proven non-DAI — don't waste probes here (5b)
+            continue
         if per_platform_count.get(platform, 0) >= per_platform:
             continue
         per_platform_count[platform] = per_platform_count.get(platform, 0) + 1

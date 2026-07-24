@@ -609,6 +609,12 @@ def test_seeds_count_reports_zero_on_empty_and_exits_clean(tmp_path, capsys):
     assert "0 unread ad campaign(s)" in capsys.readouterr().out
 
 
+def test_compare_with_nothing_pending_is_clean(tmp_path, capsys):
+    rc = cli.main(["--db", str(tmp_path / "t.db"), "compare"])
+    assert rc == 0                     # nothing to do is success, not failure
+    assert "no topics pending comparison" in capsys.readouterr().err
+
+
 def test_verify_inference_reports_per_source_distribution(tmp_path, capsys):
     path = tmp_path / "t.db"
     conn = db.connect(path)

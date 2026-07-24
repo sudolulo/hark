@@ -306,13 +306,19 @@ def compare_pending(
     comparator: Comparator,
     limit: int | None = None,
     on_result: Callable[[CompareResult], None] | None = None,
+    on_before: Callable[[dict], bool] | None = None,
     max_consecutive_errors: int = 5,
 ) -> list[CompareResult]:
-    """Run comparison over pending topic groups; stops early on repeated failures."""
+    """Run comparison over pending topic groups; stops early on repeated failures.
+
+    `on_before(item)`, if given, is called before each topic is sent to the model; returning
+    False stops the run — the comparisons-budget gate uses this, same shape as extract/detect."""
     ensure_schema(conn)
     results: list[CompareResult] = []
     consecutive_errors = 0
     for item in pending_topics(conn, limit):
+        if on_before is not None and not on_before(item):
+            break
         topic_id = item["topic_id"]
         label = conn.execute(
             "SELECT label FROM topics WHERE id = ?", (topic_id,)

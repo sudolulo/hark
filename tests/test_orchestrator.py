@@ -70,6 +70,7 @@ def test_ads_and_comparisons_budgets_are_independent(tmp_path, monkeypatch):
                                       run=lambda a: 0, key_present=True))
     assert out["detect-ads"] == "ran"                 # ads pool funded
     assert out["extract"] == "skipped:budget"         # comparisons pool is not
+    assert out["compare"] == "skipped:budget"         # ...and compare shares that pool
 
     monkeypatch.delenv("HARK_LLM_ADS_BUDGET", raising=False)
     monkeypatch.delenv("HARK_LLM_DAILY_BUDGET", raising=False)
@@ -77,6 +78,7 @@ def test_ads_and_comparisons_budgets_are_independent(tmp_path, monkeypatch):
     out = dict(orchestrator.run_cycle(db, now=2_000_000.0, data_dir=str(tmp_path),
                                       run=lambda a: 0, key_present=True))
     assert out["extract"] == "ran"                    # comparisons pool funded
+    assert out["compare"] == "ran"                    # ...funds compare too
     assert out["detect-ads"] == "skipped:budget"      # ads pool is not
 
 

@@ -94,6 +94,29 @@ def test_select_sample_min_trials_is_configurable(conn):
     assert [ep["guid"] for ep in sample] == ["a1"]
 
 
+def test_select_sample_skips_proven_non_dai_platforms(conn):
+    """A platform probed PROVEN_NON_DAI_TRIALS times with zero divergence stops consuming probe
+    budget on its new episodes (5b) — but a platform that could still diverge keeps being probed,
+    and the skip is opt-out."""
+    dead = add_show(conn, "Dead", hosting_platform="libsyn.com")
+    for i in range(dai_probe.PROVEN_NON_DAI_TRIALS):
+        ep = add_episode(conn, dead, f"d{i}")
+        conn.execute(
+            "INSERT INTO dai_probes (episode_id, platform, tested_at, bytes_compared, diverged)"
+            " VALUES (?, 'libsyn.com', '2026-01-01T00:00:00Z', 100, 0)", (ep["id"],))
+    add_episode(conn, dead, "dnew")                       # fresh, un-probed -> would normally qualify
+    live = add_show(conn, "Live", hosting_platform="acast.com")
+    add_episode(conn, live, "lnew")
+    conn.commit()
+
+    platforms = {ep["hosting_platform"] for ep in dai_probe.select_sample(conn, per_platform=5)}
+    assert "acast.com" in platforms                       # still-viable platform keeps getting probed
+    assert "libsyn.com" not in platforms                  # proven non-DAI: skipped
+    optout = {ep["hosting_platform"]
+              for ep in dai_probe.select_sample(conn, per_platform=5, skip_proven_non_dai=False)}
+    assert "libsyn.com" in optout                          # opt-out restores the old behaviour
+
+
 def test_select_sample_skips_shows_with_no_platform(conn):
     show = add_show(conn, "Show A", hosting_platform=None)
     add_episode(conn, show, "a1")
