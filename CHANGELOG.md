@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-07-24
+
+### Added
+
+- **`/pipeline` dashboard — the status of every pipeline stage in the UI.** A new page showing,
+  per stage: its cadence (every cycle / ~30 min), its gate (free / needs key / needs a budget
+  pool), when it last ran, and a colour-coded status badge for its last outcome — `ran`, `error
+  (exit N)`, `idle` (waiting for cadence), or `needs key`/`needs budget`. Plus overview cards (ad
+  spans found, fingerprint library size, dead audio quarantined, bad cuts held), the ad-detection
+  tiers with their role (evidence/inference · seeds-library · cuttable), the work queues, and
+  today's LLM spend. Before this the deployed loop's state was only visible in the container log
+  or by querying hark.db by hand. Linked from the nav and from a compact home-page banner.
+- **Per-stage status is persisted.** `pipeline_runs` gains `last_status` / `last_seen` /
+  `last_exit` (migrated in place by the orchestrator), and `run_cycle` now records EVERY stage's
+  outcome each cycle — skips included — not just the ones that ran, so the dashboard shows real
+  state. Read by the web app through a guarded query (the table is created by the transcribe
+  service, so a fresh deploy degrades to empty rather than 500-ing).
+
+### Changed
+
+- The home-page pipeline banner is now a compact one-line summary linking to `/pipeline`, instead
+  of a stacked three-plus-line list.
+
 ## [0.30.0] - 2026-07-24
 
 ### Added

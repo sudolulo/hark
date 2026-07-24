@@ -403,6 +403,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(200, app.view_topics(user, params))
             if route == "/notable":
                 return self.respond(200, app.view_notable(user, params))
+            if route == "/pipeline":
+                return self.respond(200, app.view_pipeline(user))
             if route.startswith("/topic/"):
                 try:
                     topic_id = int(route.rsplit("/", 1)[1])

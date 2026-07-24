@@ -8,17 +8,19 @@ from __future__ import annotations
 import os
 import sqlite3
 import urllib.parse
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
 
-from . import claims, gpodder_server, podcast_feed, ratings, resolve, scoring
-from .auth import BASE_URL_SETTING, Auth, parse_iso
+from . import claims, gpodder_server, llm_budget, orchestrator, podcast_feed, ratings, resolve, scoring
+from .auth import BASE_URL_SETTING, Auth, parse_iso, utcnow
 from .extract import GENRES as GENRES_FILTER
 from .queries import (
     PAGE_SIZE,
     contested_topics,
     paginate,
+    pipeline_status,
     rare_genre_episodes,
     related_shows,
     related_topics,
@@ -38,8 +40,9 @@ from .templates import (
     pipeline_status_html,
     plural,
     relative_time,
-    topic_pills,
+    stage_status_badge,
     topic_table,
+    topic_pills,
 )
 
 # MAX_SHOWS_PER_USER lives in gpodder_server.py — shared with the
@@ -310,6 +313,111 @@ class App:
             f"<table><tr><th>when</th><th>show</th><th>episode</th></tr>{recent_html}</table>"
         )
         return page("index", body, user["username"], bool(user["is_admin"]), section="home")
+
+    def view_pipeline(self, user) -> str:
+        """Operational dashboard: what every pipeline stage last did (from pipeline_runs), the ad
+        tiers' output, the work queues, and today's LLM spend — so the deployed loop's state is
+        visible in the UI instead of only in the container log / hark.db."""
+        from adscrub.cut import CUT_SOURCES
+        from adscrub.fingerprint import FP_LIBRARY_SOURCES
+        from adscrub.repeats import GROUND_TRUTH_SOURCES
+
+        conn = self.db()
+        try:
+            st = pipeline_status(conn)
+            transcribe_pending = conn.execute(
+                "SELECT COUNT(*) FROM episodes WHERE transcript_path IS NULL AND audio_url IS NOT NULL "
+                "AND audio_gone_at IS NULL "
+                "AND id NOT IN (SELECT episode_id FROM ad_segments WHERE source='chapter')"
+            ).fetchone()[0]
+            detect_pending = conn.execute(
+                "SELECT COUNT(*) FROM episodes WHERE transcript_path IS NOT NULL AND llm_detected_at IS NULL"
+            ).fetchone()[0]
+            cut_pending = conn.execute(
+                "SELECT COUNT(*) FROM episodes WHERE cut_path IS NULL AND cut_held_at IS NULL "
+                "AND EXISTS (SELECT 1 FROM ad_segments WHERE episode_id=episodes.id)"
+            ).fetchone()[0]
+            compare_pending = claims.count_pending_topics(conn)
+        finally:
+            conn.close()
+        # spend comes from pipeline_status' guarded read (llm_budget.spent_today would call
+        # ensure_schema — a WRITE — which the read-only web connection can't do). daily_cap only
+        # reads env, so it's safe here.
+        spend_ads = st["spend"]["ads"]
+        spend_cmp = st["spend"]["comparisons"]
+
+        stages = st["stages"]
+        total_spans = sum(r["n"] for r in st["spans"])
+        cards = f"""
+        <div class="cards">
+        <div class="card"><div class="big">{total_spans}</div>ad spans found</div>
+        <div class="card"><div class="big">{st['library']}</div>fingerprint library</div>
+        <div class="card"><div class="big">{st['quarantined']}</div>dead audio quarantined</div>
+        <div class="card"><div class="big">{st['held']}</div>bad cuts held</div>
+        </div>"""
+
+        def cap_label(cap: float) -> str:
+            return f"${cap:.2f}/day cap" if cap else "off"
+        budgets = (
+            '<div class="status"><p>LLM spend today — '
+            f'ads <span class="pending">${spend_ads:.2f}</span> '
+            f'({cap_label(llm_budget.daily_cap(llm_budget.ADS))}), '
+            f'comparisons <span class="pending">${spend_cmp:.2f}</span> '
+            f'({cap_label(llm_budget.daily_cap(llm_budget.COMPARISONS))}).</p>'
+            '<p class="dim">A key alone never spends; each pool is funded independently via its '
+            'own env var.</p></div>'
+        )
+
+        stage_rows = []
+        for meta in orchestrator.stage_meta():
+            row = stages.get(meta["name"])
+            status = row["last_status"] if row else None
+            exit_code = row["last_exit"] if row else None
+            last_run = (row["last_run"] if row else None) or 0.0
+            when = relative_time(datetime.fromtimestamp(last_run, timezone.utc)) if last_run > 0 else "—"
+            stage_rows.append(
+                f"<tr class='stagerow'><td>{esc(meta['name'])}</td>"
+                f"<td class='dim'>{esc(meta['cadence'])}</td>"
+                f"<td class='dim'>{esc(meta['gate'])}</td>"
+                f"<td class='dim'>{esc(when)}</td>"
+                f"<td>{stage_status_badge(status, exit_code)}</td></tr>")
+        stage_table = (
+            "<table><tr><th>stage</th><th>cadence</th><th>gate</th><th>last run</th>"
+            "<th>status</th></tr>" + "".join(stage_rows) + "</table>")
+        legend = ('<p class="legend"><span class="dot ok"></span>ran &nbsp; '
+                  '<span class="dot idle"></span>idle / waiting for cadence &nbsp; '
+                  '<span class="dot gated"></span>needs key or budget &nbsp; '
+                  '<span class="dot bad"></span>error</p>')
+
+        def role(src: str) -> str:
+            parts = ["evidence" if src in GROUND_TRUTH_SOURCES else "inference"]
+            if src in FP_LIBRARY_SOURCES:
+                parts.append("seeds library")
+            if src in CUT_SOURCES:
+                parts.append("cuttable")
+            return " · ".join(parts)
+        tier_rows = "".join(
+            f"<tr><td><code>{esc(r['source'])}</code></td><td class='num'>{r['n']}</td>"
+            f"<td class='dim'>{esc(role(r['source']))}</td></tr>" for r in st["spans"]
+        ) or '<tr><td class="dim" colspan="3">No ad spans found yet.</td></tr>'
+        tiers_table = ("<table><tr><th>tier</th><th class='num'>spans</th><th>role</th></tr>"
+                       + tier_rows + "</table>")
+
+        queues = (
+            "<h2>Work queues</h2><table>"
+            f"<tr><td>transcription</td><td class='num'>{transcribe_pending}</td></tr>"
+            f"<tr><td>ad-span detection (LLM)</td><td class='num'>{detect_pending}</td></tr>"
+            f"<tr><td>cutting</td><td class='num'>{cut_pending}</td></tr>"
+            f"<tr><td>cross-show comparison</td><td class='num'>{compare_pending}</td></tr>"
+            "</table>")
+
+        body = (
+            "<h1>Pipeline</h1>" + cards + budgets
+            + "<h2>Stages</h2>" + stage_table + legend
+            + "<h2>Ad-detection tiers</h2>" + tiers_table
+            + queues
+        )
+        return page("pipeline", body, user["username"], bool(user["is_admin"]), section="pipeline")
 
     def view_topics(self, user, params) -> str:
         genre = params.get("genre", [""])[0]

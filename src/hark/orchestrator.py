@@ -101,10 +101,63 @@ DROP_FILES = [
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS pipeline_runs (
-    stage    TEXT PRIMARY KEY,
-    last_run REAL NOT NULL
+    stage       TEXT PRIMARY KEY,
+    last_run    REAL,          -- last time it actually RAN (0.0 = never); drives cadence
+    last_status TEXT,          -- last outcome: ran | skipped:cadence | skipped:no-key | skipped:budget
+    last_seen   REAL,          -- last cycle it was CONSIDERED (ran or skipped)
+    last_exit   INTEGER        -- exit code of the last run (NULL until it has run once)
 );
 """
+
+
+def _ensure_pipeline_schema(conn: sqlite3.Connection) -> None:
+    # The 0.26 table was (stage, last_run NOT NULL). Add the status columns in place so the UI can
+    # show what each stage last did, not just when it last ran. last_run stays NOT NULL on the old
+    # table, so a never-run stage is written as 0.0 (a sentinel that also reads as "past due").
+    conn.executescript(_SCHEMA)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(pipeline_runs)")}
+    for col, decl in (("last_status", "TEXT"), ("last_seen", "REAL"), ("last_exit", "INTEGER")):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE pipeline_runs ADD COLUMN {col} {decl}")
+    conn.commit()
+
+
+def _record_stage(conn: sqlite3.Connection, stage: str, *, seen_at: float, status: str,
+                  ran_at: float | None = None, exit_code: int | None = None) -> None:
+    """Persist a stage's outcome this cycle. INSERT OR IGNORE first so a brand-new stage gets a
+    row with last_run=0.0 (satisfies the old table's NOT NULL and reads as 'never ran'); then
+    update — last_run/last_exit only when it actually ran, so a skip never clobbers the real
+    last-run time cadence depends on."""
+    conn.execute("INSERT OR IGNORE INTO pipeline_runs (stage, last_run) VALUES (?, 0.0)", (stage,))
+    if ran_at is not None:
+        conn.execute(
+            "UPDATE pipeline_runs SET last_seen=?, last_status=?, last_run=?, last_exit=? "
+            "WHERE stage=?", (seen_at, status, ran_at, exit_code, stage))
+    else:
+        conn.execute("UPDATE pipeline_runs SET last_seen=?, last_status=? WHERE stage=?",
+                     (seen_at, status, stage))
+
+
+def stage_meta() -> list[dict]:
+    """Human-facing metadata for each stage — kept next to STAGES so the /pipeline dashboard's
+    labels track the definition. `order` is the run order within a cycle."""
+    out = []
+    for i, st in enumerate(STAGES):
+        if not st.needs_key and st.budget is None:
+            gate = "free"
+        elif st.budget == llm_budget.ADS:
+            gate = "key + ads budget"
+        elif st.budget == llm_budget.COMPARISONS:
+            gate = "key + comparisons budget"
+        else:
+            gate = "key"
+        out.append({
+            "name": st.name,
+            "order": i,
+            "cadence": "every cycle" if st.every <= 0 else f"~{int(st.every // 60)} min",
+            "gate": gate,
+        })
+    return out
 
 
 def _log(msg: str) -> None:
@@ -165,8 +218,8 @@ def run_cycle(
                    if key_present is None else key_present)
 
     conn = sqlite3.connect(db_path)
-    conn.executescript(_SCHEMA)
-    last = {r[0]: r[1] for r in conn.execute("SELECT stage, last_run FROM pipeline_runs")}
+    _ensure_pipeline_schema(conn)
+    last = {r[0]: (r[1] or 0.0) for r in conn.execute("SELECT stage, last_run FROM pipeline_runs")}
     outcomes: list[tuple[str, str]] = []
 
     # drop files first: cheap, and a fresh detection/extraction should be visible to this cycle
@@ -185,21 +238,23 @@ def run_cycle(
 
     for st in STAGES:
         if now - last.get(st.name, 0.0) < st.every:
-            outcomes.append((st.name, "skipped:cadence"))
+            status = "skipped:cadence"
+        elif st.needs_key and not key_present:
+            status = "skipped:no-key"
+        elif st.budget is not None and llm_budget.remaining(conn, st.budget) <= 0:
+            status = "skipped:budget"
+        else:
+            status = "ran"
+
+        if status != "ran":
+            _record_stage(conn, st.name, seen_at=now, status=status)
+            conn.commit()
+            outcomes.append((st.name, status))
             continue
-        if st.needs_key and not key_present:
-            outcomes.append((st.name, "skipped:no-key"))
-            continue
-        if st.budget is not None and llm_budget.remaining(conn, st.budget) <= 0:
-            outcomes.append((st.name, "skipped:budget"))
-            continue
+
         log(f"→ {st.name}")                        # start heartbeat, before the slow work
         rc = run(st.argv)
-        conn.execute(
-            "INSERT INTO pipeline_runs (stage, last_run) VALUES (?, ?) "
-            "ON CONFLICT(stage) DO UPDATE SET last_run = excluded.last_run",
-            (st.name, now),
-        )
+        _record_stage(conn, st.name, seen_at=now, status="ran", ran_at=now, exit_code=rc)
         conn.commit()
         outcomes.append((st.name, "ran"))
         log(f"ran {st.name}" + ("" if rc == 0 else f" (exit {rc})"))

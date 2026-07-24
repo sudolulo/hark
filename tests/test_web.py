@@ -85,8 +85,8 @@ def login(srv, password="letmein"):
 
 
 def test_everything_gated_except_allowlist(server):
-    for path in ("/", "/topics", "/topic/1", "/notable", "/search", "/shows", "/show/1",
-                 "/episode/1", "/account"):
+    for path in ("/", "/topics", "/topic/1", "/notable", "/pipeline", "/search", "/shows",
+                 "/show/1", "/episode/1", "/account"):
         resp, _ = request(server, "GET", path)
         assert resp.status == 303, path
         assert resp.getheader("Location") == "/login"
@@ -109,10 +109,22 @@ def test_no_inline_styles(server):
     # is silently no-op'd by the browser rather than erroring — easy to miss
     # without actually rendering the page. Guard against it creeping back in.
     cookie = login(server)
-    for path in ("/login", "/", "/topics", "/topic/1", "/notable", "/shows", "/show/1",
-                 "/search", "/account"):
+    for path in ("/login", "/", "/topics", "/topic/1", "/notable", "/pipeline", "/shows",
+                 "/show/1", "/search", "/account"):
         _, body = request(server, "GET", path, cookie=cookie)
         assert 'style="' not in body, path
+
+
+def test_pipeline_page_lists_every_stage(server):
+    from hark import orchestrator
+    cookie = login(server)
+    resp, body = request(server, "GET", "/pipeline", cookie=cookie)
+    assert resp.status == 200
+    assert "<h1>Pipeline</h1>" in body
+    for meta in orchestrator.stage_meta():          # every stage is on the page
+        assert meta["name"] in body, meta["name"]
+    assert "never run" in body                       # no pipeline_runs yet in this fixture
+    assert "No ad spans found yet" in body           # no ad_segments yet — guarded, not a 500
 
 
 def test_login_with_admin_token_and_browse(server):
@@ -124,7 +136,7 @@ def test_login_with_admin_token_and_browse(server):
     assert "Fully indexed" in body  # fixture's one episode is already extracted
     assert 'href="/topics?genre=mystery">mystery (1)' in body  # genre breakdown
     assert "Recently indexed" in body and "Case 1: Somerton" in body
-    assert "view all" not in body  # only 1 topic total, nothing more to link to
+    assert "topics &raquo;" not in body  # only 1 topic total, no topics-overflow link
 
     resp, body = request(server, "GET", "/topic/1", cookie=cookie)
     assert resp.status == 200
@@ -227,19 +239,20 @@ def test_pipeline_status_shows_ad_stripping_and_comparison_backlog(tmp_path):
         cookie = resp.getheader("Set-Cookie").split(";")[0]
         resp, body = request(srv, "GET", "/", cookie=cookie)
         assert resp.status == 200
-        assert "1 episode awaiting transcription" in body
-        assert "3 episodes awaiting ad-span detection" in body  # Undetected, Cmp A, Cmp B
-        assert "1 topic ready for cross-show claims comparison" in body
+        assert "1 episode to transcribe" in body
+        assert "3 episodes to detect ads in" in body  # Undetected, Cmp A, Cmp B
+        assert "1 topic to compare" in body
+        assert 'href="/pipeline"' in body             # links to the full stage dashboard
     finally:
         srv.shutdown()
 
 
-def test_pipeline_status_absent_when_nothing_pending(tmp_path):
+def test_pipeline_status_compact_when_nothing_pending(tmp_path):
     conn = db.connect(tmp_path / "hark.db")
     conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('q', 'Show A', 'http://x')")
     # No audio_url (nothing to transcribe), no transcript (nothing to
     # detect), no ad_segments (nothing to cut), only 1 show (never eligible
-    # for comparison) — the pipeline has genuinely nothing to report.
+    # for comparison) — the pipeline has genuinely nothing queued.
     conn.execute("INSERT INTO episodes (show_id, guid, title) VALUES (1, 'g1', 'Untouched')")
     conn.commit()
     conn.close()
@@ -251,9 +264,9 @@ def test_pipeline_status_absent_when_nothing_pending(tmp_path):
         resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
         cookie = resp.getheader("Set-Cookie").split(";")[0]
         resp, body = request(srv, "GET", "/", cookie=cookie)
-        assert "awaiting transcription" not in body
-        assert "awaiting ad-span detection" not in body
-        assert "ready for cross-show claims comparison" not in body
+        assert "nothing queued" in body               # compact banner, no per-stage clutter
+        assert 'href="/pipeline"' in body              # but still links to the full dashboard
+        assert "to transcribe" not in body
     finally:
         srv.shutdown()
 

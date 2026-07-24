@@ -193,6 +193,22 @@ def test_rotate_log_missing_or_disabled_is_a_noop(tmp_path):
     assert present.read_text() == "x" * 100
 
 
+def test_run_cycle_persists_per_stage_status(tmp_path):
+    """Every stage's outcome is recorded (not just the ones that ran) so the UI can show status —
+    ran stages get their exit code, skipped stages get their reason, all get a last_seen."""
+    db = _db(tmp_path)
+    orchestrator.run_cycle(db, now=1_000_000.0, data_dir=str(tmp_path), key_present=False,
+                           run=lambda a: 3 if a[0] == "repeats" else 0)
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    rows = {r["stage"]: r for r in conn.execute("SELECT * FROM pipeline_runs")}
+    assert rows["repeats"]["last_status"] == "ran" and rows["repeats"]["last_exit"] == 3
+    assert rows["cut"]["last_status"] == "ran" and rows["cut"]["last_exit"] == 0
+    assert rows["detect-ads"]["last_status"] == "skipped:no-key"     # skip recorded, not absent
+    assert (rows["detect-ads"]["last_run"] or 0.0) == 0.0            # never actually ran
+    assert all(r["last_seen"] == 1_000_000.0 for r in rows.values())  # all considered this cycle
+
+
 def test_on_stage_error_fires_only_on_nonzero_exit(tmp_path):
     db = _db(tmp_path)
     errs = []

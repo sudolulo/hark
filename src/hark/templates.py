@@ -66,6 +66,16 @@ button.copy { padding:0.2rem 0.6rem; font-size:0.82rem; }
 .tabs { display:flex; gap:0.4rem; margin:0.8rem 0 1.2rem; flex-wrap:wrap; }
 .confirm-row { display:flex; gap:0.6rem; align-items:center; flex-wrap:wrap; }
 .confirm-row form { display:inline; }
+.badge { display:inline-block; border-radius:9px; padding:0 0.5rem; font-size:0.78rem; border:1px solid var(--line); white-space:nowrap; }
+.badge.ok { color:#7fae5f; border-color:#3f5a34; }
+.badge.bad { color:#e07a5f; border-color:#6a3a2c; }
+.badge.gated { color:var(--acc); border-color:#5a4620; }
+.badge.idle { color:var(--dim); }
+.dot { display:inline-block; width:0.55rem; height:0.55rem; border-radius:50%; margin-right:0.45rem; vertical-align:middle; }
+.dot.ok { background:#7fae5f; } .dot.bad { background:#e07a5f; }
+.dot.gated { background:var(--acc); } .dot.idle { background:var(--dim); }
+.stagerow td:first-child { font-family:'Courier New', monospace; font-size:0.9rem; }
+.legend { font-size:0.82rem; color:var(--dim); margin:0.4rem 0 0; }
 """
 
 PAGE = """<!doctype html>
@@ -98,6 +108,7 @@ NAV_ITEMS = [
     ("shows", "/shows", "shows"),
     ("notable", "/notable", "notable"),
     ("search", "/search", "search"),
+    ("pipeline", "/pipeline", "pipeline"),
 ]
 
 # Tiny same-origin script (CSP: default-src 'self' already allows this,
@@ -246,29 +257,43 @@ def index_status_html(pending_episodes: int, pending_canon: int, last_extracted_
 
 def pipeline_status_html(transcribe_pending: int, detect_pending: int,
                           cut_pending: int, compare_pending: int) -> str:
-    """Home page banner for the ad-stripping + claims-comparison pipeline —
-    same idea as index_status_html for extraction. Before this, checking
-    what the deployed transcribe/compare loop actually has left to do meant
-    querying hark.db directly instead of just looking at the dashboard."""
-    if not (transcribe_pending or detect_pending or cut_pending or compare_pending):
-        return ""
-    lines = []
+    """Compact home-page summary of the ad-stripping + comparison pipeline, always linking to the
+    full /pipeline dashboard. One line now that /pipeline carries the per-stage detail — before,
+    this stacked three-plus lines on the home page and there was nowhere deeper to go."""
+    bits = []
     if transcribe_pending:
-        lines.append(f"<p>{plural(transcribe_pending, 'episode')} awaiting transcription.</p>")
+        bits.append(f"{plural(transcribe_pending, 'episode')} to transcribe")
     if detect_pending:
-        lines.append(f"<p>{plural(detect_pending, 'episode')} awaiting ad-span detection.</p>")
+        bits.append(f"{plural(detect_pending, 'episode')} to detect ads in")
     if cut_pending:
-        lines.append(f"<p>{plural(cut_pending, 'episode')} awaiting ad cutting.</p>")
+        bits.append(f"{plural(cut_pending, 'episode')} to cut")
     if compare_pending:
-        lines.append(
-            f'<p class="pending">{plural(compare_pending, "topic")} ready for cross-show '
-            f'claims comparison.</p>'
-        )
-    return f'<div class="status">{"".join(lines)}</div>'
+        bits.append(f"{plural(compare_pending, 'topic')} to compare")
+    summary = " · ".join(bits) if bits else "nothing queued"
+    return (f'<div class="status"><p>Ad/topic pipeline: {summary}. '
+            f'<a href="/pipeline">view all stages &raquo;</a></p></div>')
 
 
 def conf(value) -> str:
     return f"{value:.2f}" if value is not None else "–"
+
+
+def stage_status_badge(status: str | None, exit_code=None) -> str:
+    """A colour-coded badge for a pipeline stage's last outcome (see /pipeline)."""
+    if status is None:
+        return '<span class="badge idle"><span class="dot idle"></span>never run</span>'
+    if status == "ran":
+        if exit_code:
+            return (f'<span class="badge bad"><span class="dot bad"></span>'
+                    f'error (exit {esc(exit_code)})</span>')
+        return '<span class="badge ok"><span class="dot ok"></span>ran</span>'
+    labels = {
+        "skipped:cadence": ("idle", "idle (waiting)"),
+        "skipped:no-key": ("gated", "needs key"),
+        "skipped:budget": ("gated", "needs budget"),
+    }
+    cls, text = labels.get(status, ("idle", status))
+    return f'<span class="badge {cls}"><span class="dot {cls}"></span>{esc(text)}</span>'
 
 
 def episode_cell(row) -> str:

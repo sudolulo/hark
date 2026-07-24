@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 
 PAGE_SIZE = 50
 
@@ -145,6 +146,47 @@ def contested_topics(conn: sqlite3.Connection, limit: int = 15) -> list[dict]:
         })
     scored.sort(key=lambda s: s["unique_count"], reverse=True)
     return scored[:limit]
+
+
+def pipeline_status(conn: sqlite3.Connection) -> dict:
+    """Everything the /pipeline dashboard needs: per-stage last-run/status rows (keyed by stage),
+    ad spans per tier, fingerprint-library size, and quarantine/held counts.
+
+    Every read is guarded (sqlite3.OperationalError): pipeline_runs is created and migrated by the
+    orchestrator (the transcribe service), not the web app's read-only connection, so on a fresh
+    deploy the table — or its status columns — may not exist yet. A missing piece degrades to an
+    empty/zero value rather than 500-ing the page. Same discipline as contested_topics()."""
+    out: dict = {"stages": {}, "spans": [], "library": 0, "quarantined": 0, "held": 0,
+                 "spend": {"ads": 0.0, "comparisons": 0.0}}
+    try:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        for r in conn.execute("SELECT category, dollars FROM llm_spend WHERE day = ?", (today,)):
+            out["spend"][r["category"]] = r["dollars"]   # read-only: never touches llm_budget's ensure_schema
+    except sqlite3.OperationalError:
+        pass
+    try:
+        out["stages"] = {r["stage"]: r for r in conn.execute(
+            "SELECT stage, last_run, last_status, last_seen, last_exit FROM pipeline_runs")}
+    except sqlite3.OperationalError:
+        pass
+    try:
+        out["spans"] = conn.execute(
+            "SELECT source, COUNT(*) AS n FROM ad_segments GROUP BY source ORDER BY n DESC"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        pass
+    try:
+        out["library"] = conn.execute("SELECT COUNT(*) FROM ad_fingerprints").fetchone()[0]
+    except sqlite3.OperationalError:
+        pass
+    try:
+        out["quarantined"] = conn.execute(
+            "SELECT COUNT(*) FROM episodes WHERE audio_gone_at IS NOT NULL").fetchone()[0]
+        out["held"] = conn.execute(
+            "SELECT COUNT(*) FROM episodes WHERE cut_held_at IS NOT NULL").fetchone()[0]
+    except sqlite3.OperationalError:
+        pass
+    return out
 
 
 def rare_genre_episodes(conn: sqlite3.Connection, limit: int = 15) -> tuple[list[str], list[sqlite3.Row]]:
