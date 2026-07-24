@@ -123,6 +123,17 @@ def test_feeds_hub_lists_recommendation_and_show_feeds(server):
     assert "Your feeds" in body
     assert "/recommended/" in body            # the personal recommendation feed
     assert "/feed/1/" in body and "Show A" in body   # the subscribed show's ad-stripped feed
+    assert "genre=mystery" in body            # a per-genre filtered feed URL (ep 1 is 'mystery')
+
+
+def test_recommendation_feed_genre_filter(server, tmp_path):
+    from hark.auth import Auth
+    login(server)
+    token = Auth(str(tmp_path / "auth.db"), admin_token="letmein").feed_token_for(1)
+    _, body = request(server, "GET", f"/recommended/{token}?genre=mystery")
+    assert "Case 1: Somerton" in body         # ep 1's topic is in 'mystery'
+    _, body = request(server, "GET", f"/recommended/{token}?genre=history")
+    assert "Case 1: Somerton" not in body     # filtered out of a genre it isn't in
 
 
 def test_pipeline_page_lists_every_stage(server):
@@ -138,25 +149,47 @@ def test_pipeline_page_lists_every_stage(server):
     assert "What the LLM would run" in body          # the funding-transparency section is present
 
 
-def test_recommendation_feed_by_token(tmp_path):
+def test_json_api_episode_and_topic(server):
+    cookie = login(server)
+    resp, body = request(server, "GET", "/api/episode/1", cookie=cookie)
+    assert resp.status == 200
+    ep = json.loads(body)
+    assert ep["id"] == 1 and ep["title"] == "Case 1: Somerton"
+    assert isinstance(ep["ads"], list) and ep["topics"][0]["label"] == "Somerton Man"
+
+    resp, body = request(server, "GET", "/api/topic/1", cookie=cookie)
+    assert resp.status == 200
+    t = json.loads(body)
+    assert t["label"] == "Somerton Man" and "mystery" in t["genres"]
+    assert any(e["id"] == 1 for e in t["episodes"])
+
+    assert request(server, "GET", "/api/episode/999", cookie=cookie)[0].status == 404
+    resp, body = request(server, "GET", "/api/episode/1")           # unauthenticated
+    assert resp.status == 401 and json.loads(body)["error"]         # JSON error, not a login redirect
+
+
+def test_topic_page_shows_coverage_timeline_and_sort(server):
+    cookie = login(server)
+    _, body = request(server, "GET", "/topic/1", cookie=cookie)
+    assert "Covered from 2025-01-01" in body          # from the episode's pubdate
+    assert "chronological" in body                     # sort toggle present
+    resp, body = request(server, "GET", "/topic/1?sort=date", cookie=cookie)
+    assert resp.status == 200 and "by show" in body    # toggle flips to a "by show" link
+
+
+def test_recommendation_feed_by_token(server, tmp_path):
     from hark.auth import Auth
-    conn = db.connect(tmp_path / "hark.db")
-    conn.close()
-    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
-                          bind="127.0.0.1:0", admin_token="t")
-    thread = threading.Thread(target=srv.serve_forever, daemon=True)
-    thread.start()
-    try:
-        login(srv, "t")                                   # bootstraps the admin account (id 1)
-        token = Auth(str(tmp_path / "auth.db"), admin_token="t").feed_token_for(1)
-        assert token                                       # a personal feed token was minted
-        resp, body = request(srv, "GET", f"/recommended/{token}")   # UNAUTHENTICATED, like /feed
-        assert resp.status == 200
-        assert "<rss" in body and "recommended for admin" in body
-        resp, _ = request(srv, "GET", "/recommended/deadbeefdeadbeef")
-        assert resp.status == 404                          # unknown token
-    finally:
-        srv.shutdown()
+    login(server)                                          # bootstraps the admin account (id 1)
+    token = Auth(str(tmp_path / "auth.db"), admin_token="letmein").feed_token_for(1)
+    assert token                                           # a personal feed token was minted
+    resp, body = request(server, "GET", f"/recommended/{token}")   # UNAUTHENTICATED, like /feed
+    assert resp.status == 200
+    assert "<rss" in body and "recommended for admin" in body
+    # No listening history synced -> the feed falls back to the user's subscribed show's episodes
+    # (never empty). The fixture: admin subscribes to Show A, which has "Case 1: Somerton".
+    assert "Case 1: Somerton" in body
+    resp, _ = request(server, "GET", "/recommended/deadbeefdeadbeef")
+    assert resp.status == 404                              # unknown token
 
 
 def test_episode_ad_transparency_and_admin_marking(tmp_path):

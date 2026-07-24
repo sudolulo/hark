@@ -150,6 +150,9 @@ class Handler(BaseHTTPRequestHandler):
                 extra_headers: dict | None = None):
         self.respond_bytes(status, body.encode(), content_type, extra_headers)
 
+    def respond_json(self, status: int, obj) -> None:
+        self.respond_bytes(status, json.dumps(obj).encode(), "application/json; charset=utf-8")
+
     def respond_bytes(self, status: int, data: bytes, content_type: str,
                        extra_headers: dict | None = None):
         self.send_response(status)
@@ -403,7 +406,8 @@ class Handler(BaseHTTPRequestHandler):
         if route.startswith("/feed/"):
             return self._serve_feed(route)
         if route.startswith("/recommended/"):
-            rss = app.recommendation_feed(route.removeprefix("/recommended/"))
+            rss = app.recommendation_feed(route.removeprefix("/recommended/"),
+                                          genre=params.get("genre", [None])[0])
             if rss is None:
                 return self.respond(404, "not found", "text/plain; charset=utf-8")
             return self.respond_bytes(200, rss, "application/rss+xml; charset=utf-8")
@@ -415,6 +419,25 @@ class Handler(BaseHTTPRequestHandler):
             return self._gpodder_get_episode_actions(params)
 
         user = app.auth.session_user(self.cookie_token())
+
+        # Read-only JSON API — 401 as JSON rather than an HTML login redirect, so a script gets a
+        # usable error instead of a login page.
+        if route.startswith("/api/"):
+            if user is None:
+                return self.respond_json(401, {"error": "authentication required"})
+            try:
+                if route.startswith("/api/episode/"):
+                    data = app.api_episode(int(route.removeprefix("/api/episode/")))
+                elif route.startswith("/api/topic/"):
+                    data = app.api_topic(int(route.removeprefix("/api/topic/")))
+                else:
+                    return self.respond_json(404, {"error": "unknown endpoint"})
+            except ValueError:
+                return self.respond_json(404, {"error": "bad id"})
+            except sqlite3.OperationalError:
+                return self.respond_json(503, {"error": "database unavailable"})
+            return self.respond_json(200 if data else 404, data or {"error": "not found"})
+
         if user is None:
             return self.redirect("/login")
 

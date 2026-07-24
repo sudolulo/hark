@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-07-24
+
+### Added
+
+- **Topic coverage timeline.** The topic page shows the coverage span ("Covered from … to …") and
+  a sort toggle between grouped-by-show and **chronological** (`?sort=date`) — so you can see *when*
+  shows covered a subject, not just who.
+- **Genre-filtered recommendation feeds.** `…/recommended/<token>?genre=<name>` filters the
+  personal feed to one genre; the `/feeds` hub lists a ready URL per genre your shows cover, so you
+  can subscribe to a "mystery" or "history" feed.
+- **Multi-part series links.** An episode that's part of a titled series ("… Part 2", "(Pt. 3)",
+  "(2 of 4)") now shows "Part of a series:" with links to the other parts (same show only,
+  `series.py`, title-heuristic, no schema change).
+- **Read-only JSON API.** `GET /api/episode/<id>` (ads + topics) and `GET /api/topic/<id>` (genres
+  + covering episodes), session-gated, returning `401` JSON when unauthenticated rather than an
+  HTML login redirect.
+
+### Fixed
+
+- **Recommendation feed used the wrong key** (`r["id"]` vs the ranking's `episode_id`) — it would
+  have 500'd the moment there were real recommendations (empty-history tests never hit it). Fixed,
+  and the feed now **falls back to recent episodes from your subscribed shows** when there's no
+  listening signal yet, so it's never empty. (The play-history *input* — Nextcloud GpodderSync —
+  is a separate config matter: subscriptions sync, play actions currently don't.)
+
 ## [0.33.0] - 2026-07-24
 
 Surfacing what the pipeline does, and closing the feedback loop.

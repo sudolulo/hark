@@ -14,7 +14,7 @@ from pathlib import Path
 import httpx
 
 from . import (claims, gpodder_server, llm_budget, orchestrator, podcast_feed, ratings, resolve,
-               scoring, transcript_search)
+               scoring, series, transcript_search)
 from .auth import BASE_URL_SETTING, Auth, parse_iso, utcnow
 from .extract import GENRES as GENRES_FILTER
 from .queries import (
@@ -221,21 +221,91 @@ class App:
         finally:
             conn.close()
 
-    def recommendation_feed(self, token: str) -> bytes | None:
+    def recommendation_feed(self, token: str, genre: str | None = None) -> bytes | None:
         """Build one user's 'recommended for you' RSS, resolved from their feed_token
-        (unauthenticated, like the show feeds). None if the token matches no user."""
+        (unauthenticated, like the show feeds). `genre` filters to a single genre so a user can
+        subscribe to per-genre feeds (…/recommended/<token>?genre=mystery). None if the token
+        matches no user."""
         user_id = self.auth.user_id_by_feed_token(token)
         if user_id is None:
             return None
         username = self.auth.username_for(user_id) or "you"
         conn = self.db()
         try:
-            rec = scoring.recommendations_for_user(conn, user_id, limit=25)
-            episode_ids = [r["id"] for r in rec["recommended"]]
+            rec = scoring.recommendations_for_user(conn, user_id, limit=200 if genre else 25)
+            episode_ids = [r["episode_id"] for r in rec["recommended"]]
+            if not episode_ids:
+                # No listening signal yet (history not synced, or a brand-new account) — fall back
+                # to recent episodes from this user's own subscribed shows, so the feed is never
+                # empty. Still ad-stripped where a cut exists. Ranking takes over once history
+                # arrives. (See sync-history: play actions come from Nextcloud's GpodderSync.)
+                episode_ids = [r[0] for r in conn.execute(
+                    "SELECT e.id FROM episodes e JOIN user_shows us ON us.show_id = e.show_id "
+                    "WHERE us.user_id = ? AND e.audio_url IS NOT NULL "
+                    "ORDER BY e.pubdate DESC LIMIT ?", (user_id, 200 if genre else 25))]
+            if genre and episode_ids:
+                ph = ",".join("?" * len(episode_ids))
+                keep = {r[0] for r in conn.execute(
+                    f"SELECT DISTINCT et.episode_id FROM episode_topics et "
+                    f"JOIN topic_genres tg ON tg.topic_id = et.topic_id "
+                    f"WHERE et.episode_id IN ({ph}) AND tg.genre = ?", (*episode_ids, genre))}
+                episode_ids = [e for e in episode_ids if e in keep][:25]  # keep ranking order
             return podcast_feed.build_recommendation_feed(
                 conn, username, self.base_url, episode_ids, token)
         finally:
             conn.close()
+
+    def api_episode(self, episode_id: int) -> dict | None:
+        """Read-only JSON view of an episode: its ad spans and topics. None if it doesn't exist."""
+        conn = self.db()
+        try:
+            e = conn.execute(
+                "SELECT e.id, e.title, e.pubdate, e.audio_url, e.cut_path, e.cut_held_at, "
+                "       s.id AS show_id, COALESCE(s.title, s.query) AS show "
+                "FROM episodes e JOIN shows s ON s.id = e.show_id WHERE e.id = ?",
+                (episode_id,)).fetchone()
+            if e is None:
+                return None
+            ads = conn.execute(
+                "SELECT start_second, end_second, source, reason FROM ad_segments "
+                "WHERE episode_id = ? ORDER BY start_second", (episode_id,)).fetchall()
+            topics = conn.execute(
+                "SELECT t.id, t.label FROM episode_topics et JOIN topics t ON t.id = et.topic_id "
+                "WHERE et.episode_id = ? ORDER BY t.label", (episode_id,)).fetchall()
+        finally:
+            conn.close()
+        return {
+            "id": e["id"], "title": e["title"], "show": e["show"], "show_id": e["show_id"],
+            "pubdate": e["pubdate"], "audio_url": e["audio_url"],
+            "cut": bool(e["cut_path"]), "cut_held": bool(e["cut_held_at"]),
+            "ads": [{"start": a["start_second"], "end": a["end_second"],
+                     "source": a["source"], "reason": a["reason"]} for a in ads],
+            "topics": [{"id": t["id"], "label": t["label"]} for t in topics],
+        }
+
+    def api_topic(self, topic_id: int) -> dict | None:
+        """Read-only JSON view of a topic: its genres and covering episodes. None if it doesn't
+        exist."""
+        conn = self.db()
+        try:
+            t = conn.execute("SELECT id, label, wikidata_id FROM topics WHERE id = ?",
+                             (topic_id,)).fetchone()
+            if t is None:
+                return None
+            genres = [r[0] for r in conn.execute(
+                "SELECT genre FROM topic_genres WHERE topic_id = ? ORDER BY genre", (topic_id,))]
+            eps = conn.execute(
+                "SELECT e.id, e.title, e.pubdate, s.id AS show_id, COALESCE(s.title, s.query) AS show "
+                "FROM episode_topics et JOIN episodes e ON e.id = et.episode_id "
+                "JOIN shows s ON s.id = e.show_id WHERE et.topic_id = ? ORDER BY e.pubdate",
+                (topic_id,)).fetchall()
+        finally:
+            conn.close()
+        return {
+            "id": t["id"], "label": t["label"], "wikidata_id": t["wikidata_id"], "genres": genres,
+            "episodes": [{"id": e["id"], "title": e["title"], "pubdate": e["pubdate"],
+                          "show": e["show"], "show_id": e["show_id"]} for e in eps],
+        }
 
     def rate_shows(self) -> dict:
         """Admin-triggered on-demand run of the same two steps `hark
@@ -527,6 +597,12 @@ class App:
                 "       s.ad_stripping_enabled "
                 "FROM user_shows us JOIN shows s ON s.id = us.show_id "
                 "WHERE us.user_id = ? ORDER BY show", (user["id"],)).fetchall()
+            genres = [r[0] for r in conn.execute(
+                "SELECT DISTINCT tg.genre FROM user_shows us "
+                "JOIN episodes e ON e.show_id = us.show_id "
+                "JOIN episode_topics et ON et.episode_id = e.id "
+                "JOIN topic_genres tg ON tg.topic_id = et.topic_id "
+                "WHERE us.user_id = ? ORDER BY tg.genre", (user["id"],))]
         finally:
             conn.close()
 
@@ -540,8 +616,14 @@ class App:
                 "<h2>Recommended for you</h2>"
                 "<p class=\"dim\">Episodes ranked from your own listening, ad-stripped where a cut "
                 "exists. Updates as you listen.</p>"
-                + feed_row("rec", f"{self.base_url}/recommended/{rec_token}")
-                + "<h2>Ad-stripped shows</h2>")
+                + feed_row("rec", f"{self.base_url}/recommended/{rec_token}"))
+        if genres:
+            body += '<p class="dim">Or subscribe to a single genre:</p>'
+            for g in genres:
+                url = f"{self.base_url}/recommended/{rec_token}?genre={urllib.parse.quote(g)}"
+                body += (f'<p><span class="pill">{esc(g)}</span></p>'
+                         + feed_row(f"rec-{esc(g)}", url))
+        body += "<h2>Ad-stripped shows</h2>"
         if not shows:
             body += ('<p class="dim">Subscribe to shows (from a show\'s page) and an ad-stripped '
                      'feed for each appears here.</p>')
@@ -715,6 +797,8 @@ class App:
 
     def view_topic(self, user, topic_id: int, params) -> str | None:
         page_num = paginate(params)
+        chrono = params.get("sort", ["show"])[0] == "date"     # chronological vs grouped-by-show
+        order = "e.pubdate, show" if chrono else "show, e.pubdate"  # whitelisted, not user text
         conn = self.db()
         try:
             topic = conn.execute(
@@ -748,11 +832,15 @@ class App:
                 JOIN episodes e ON e.id = et.episode_id
                 JOIN shows s ON s.id = e.show_id
                 WHERE et.topic_id = ?
-                ORDER BY show, e.pubdate
+                ORDER BY """ + order + """
                 LIMIT ? OFFSET ?
                 """,
                 (topic_id, PAGE_SIZE, (page_num - 1) * PAGE_SIZE),
             ).fetchall()
+            span = conn.execute(
+                "SELECT MIN(e.pubdate) AS first, MAX(e.pubdate) AS last "
+                "FROM episode_topics et JOIN episodes e ON e.id = et.episode_id "
+                "WHERE et.topic_id = ? AND e.pubdate IS NOT NULL", (topic_id,)).fetchone()
             shows_transcribed = conn.execute(
                 """
                 SELECT COUNT(DISTINCT e.show_id) FROM episode_topics et
@@ -792,13 +880,23 @@ class App:
             f'<h2 id="comparison">what each show said</h2>'
             + claims_html(comparison, shows_transcribed)
         ) if comparison is not None or shows_transcribed >= 2 else ""
+        span_html = ""
+        if span and span["first"]:
+            first, last = span["first"][:10], span["last"][:10]
+            span_html = (f'<p class="dim">Covered from {esc(first)}'
+                         + (f' to {esc(last)}' if last != first else '') + '.</p>')
+        by_show = "by show" if not chrono else f'<a href="/topic/{topic_id}">by show</a>'
+        by_date = ("chronological" if chrono
+                   else f'<a href="/topic/{topic_id}?sort=date">chronological</a>')
+        toggle_html = f'<p class="dim">order: {by_show} &middot; {by_date}</p>'
         body = (
             f"{breadcrumb(('home', '/'), ('topics', '/topics'), (topic['label'], None))}"
             f"<h1>{esc(topic['label'])}{qid}</h1><p>{pills}</p>"
             f"<h2>covered by {plural(len(shows), 'show')}, {plural(total_episodes, 'episode')}</h2>"
-            f"<p>{show_pills}</p>"
+            f"<p>{show_pills}</p>{span_html}"
             f"{comparison_html}"
             f"{related_html}"
+            f"{toggle_html}"
             f'<table><tr><th>show</th><th>episode</th><th>date</th>'
             f'<th title="extractor\'s confidence this episode is really about this topic">conf</th></tr>'
             f"{rows_html}</table>{pager}"
@@ -1118,6 +1216,7 @@ class App:
             ad_spans = conn.execute(
                 "SELECT id, start_second, end_second, source, reason FROM ad_segments "
                 "WHERE episode_id = ? ORDER BY start_second", (episode_id,)).fetchall()
+            series_parts = series.siblings(conn, episode_id)
             topics = conn.execute(
                 """
                 SELECT t.id AS topic_id, t.label, et.confidence
@@ -1161,6 +1260,12 @@ class App:
             f" &middot; {esc((episode['pubdate'] or '')[:10])}{play}</h2>"
             + (f"<p>{pills}</p>" if pills else "")
         )
+        if series_parts:
+            parts = " ".join(
+                (f'<span class="pill active">Part {p["part"]}</span>' if p["id"] == episode_id
+                 else f'<a class="pill" href="/episode/{p["id"]}">Part {p["part"]}</a>')
+                for p in series_parts)
+            body += f'<p class="dim">Part of a series: {parts}</p>'
         # --- Per-episode ad transparency (+ admin hand-marking) ---
         from adscrub.cut import CUT_SOURCES
         is_admin = bool(user["is_admin"])
