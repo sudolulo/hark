@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.1] - 2026-07-24
+
+### Fixed
+
+- **`fp-stream-index` now runs LAST, after `cut`, instead of mid-cycle.** The streaming index is a
+  corpus-coverage backfill (fetch-and-discard every un-downloaded episode's audio) that produces no
+  spans for the current cycle — sitting it before `transcribe`/`fp-match`/`cut` delayed the audio
+  the player actually receives behind a slow network backfill. Its new fingerprints are matched on
+  the next cycle's `fp-match` (a one-cycle lag, nothing for a backfill over the whole corpus), and
+  the output-critical path and the reporting stages (`ad-seeds`, `verify-inference`) now reach
+  completion without waiting on it.
+
 ## [0.32.0] - 2026-07-24
 
 ### Added

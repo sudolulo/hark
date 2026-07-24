@@ -65,10 +65,6 @@ STAGES: list[Stage] = [
     # platforms so that budget lands on platforms that actually do dynamic insertion (5b).
     Stage("dai-probe", ["dai-probe", "--per-platform", "3"], SLOW),
     Stage("fp-index", ["fingerprint", "--index", "--limit", "30"], FAST),
-    # STREAMING index (SLOW, small limit): fingerprint un-downloaded episodes by fetch-and-discard
-    # so coverage reaches the whole corpus, not just the ~1.3k on disk. Bounded because each is a
-    # full audio fetch — bandwidth, not storage. Local-audio index above stays FAST/cheap.
-    Stage("fp-stream-index", ["fingerprint", "--index", "--stream", "--limit", "20"], SLOW),
     Stage("transcribe-cross", ["transcribe", "--cross-show-only", "--limit", "5"], FAST),
     Stage("transcribe", ["transcribe", "--limit", "20"], FAST),
     Stage("fp-match", ["fingerprint"], SLOW),
@@ -83,6 +79,12 @@ STAGES: list[Stage] = [
     # draws from the COMPARISONS pool, same as extract. Dormant until that budget is funded.
     Stage("compare", ["compare", "--limit", "3"], SLOW, needs_key=True, budget=llm_budget.COMPARISONS),
     Stage("cut", ["cut"], FAST),
+    # STREAMING index runs LAST, after cut: it's a corpus-coverage BACKFILL (fetch-and-discard each
+    # un-downloaded episode's audio to fingerprint it), with no span output for this cycle, so it
+    # must not sit on the critical path and delay the audio the player actually gets. Its new
+    # fingerprints are matched next cycle by fp-match — a one-cycle lag is nothing for a backfill
+    # spread over the whole ~27.8k corpus. Bounded (SLOW, small limit) because each is a full fetch.
+    Stage("fp-stream-index", ["fingerprint", "--index", "--stream", "--limit", "20"], SLOW),
 ]
 # Deliberately NOT a stage: `discover-ads` (the `recur` tier). Its spans are neither cut
 # (not in adscrub's CUT_SOURCES) nor a fingerprint-library seed (not in FP_LIBRARY_SOURCES), and
