@@ -32,6 +32,7 @@ th { color:var(--dim); font-weight:normal; font-size:0.85rem; text-transform:upp
 .pill { display:inline-block; border:1px solid var(--line); border-radius:9px; padding:0 0.5rem; margin:0 0.2rem 0.2rem 0; font-size:0.78rem; color:var(--dim); }
 form.search { display:flex; gap:0.5rem; margin:1rem 0; }
 input[type=text], input[type=password] { background:var(--panel); border:1px solid var(--line); color:var(--ink); padding:0.45rem 0.6rem; font:inherit; flex:1; }
+select { background:var(--panel); border:1px solid var(--line); color:var(--ink); padding:0.45rem 0.6rem; font:inherit; }
 button { background:var(--acc); border:0; color:#151007; padding:0.45rem 1rem; font:inherit; cursor:pointer; }
 button.ghost { background:transparent; border:1px solid var(--line); color:var(--ink); }
 .cards { display:grid; grid-template-columns:repeat(auto-fit, minmax(10rem,1fr)); gap:0.8rem; margin:1.2rem 0; }
@@ -109,6 +110,7 @@ NAV_ITEMS = [
     ("notable", "/notable", "notable"),
     ("search", "/search", "search"),
     ("feeds", "/feeds", "feeds"),
+    ("stats", "/stats", "stats"),
     ("pipeline", "/pipeline", "pipeline"),
 ]
 

@@ -413,6 +413,17 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond_bytes(200, rss, "application/rss+xml; charset=utf-8")
         if route.startswith("/audio/"):
             return self._serve_audio(route)
+        if route.startswith("/chapters/"):
+            parts = route.split("/")   # ['', 'chapters', '<episode_id>', '<token>.json']
+            data = None
+            if len(parts) == 4:
+                try:
+                    data = app.chapters_feed(int(parts[2]), parts[3].removesuffix(".json"))
+                except ValueError:
+                    data = None
+            if data is None:
+                return self.respond(404, "not found", "text/plain; charset=utf-8")
+            return self.respond_json(200, data)
         if route == "/index.php/apps/gpoddersync/subscriptions":
             return self._gpodder_get_subscriptions(params)
         if route == "/index.php/apps/gpoddersync/episode_action":
@@ -452,6 +463,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(200, app.view_pipeline(user))
             if route == "/feeds":
                 return self.respond(200, app.view_feeds(user))
+            if route == "/feeds.opml":
+                return self.respond_bytes(
+                    200, app.feeds_opml(user), "text/x-opml; charset=utf-8",
+                    {"Content-Disposition": 'attachment; filename="hark-feeds.opml"'})
+            if route == "/stats":
+                return self.respond(200, app.view_stats(user))
             if route.startswith("/topic/"):
                 try:
                     topic_id = int(route.rsplit("/", 1)[1])
@@ -630,6 +647,16 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError:
                     return self.not_found(user)
                 if app.toggle_topic_index(show_id) is None:
+                    return self.not_found(user)
+                return self.redirect(f"/show/{show_id}")
+            if route.startswith("/show/") and route.endswith("/cut-mode"):
+                if not user["is_admin"]:
+                    return self.forbidden(user)
+                try:
+                    show_id = int(route.removeprefix("/show/").removesuffix("/cut-mode"))
+                except ValueError:
+                    return self.not_found(user)
+                if app.toggle_cut_mode(show_id) is None:
                     return self.not_found(user)
                 return self.redirect(f"/show/{show_id}")
             if route.startswith("/show/") and route.endswith("/subscribe"):

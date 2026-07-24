@@ -6,8 +6,10 @@ and HTTP routing.
 from __future__ import annotations
 
 import os
+import secrets
 import sqlite3
 import urllib.parse
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,6 +22,7 @@ from .extract import GENRES as GENRES_FILTER
 from .queries import (
     PAGE_SIZE,
     contested_topics,
+    episode_in_genre,
     paginate,
     pipeline_status,
     rare_genre_episodes,
@@ -122,6 +125,38 @@ class App:
 
     def toggle_ad_stripping(self, show_id: int) -> bool | None:
         return self._toggle_show_flag(show_id, "ad_stripping_enabled")
+
+    def toggle_cut_mode(self, show_id: int) -> str | None:
+        """Flip a show between 'cut' (remove ads) and 'chapters' (mark them for the player to
+        skip). Admin-only (gated at the route). Returns the new mode, or None if unknown show."""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT cut_mode FROM shows WHERE id = ?", (show_id,)).fetchone()
+            if row is None:
+                conn.rollback()
+                return None
+            new_mode = "chapters" if row[0] == "cut" else "cut"
+            conn.execute("UPDATE shows SET cut_mode = ? WHERE id = ?", (new_mode, show_id))
+            conn.commit()
+            return new_mode
+        finally:
+            conn.close()
+
+    def chapters_feed(self, episode_id: int, token: str) -> dict | None:
+        """Podcasting-2.0 chapters JSON for one episode, gated by its show's feed_token (same
+        unauthenticated model as /feed and /audio). None if the episode/token doesn't match."""
+        conn = self.db()
+        try:
+            row = conn.execute(
+                "SELECT s.feed_token FROM episodes e JOIN shows s ON s.id = e.show_id "
+                "WHERE e.id = ?", (episode_id,)).fetchone()
+            if row is None or not row["feed_token"] or not secrets.compare_digest(
+                    row["feed_token"], token):
+                return None
+            return podcast_feed.chapters_json(conn, episode_id)
+        finally:
+            conn.close()
 
     def toggle_topic_index(self, show_id: int) -> bool | None:
         return self._toggle_show_flag(show_id, "topic_index_enabled")
@@ -254,6 +289,32 @@ class App:
                 conn, username, self.base_url, episode_ids, token)
         finally:
             conn.close()
+
+    def feeds_opml(self, user) -> bytes:
+        """An OPML file of every feed this account can subscribe to — the recommendation feed and
+        each subscribed show's ad-stripped feed — for bulk-importing into a podcast app. Built with
+        ElementTree so URLs/titles are escaped, not string-spliced."""
+        rec_token = self.auth.feed_token_for(user["id"])
+        conn = self.db()
+        try:
+            shows = conn.execute(
+                "SELECT s.id, COALESCE(s.title, s.query) AS show, s.feed_token "
+                "FROM user_shows us JOIN shows s ON s.id = us.show_id "
+                "WHERE us.user_id = ? AND s.feed_token IS NOT NULL ORDER BY show",
+                (user["id"],)).fetchall()
+        finally:
+            conn.close()
+        opml = ET.Element("opml", version="2.0")
+        head = ET.SubElement(opml, "head")
+        ET.SubElement(head, "title").text = f"hark feeds for {user['username']}"
+        body = ET.SubElement(opml, "body")
+        if rec_token:
+            ET.SubElement(body, "outline", text="Recommended for you (hark)", type="rss",
+                          xmlUrl=f"{self.base_url}/recommended/{rec_token}")
+        for s in shows:
+            ET.SubElement(body, "outline", text=f"{s['show']} (ad-stripped)", type="rss",
+                          xmlUrl=podcast_feed.feed_url(s, self.base_url))
+        return ET.tostring(opml, encoding="utf-8", xml_declaration=True)
 
     def api_episode(self, episode_id: int) -> dict | None:
         """Read-only JSON view of an episode: its ad spans and topics. None if it doesn't exist."""
@@ -612,7 +673,8 @@ class App:
 
         body = ("<h1>Your feeds</h1>"
                 "<p class=\"dim\">Add these URLs in your podcast app (AntennaPod, Overcast, …) — "
-                "each is gated by a private token, so keep them to yourself.</p>"
+                "each is gated by a private token, so keep them to yourself. "
+                "<a href=\"/feeds.opml\">Export all as OPML</a>.</p>"
                 "<h2>Recommended for you</h2>"
                 "<p class=\"dim\">Episodes ranked from your own listening, ad-stripped where a cut "
                 "exists. Updates as you listen.</p>"
@@ -634,6 +696,73 @@ class App:
             body += (f"<p><a href='/show/{s['id']}'>{esc(s['show'])}</a>{off}</p>"
                      + feed_row(f"show-{s['id']}", f"{self.base_url}/feed/{s['id']}/{s['feed_token']}"))
         return page("feeds", body, user["username"], bool(user["is_admin"]), section="feeds")
+
+    def view_stats(self, user) -> str:
+        """What hark has done: ad-stripping impact across the corpus, plus this account's own
+        listening summary. Personal reads are guarded (listen_actions may be empty/absent)."""
+        from adscrub.cut import CUT_SOURCES
+        ph = ",".join("?" * len(CUT_SOURCES))
+        conn = self.db()
+        try:
+            # COUNT(col) skips NULLs, so both corpus counters come from one scan of episodes.
+            episodes_cut, held = conn.execute(
+                "SELECT COUNT(cut_path), COUNT(cut_held_at) FROM episodes").fetchone()
+            ad_removed = conn.execute(
+                f"SELECT COALESCE(SUM(a.end_second - a.start_second), 0) FROM ad_segments a "
+                f"JOIN episodes e ON e.id = a.episode_id "
+                f"WHERE e.cut_path IS NOT NULL AND a.source IN ({ph})", CUT_SOURCES).fetchone()[0]
+            tiers = conn.execute(
+                "SELECT source, COUNT(*) AS n, COALESCE(SUM(end_second - start_second), 0) AS secs "
+                "FROM ad_segments GROUP BY source ORDER BY n DESC").fetchall()
+            plays, shows_listened, top_genres = 0, 0, []
+            try:
+                plays = conn.execute(
+                    "SELECT COUNT(*) FROM listen_actions WHERE user_id = ? AND LOWER(action) = 'play'",
+                    (user["id"],)).fetchone()[0]
+                shows_listened = conn.execute(
+                    "SELECT COUNT(DISTINCT podcast_url) FROM listen_actions WHERE user_id = ?",
+                    (user["id"],)).fetchone()[0]
+                top_genres = conn.execute(
+                    "SELECT tg.genre, COUNT(*) AS n FROM listen_actions la "
+                    "JOIN episodes e ON e.audio_url = la.episode_url "
+                    "JOIN episode_topics et ON et.episode_id = e.id "
+                    "JOIN topic_genres tg ON tg.topic_id = et.topic_id "
+                    "WHERE la.user_id = ? AND LOWER(la.action) = 'play' "
+                    "GROUP BY tg.genre ORDER BY n DESC LIMIT 6", (user["id"],)).fetchall()
+            except sqlite3.OperationalError:
+                pass
+        finally:
+            conn.close()
+
+        hours = ad_removed / 3600.0
+        cards = f"""
+        <div class="cards">
+        <div class="card"><div class="big">{hours:.1f}h</div>of ads removed</div>
+        <div class="card"><div class="big">{episodes_cut}</div>episodes cut</div>
+        <div class="card"><div class="big">{plays}</div>episodes you've played</div>
+        <div class="card"><div class="big">{held}</div>cuts held for review</div>
+        </div>"""
+        tier_rows = "".join(
+            f"<tr><td><code>{esc(r['source'])}</code></td><td class='num'>{r['n']}</td>"
+            f"<td class='num dim'>{mmss(r['secs'])}</td></tr>" for r in tiers
+        ) or '<tr><td class="dim" colspan="3">No ad spans found yet.</td></tr>'
+        genre_pills = " ".join(
+            f'<a class="pill" href="/topics?genre={esc(g["genre"])}">{esc(g["genre"])} '
+            f'({g["n"]})</a>' for g in top_genres)
+        if plays:
+            listening = f"<p>{plays} plays across {plural(shows_listened, 'show')}.</p>"
+            if genre_pills:
+                listening += f"<p>Top genres: {genre_pills}</p>"
+        else:
+            listening = '<p class="dim">No listening history synced for this account yet.</p>'
+        body = (
+            "<h1>Stats</h1>" + cards
+            + "<h2>Ad spans by tier</h2>"
+            + "<table><tr><th>tier</th><th class='num'>spans</th><th class='num'>total time</th>"
+            + f"</tr>{tier_rows}</table>"
+            + "<h2>Your listening</h2>" + listening
+        )
+        return page("stats", body, user["username"], bool(user["is_admin"]), section="stats")
 
     def view_topics(self, user, params) -> str:
         genre = params.get("genre", [""])[0]
@@ -905,43 +1034,50 @@ class App:
 
     def view_search(self, user, params) -> str:
         q = params.get("q", [""])[0].strip()
+        genre = params.get("genre", [""])[0].strip()
+        if genre not in GENRES_FILTER:
+            genre = ""                                     # whitelist — only a real genre filters
         page_num = paginate(params)
         topics, episodes, topic_total, episode_total = [], [], 0, 0
         transcript_hits: list = []
         if q:
             like = f"%{q}%"
+            # episode-title match, optionally scoped to a genre via the episode's topics
+            ep_where = "e.title LIKE ? COLLATE NOCASE"
+            ep_params: tuple = (like,)
+            genre_clause, genre_params = episode_in_genre(genre)
+            if genre_clause:
+                ep_where += " AND " + genre_clause
+                ep_params += genre_params
             conn = self.db()
             try:
-                topic_total = conn.execute(*topics_count(q=q)).fetchone()[0]
+                topic_total = conn.execute(*topics_count(q=q, genre=genre)).fetchone()[0]
                 topics = conn.execute(
-                    *topics_query(q=q, limit=PAGE_SIZE, offset=(page_num - 1) * PAGE_SIZE)
+                    *topics_query(q=q, genre=genre, limit=PAGE_SIZE, offset=(page_num - 1) * PAGE_SIZE)
                 ).fetchall()
                 episode_total = conn.execute(
-                    """
-                    SELECT COUNT(*) FROM episodes e WHERE e.title LIKE ? COLLATE NOCASE
-                    """,
-                    (like,),
-                ).fetchone()[0]
+                    f"SELECT COUNT(*) FROM episodes e WHERE {ep_where}", ep_params).fetchone()[0]
                 episodes = conn.execute(
-                    """
-                    SELECT e.id, e.title, e.pubdate, s.id AS show_id,
-                           COALESCE(s.title, s.query) AS show
-                    FROM episodes e JOIN shows s ON s.id = e.show_id
-                    WHERE e.title LIKE ? COLLATE NOCASE
-                    ORDER BY e.pubdate DESC LIMIT ? OFFSET ?
-                    """,
-                    (like, PAGE_SIZE, (page_num - 1) * PAGE_SIZE),
-                ).fetchall()
-                transcript_hits = transcript_search.search(conn, q, limit=25)
+                    f"SELECT e.id, e.title, e.pubdate, s.id AS show_id, "
+                    f"       COALESCE(s.title, s.query) AS show "
+                    f"FROM episodes e JOIN shows s ON s.id = e.show_id WHERE {ep_where} "
+                    f"ORDER BY e.pubdate DESC LIMIT ? OFFSET ?",
+                    (*ep_params, PAGE_SIZE, (page_num - 1) * PAGE_SIZE)).fetchall()
+                transcript_hits = transcript_search.search(conn, q, limit=25, genre=genre)
             finally:
                 conn.close()
+        pager_q = {"q": q, "genre": genre} if genre else {"q": q}
+        genre_opts = '<option value="">all genres</option>' + "".join(
+            f'<option value="{esc(g)}"{" selected" if g == genre else ""}>{esc(g)}</option>'
+            for g in sorted(GENRES_FILTER))
         body = (
             "<h1>search</h1>"
             '<form class="search" action="/search" method="get">'
-            f'<input type="text" name="q" value="{esc(q)}" autofocus><button>Search</button></form>'
+            f'<input type="text" name="q" value="{esc(q)}" autofocus>'
+            f'<select name="genre">{genre_opts}</select><button>Search</button></form>'
         )
         if q:
-            topics_pager = pagination_html("/search", {"q": q}, page_num, topic_total, "topics")
+            topics_pager = pagination_html("/search", pager_q, page_num, topic_total, "topics")
             no_match = f"No topics match “{q}”."
             body += (f"<h2>{plural(topic_total, 'topic')}</h2>"
                      + topic_table(topics, empty=no_match) + topics_pager)
@@ -955,7 +1091,7 @@ class App:
                 eps_table = f"<table><tr><th>show</th><th>episode</th><th>date</th></tr>{eps}</table>"
             else:
                 eps_table = f'<p class="dim">No episode titles match “{q}”.</p>'
-            episodes_pager = pagination_html("/search", {"q": q}, page_num, episode_total,
+            episodes_pager = pagination_html("/search", pager_q, page_num, episode_total,
                                               "episode title matches")
             body += (f"<h2>{plural(episode_total, 'episode title match', 'episode title matches')}"
                      f"</h2>{eps_table}{episodes_pager}")
@@ -1046,7 +1182,7 @@ class App:
             show = conn.execute(
                 """
                 SELECT id, COALESCE(title, query) AS name, feed_token,
-                       ad_stripping_enabled, topic_index_enabled
+                       ad_stripping_enabled, topic_index_enabled, cut_mode
                 FROM shows WHERE id = ?
                 """,
                 (show_id,),
@@ -1140,6 +1276,10 @@ class App:
         )
         enabled = bool(show["ad_stripping_enabled"])
         toggle_label = "Disable ad-stripping" if enabled else "Enable ad-stripping"
+        chapters_mode = show["cut_mode"] == "chapters"
+        mode_desc = ("marks ad boundaries as skippable chapters — original audio, nothing removed"
+                     if chapters_mode else "removes the ads from the audio")
+        mode_toggle = "Switch to cutting" if chapters_mode else "Switch to chapter markers"
         adblock_section = (
             '<div class="status">'
             f'<p>Ad-stripped feed URL — subscribe to this in AntennaPod instead of the '
@@ -1151,9 +1291,14 @@ class App:
             f'<p class="dim">{ad_stripping_progress["transcribed"]}/{total_episodes} transcribed, '
             f'{ad_stripping_progress["detected"]}/{total_episodes} ad-scanned, '
             f'{ad_stripping_progress["cut"]}/{total_episodes} cut.</p>'
+            f'<p>Mode: <strong>{"chapter markers" if chapters_mode else "cut"}</strong> — '
+            f'{mode_desc}.</p>'
+            '<div class="confirm-row">'
             f'<form method="post" action="/show/{show_id}/adblock">'
             f'<button class="ghost">{toggle_label}</button></form>'
-            "</div>"
+            f'<form method="post" action="/show/{show_id}/cut-mode">'
+            f'<button class="ghost">{mode_toggle}</button></form>'
+            "</div></div>"
         )
         topic_index_on = bool(show["topic_index_enabled"])
         topic_toggle_label = "Remove from topic index" if topic_index_on else "Add to topic index"

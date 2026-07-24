@@ -89,6 +89,30 @@ def test_feed_route_points_cut_episode_at_local_audio(server):
     assert f'url="http://myhost:8710/audio/2/{TOKEN}.mp3"'.encode() in data
 
 
+def test_chapters_mode_serves_original_audio_with_chapter_links(server, tmp_path):
+    import json
+    c = db.connect(tmp_path / "hark.db")
+    c.execute("INSERT INTO ad_segments (episode_id, start_second, end_second, source) "
+              "VALUES (2, 30, 60, 'llm')")
+    c.execute("UPDATE shows SET cut_mode = 'chapters' WHERE id = 1")
+    c.commit()
+    c.close()
+
+    resp, data = request(server, f"/feed/1/{TOKEN}")
+    assert resp.status == 200
+    assert b"podcast:chapters" in data
+    assert b'url="http://original/ep2.mp3"' in data          # ORIGINAL audio, not the cut file
+    assert f"/chapters/2/{TOKEN}.json".encode() in data
+
+    resp, data = request(server, f"/chapters/2/{TOKEN}.json")
+    assert resp.status == 200
+    doc = json.loads(data)
+    assert doc["version"] == "1.2.0"
+    assert {"startTime": 30.0, "title": "Advertisement"} in doc["chapters"]
+    assert {"startTime": 60.0, "title": "Content"} in doc["chapters"]
+    assert request(server, f"/chapters/2/wrong.json")[0].status == 404  # wrong token
+
+
 def test_feed_route_uses_admin_base_url_override(server, tmp_path):
     # App.base_url re-reads auth.db's settings row on every access (see its
     # own docstring) — an admin-set override must be picked up by an

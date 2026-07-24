@@ -20,6 +20,20 @@ def _topics_filter(genre: str, q: str) -> tuple[str, list]:
     return "", []
 
 
+def episode_in_genre(genre: str, col: str = "e.id") -> tuple[str, tuple]:
+    """A predicate scoping to episodes whose topics fall in `genre`, e.g. `<col> IN (…)`.
+    Shared by /search's title and transcript filters so the join lives in one place (the
+    topic-scoped `_topics_filter` above is a different shape — topic rows, not episodes).
+    Returns ("", ()) when no genre is given, so callers can splice unconditionally.
+
+    `col` is interpolated into SQL, so it must only ever be a hardcoded column name — never
+    user input; `genre` (the only user value) is always bound via `?`."""
+    if not genre:
+        return "", ()
+    return (f"{col} IN (SELECT et.episode_id FROM episode_topics et "
+            "JOIN topic_genres tg ON tg.topic_id = et.topic_id WHERE tg.genre = ?)"), (genre,)
+
+
 # Whitelisted sort keys only — never interpolate the raw `sort` query param
 # into SQL. Each maps to a full ORDER BY clause; "shows" is the original
 # (and still default) ordering.

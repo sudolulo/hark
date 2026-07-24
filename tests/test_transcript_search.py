@@ -43,6 +43,18 @@ def test_search_finds_the_right_episode_with_a_snippet(conn):
     assert transcript_search.search(conn, "nonexistentword") == []
 
 
+def test_search_scopes_to_a_genre(conn):
+    transcript_search.index_transcripts(conn)
+    conn.execute("INSERT INTO topics (id, label) VALUES (1, 'Dyatlov Pass')")
+    conn.execute("INSERT INTO topic_genres (topic_id, genre) VALUES (1, 'history')")
+    conn.execute("INSERT INTO episode_topics (episode_id, topic_id) VALUES (1, 1)")
+    conn.commit()
+    # ep 1 matches the phrase AND falls in 'history' — kept under that filter, dropped under another
+    assert [h["id"] for h in transcript_search.search(conn, "Dyatlov", genre="history")] == [1]
+    assert transcript_search.search(conn, "Dyatlov", genre="disaster") == []
+    assert [h["id"] for h in transcript_search.search(conn, "Dyatlov")] == [1]   # no filter, unchanged
+
+
 def test_search_is_guarded_before_the_index_exists(tmp_path):
     c = db.connect(tmp_path / "empty.db")   # no transcript_fts table ever created
     assert transcript_search.search(c, "anything") == []            # guarded, not a crash

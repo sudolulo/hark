@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS shows (
     feed_token      TEXT,
     ad_stripping_enabled INTEGER NOT NULL DEFAULT 1,
     topic_index_enabled  INTEGER NOT NULL DEFAULT 1,
+    cut_mode        TEXT NOT NULL DEFAULT 'cut',   -- 'cut' removes ads, 'chapters' marks them instead
     hosting_platform TEXT,
     last_fetched_at TEXT,
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
@@ -253,6 +254,7 @@ _MIGRATIONS = (
      "ALTER TABLE shows ADD COLUMN ad_stripping_enabled INTEGER NOT NULL DEFAULT 1"),
     ("shows", "topic_index_enabled",
      "ALTER TABLE shows ADD COLUMN topic_index_enabled INTEGER NOT NULL DEFAULT 1"),
+    ("shows", "cut_mode", "ALTER TABLE shows ADD COLUMN cut_mode TEXT NOT NULL DEFAULT 'cut'"),
     ("shows", "hosting_platform", "ALTER TABLE shows ADD COLUMN hosting_platform TEXT"),
     ("listen_actions", "started", "ALTER TABLE listen_actions ADD COLUMN started INTEGER"),
     ("subscription_changes", "user_id",

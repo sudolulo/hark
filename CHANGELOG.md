@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-07-24
+
+### Added
+
+- **Stats page (`/stats`).** Ad-stripping impact across the whole corpus — hours of ads removed,
+  episodes cut, cuts held for review, and a per-tier breakdown of ad spans — plus this account's
+  own listening summary (plays, shows listened to, top genres). Corpus counts are exact; the
+  personal reads are guarded, so an account with no synced listen history just shows an empty state.
+- **"Mark, don't cut" mode (per show).** A show can now be set to *mark* its ads as skippable
+  Podcasting-2.0 `<podcast:chapters>` rather than hard-cutting them: the feed then serves the
+  original audio with a chapters link per episode that has ad spans
+  (`/chapters/<episode>/<token>.json`), so a player (AntennaPod, Overcast) shows ad boundaries the
+  listener can skip. Toggle it from the show page. Respected in the personalized recommendation
+  feed too, not only the show's own feed.
+- **OPML export (`/feeds.opml`).** The feeds hub gains an "Export all as OPML" link that downloads
+  every feed the account can subscribe to — the recommendation feed and each subscribed show's
+  ad-stripped feed — for bulk-importing into a podcast app instead of adding each URL by hand.
+- **Genre filter on search.** `/search` gains a genre dropdown that scopes results — topics,
+  episode-title matches, and full-text transcript matches alike — to a single genre.
+
+### Changed
+
+- The episode→genre filter behind search now lives in one shared helper
+  (`queries.episode_in_genre`) instead of being duplicated across the title and transcript paths,
+  and cut-vs-chapters enclosure resolution is shared between the show and recommendation feed
+  builders rather than reimplemented in each.
+
 ## [0.34.1] - 2026-07-24
 
 ### Fixed

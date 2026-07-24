@@ -86,8 +86,8 @@ def login(srv, password="letmein"):
 
 
 def test_everything_gated_except_allowlist(server):
-    for path in ("/", "/topics", "/topic/1", "/notable", "/pipeline", "/feeds", "/search", "/shows",
-                 "/show/1", "/episode/1", "/account"):
+    for path in ("/", "/topics", "/topic/1", "/notable", "/pipeline", "/feeds", "/stats", "/search",
+                 "/shows", "/show/1", "/episode/1", "/account"):
         resp, _ = request(server, "GET", path)
         assert resp.status == 303, path
         assert resp.getheader("Location") == "/login"
@@ -110,10 +110,54 @@ def test_no_inline_styles(server):
     # is silently no-op'd by the browser rather than erroring — easy to miss
     # without actually rendering the page. Guard against it creeping back in.
     cookie = login(server)
-    for path in ("/login", "/", "/topics", "/topic/1", "/notable", "/pipeline", "/feeds", "/shows",
-                 "/show/1", "/search", "/account"):
+    for path in ("/login", "/", "/topics", "/topic/1", "/notable", "/pipeline", "/feeds", "/stats",
+                 "/shows", "/show/1", "/search", "/account"):
         _, body = request(server, "GET", path, cookie=cookie)
         assert 'style="' not in body, path
+
+
+def test_search_genre_filter(server):
+    cookie = login(server)
+    _, body = request(server, "GET", "/search?q=Somerton&genre=mystery", cookie=cookie)
+    assert "Somerton Man" in body                         # topic is in 'mystery'
+    assert 'value="mystery" selected' in body             # dropdown reflects the filter
+    _, body = request(server, "GET", "/search?q=Somerton&genre=history", cookie=cookie)
+    assert "Case 1: Somerton" not in body                 # filtered out of a genre it isn't in
+    assert "Somerton Man" not in body
+
+
+def test_cut_mode_toggle(server):
+    cookie = login(server)
+    _, body = request(server, "GET", "/show/1", cookie=cookie)
+    assert "Switch to chapter markers" in body           # show starts in 'cut' mode
+    resp, _ = request(server, "POST", "/show/1/cut-mode", cookie=cookie)
+    assert resp.status in (302, 303)
+    _, body = request(server, "GET", "/show/1", cookie=cookie)
+    assert "chapter markers" in body and "Switch to cutting" in body   # flipped
+
+
+def test_stats_page_shows_ad_savings(tmp_path):
+    conn = db.connect(tmp_path / "hark.db")
+    conn.execute("INSERT INTO shows (query, title, feed_url) VALUES ('q', 'Show A', 'http://x')")
+    conn.execute("INSERT INTO episodes (show_id, guid, title, cut_path) VALUES (1, 'g1', 'Ep', 'cut/1.mp3')")
+    conn.execute("INSERT INTO ad_segments (episode_id, start_second, end_second, source) "
+                 "VALUES (1, 0, 3720, 'llm')")   # 62 min of ads on a cut episode
+    conn.commit()
+    conn.close()
+    srv = web.make_server(tmp_path / "hark.db", tmp_path / "auth.db",
+                          bind="127.0.0.1:0", admin_token="t")
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        resp, _ = request(srv, "POST", "/login", body={"username": "admin", "password": "t"})
+        cookie = resp.getheader("Set-Cookie").split(";")[0]
+        resp, body = request(srv, "GET", "/stats", cookie=cookie)
+        assert resp.status == 200
+        assert "1.0h" in body and "of ads removed" in body   # 3720s cut from a cut episode
+        assert "1" in body and "episodes cut" in body
+        assert "llm" in body                                  # tier breakdown
+    finally:
+        srv.shutdown()
 
 
 def test_feeds_hub_lists_recommendation_and_show_feeds(server):
@@ -124,6 +168,16 @@ def test_feeds_hub_lists_recommendation_and_show_feeds(server):
     assert "/recommended/" in body            # the personal recommendation feed
     assert "/feed/1/" in body and "Show A" in body   # the subscribed show's ad-stripped feed
     assert "genre=mystery" in body            # a per-genre filtered feed URL (ep 1 is 'mystery')
+
+
+def test_feeds_opml_export(server):
+    cookie = login(server)
+    resp, body = request(server, "GET", "/feeds.opml", cookie=cookie)
+    assert resp.status == 200
+    assert "<opml" in body and "xmlUrl=" in body
+    assert "/recommended/" in body                       # recommendation feed outline
+    assert "/feed/1/" in body and "Show A" in body        # subscribed show's ad-stripped feed
+    assert "attachment" in (resp.getheader("Content-Disposition") or "")
 
 
 def test_recommendation_feed_genre_filter(server, tmp_path):

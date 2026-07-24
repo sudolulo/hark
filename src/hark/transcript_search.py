@@ -15,6 +15,8 @@ import json
 import sqlite3
 from pathlib import Path
 
+from . import queries
+
 # episode_id UNINDEXED: stored for retrieval but not tokenised (we match on `text` only).
 _CREATE = "CREATE VIRTUAL TABLE IF NOT EXISTS transcript_fts USING fts5(text, episode_id UNINDEXED)"
 
@@ -75,28 +77,30 @@ def index_transcripts(conn: sqlite3.Connection, limit: int | None = None) -> tup
     return (indexed, len(pending) - len(todo))
 
 
-def search(conn: sqlite3.Connection, query: str, limit: int = 25) -> list[sqlite3.Row]:
+def search(conn: sqlite3.Connection, query: str, limit: int = 25,
+           genre: str = "") -> list[sqlite3.Row]:
     """Episodes whose transcript matches `query`, with a context snippet. Read-only-safe: guarded
     so a database without the FTS table (fresh deploy) yields no matches instead of erroring. The
     query is matched as a quoted PHRASE, which both does the intuitive thing and sidesteps FTS5's
-    own query-operator syntax erroring on stray punctuation."""
+    own query-operator syntax erroring on stray punctuation. `genre`, if given, scopes hits to
+    episodes whose topics fall in that genre — same filter /search applies to topics and titles."""
     q = query.strip()
     if not q:
         return []
     phrase = '"' + q.replace('"', '""') + '"'
+    genre_clause, genre_params = queries.episode_in_genre(genre)
+    if genre_clause:
+        genre_clause = "AND " + genre_clause + " "
     try:
         return conn.execute(
-            """
-            SELECT e.id, e.title, s.id AS show_id, COALESCE(s.title, s.query) AS show,
-                   snippet(transcript_fts, 0, '', '', '…', 14) AS snip
-            FROM transcript_fts f
-            JOIN episodes e ON e.id = f.episode_id
-            JOIN shows s ON s.id = e.show_id
-            WHERE transcript_fts MATCH ?
-            ORDER BY rank
-            LIMIT ?
-            """,
-            (phrase, limit),
+            "SELECT e.id, e.title, s.id AS show_id, COALESCE(s.title, s.query) AS show, "
+            "       snippet(transcript_fts, 0, '', '', '…', 14) AS snip "
+            "FROM transcript_fts f "
+            "JOIN episodes e ON e.id = f.episode_id "
+            "JOIN shows s ON s.id = e.show_id "
+            "WHERE transcript_fts MATCH ? " + genre_clause
+            + "ORDER BY rank LIMIT ?",
+            (phrase, *genre_params, limit),
         ).fetchall()
     except sqlite3.OperationalError:
         return []
