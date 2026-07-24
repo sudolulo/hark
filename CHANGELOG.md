@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-07-24
+
+### Added
+
+- **`dai-probe` now persists what it finds.** It ran every cycle and threw the result away; it
+  now calls adscrub 0.13.0's `store_probe_result` on each divergence, seeding the fingerprint
+  library with server-inserted ads for free (byte offsets -> seconds, only when the episode's
+  audio is on disk, so it's silent otherwise rather than failed). Pinned adscrub 0.12.0 -> 0.13.0.
+
+### Notes
+
+- Deploy pairs this image with a loop-command change that runs `hark fingerprint` and a
+  key-gated `hark detect-ads` in the 30-minute slow gate, so the free audio-recognition tier and
+  (when `ANTHROPIC_API_KEY` is present) the in-container LLM classification both run without an
+  outside process. The subscription path (`seeds` -> read -> `load-ad-detections` drop file) is
+  unchanged and still runs every cycle, so ad detection works with or without an API key.
+
+
 ## [0.24.0] - 2026-07-23
 
 ### Changed

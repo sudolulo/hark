@@ -29,6 +29,7 @@ import httpx
 
 from adscrub import chapters as ad_chapters
 from adscrub import cut as ad_cut
+from adscrub import dai as ad_dai
 from adscrub import detect as ad_detect
 from adscrub import fingerprint as ad_fingerprint
 from adscrub import repeats as ad_repeats
@@ -978,6 +979,7 @@ def cmd_dai_probe(args: argparse.Namespace) -> int:
         return 1
 
     errors = 0
+    stored = 0
     # A fresh client per fetch, not one shared client for the whole run — see
     # adscrub.dai's own docstring for why a shared client's cookie jar
     # silently defeats the comparison. User-Agent is set per-fetch by
@@ -996,7 +998,14 @@ def cmd_dai_probe(args: argparse.Namespace) -> int:
                       if r.result.reconverged else ", no reconvergence found")
             print(f"  DIFF  [{r.platform}] {r.title}: diverges at byte "
                   f"{r.result.divergence_byte}{reconv}")
-    print(f"probed {len(sample) - errors} episode(s) ({errors} failed)")
+            # Persist what the probe already found, rather than re-probing. A stored `dai` span
+            # seeds the fingerprint library for free (source='dai' is in FP_LIBRARY_SOURCES,
+            # not in CUT_SOURCES) — it only fires when the episode's audio is on disk to convert
+            # the probe's byte offsets to seconds, so it's silent, not failed, otherwise.
+            store = ad_dai.store_probe_result(conn, ep, r.result)
+            stored += store.stored
+    tail = f", {stored} stored as dai span(s)" if stored else ""
+    print(f"probed {len(sample) - errors} episode(s) ({errors} failed){tail}")
 
     print()
     print("per-platform summary (all probes ever run):")
