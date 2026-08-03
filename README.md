@@ -1,7 +1,5 @@
 # hark
 
-[![test](https://github.com/sudolulo/hark/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/sudolulo/hark/actions) [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/) [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue)](LICENSE) [![GitHub Sponsors](https://img.shields.io/badge/GitHub%20Sponsors-%E2%9D%A4-EA4AAA?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/sudolulo) [![Ko-fi](https://img.shields.io/badge/Ko--fi-support-FF5E5B?logo=kofi&logoColor=white)](https://ko-fi.com/sudolulo)
-
 Cross-podcast topic index and discovery service for subject-per-episode genres
 (true crime, history, disasters, and the like). The goal: resolve episodes to the
 real-world case/event/person they cover, so you can ask "who covered the Dyatlov
@@ -217,12 +215,6 @@ uv run pytest
 ```
 
 Tests use local feed fixtures — no network.
-
-## AI use disclosure
-
-This project is developed with substantial assistance from AI coding tools
-(Anthropic Claude). Design decisions and review are human; much of the code is
-AI-written.
 
 ## Support
 
