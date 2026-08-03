@@ -135,5 +135,5 @@ beats fingerprinting/crowdsourcing) is in adscrub's own repo history.
   visibility. GitHub is a read-only shop window: never push to it directly, and never treat
   it as a source of truth. Policy lives in `claude-fleet/config/repos.toml`. Do not add other
   remotes or mirrors unprompted.
-- Public-facing docs must not link to `git.onetick.ninja` — outsiders cannot reach it.
+- Public-facing docs must not link to `git.arch.fyi` — outsiders cannot reach it.
   Cross-reference sibling projects by their GitHub URL.
