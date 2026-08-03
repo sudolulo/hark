@@ -1,5 +1,7 @@
 # hark
 
+[![GitHub Sponsors](https://img.shields.io/badge/GitHub%20Sponsors-%E2%9D%A4-EA4AAA?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/sudolulo) [![Ko-fi](https://img.shields.io/badge/Ko--fi-support-FF5E5B?logo=kofi&logoColor=white)](https://ko-fi.com/sudolulo)
+
 Cross-podcast topic index and discovery service for subject-per-episode genres
 (true crime, history, disasters, and the like). The goal: resolve episodes to the
 real-world case/event/person they cover, so you can ask "who covered the Dyatlov
