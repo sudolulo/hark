@@ -19,12 +19,11 @@ from __future__ import annotations
 
 import sqlite3
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
-from feedgen.feed import FeedGenerator
-
 from adscrub.cut import CUT_SOURCES
+from feedgen.feed import FeedGenerator
 
 # Podcasting 2.0 namespace — for <podcast:chapters> in "mark, don't cut" mode.
 _PODCAST_NS = "https://podcastindex.org/namespace/1.0"
@@ -64,7 +63,7 @@ def _add_chapters_links(rss: bytes, chapters_url_by_guid: dict[str, str]) -> byt
 def _parse_pubdate(value: str | None) -> datetime | None:
     if not value:
         return None
-    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
 
 
 def feed_url(show: sqlite3.Row, base_url: str) -> str:

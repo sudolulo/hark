@@ -12,7 +12,7 @@ import contextlib
 import hashlib
 import secrets
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 PW_ITERS = 120_000
@@ -75,7 +75,7 @@ def constant_eq(a: str, b: str) -> bool:
 
 
 def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def iso(dt: datetime) -> str:
@@ -83,7 +83,7 @@ def iso(dt: datetime) -> str:
 
 
 def parse_iso(value: str) -> datetime:
-    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
 
 
 class Auth:

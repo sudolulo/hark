@@ -280,7 +280,7 @@ def test_episode_ad_transparency_and_admin_marking(tmp_path):
         marked = [r for r in rows if r["source"] == "manual"]
         assert marked and marked[0]["start_second"] == 120.0 and marked[0]["end_second"] == 150.0
         assert conn.execute("SELECT cut_path FROM episodes WHERE id = 1").fetchone()[0] is None
-        fp_id = [r["id"] for r in rows if r["source"] == "fpmatch"][0]
+        fp_id = next(r["id"] for r in rows if r["source"] == "fpmatch")
         conn.close()
 
         # (#4) remove a false positive
@@ -1169,7 +1169,7 @@ def test_adblock_toggle_is_atomic_under_concurrent_requests(server):
         t.join()
 
     assert not errors
-    resp, body = request(server, "GET", "/show/1", cookie=cookie)
+    _resp, body = request(server, "GET", "/show/1", cookie=cookie)
     assert "<strong>enabled</strong>" in body  # 20 (even) toggles from enabled -> enabled
 
 
@@ -1704,7 +1704,7 @@ def test_bootstrap_admin_is_admin(tmp_path):
 def test_create_user_defaults_to_non_admin(tmp_path):
     auth = web.Auth(tmp_path / "auth.db", admin_token="t")
     auth.create_user("alice")
-    row = [u for u in auth.list_users() if u["username"] == "alice"][0]
+    row = next(u for u in auth.list_users() if u["username"] == "alice")
     assert row["is_admin"] == 0
     assert row["has_password"] == 0
 
@@ -1712,14 +1712,14 @@ def test_create_user_defaults_to_non_admin(tmp_path):
 def test_create_user_can_grant_admin(tmp_path):
     auth = web.Auth(tmp_path / "auth.db", admin_token="t")
     auth.create_user("bob", is_admin=True)
-    row = [u for u in auth.list_users() if u["username"] == "bob"][0]
+    row = next(u for u in auth.list_users() if u["username"] == "bob")
     assert row["is_admin"] == 1
 
 
 def test_create_user_rejects_duplicate_username(tmp_path):
     auth = web.Auth(tmp_path / "auth.db", admin_token="t")
     auth.create_user("alice")
-    with pytest.raises(Exception):
+    with pytest.raises(sqlite3.IntegrityError):
         auth.create_user("alice")
 
 
@@ -1854,7 +1854,7 @@ def test_create_invite_returns_working_token(tmp_path):
 def test_create_invite_defaults_to_non_admin(tmp_path):
     auth = web.Auth(tmp_path / "auth.db", admin_token="t")
     auth.create_invite("alice")
-    row = [u for u in auth.list_users() if u["username"] == "alice"][0]
+    row = next(u for u in auth.list_users() if u["username"] == "alice")
     assert row["is_admin"] == 0
     assert row["invite_pending"] == 1
 
@@ -1862,7 +1862,7 @@ def test_create_invite_defaults_to_non_admin(tmp_path):
 def test_create_invite_can_grant_admin(tmp_path):
     auth = web.Auth(tmp_path / "auth.db", admin_token="t")
     auth.create_invite("alice", is_admin=True)
-    row = [u for u in auth.list_users() if u["username"] == "alice"][0]
+    row = next(u for u in auth.list_users() if u["username"] == "alice")
     assert row["is_admin"] == 1
 
 
@@ -2008,7 +2008,7 @@ def test_subscribe_unknown_show_404s(server):
 
 def test_show_page_offers_subscribe_toggle(server):
     cookie = login(server)
-    resp, body = request(server, "GET", "/show/1", cookie=cookie)
+    _resp, body = request(server, "GET", "/show/1", cookie=cookie)
     assert "In your list." in body
     assert 'action="/show/1/unsubscribe"' in body
 
@@ -2059,10 +2059,10 @@ def test_gpodder_sync_isolated_between_two_accounts(server, tmp_path):
     request(server, "POST", "/index.php/apps/gpoddersync/subscription_change/create",
             auth=alice_auth, json_body={"add": ["https://alice-only.example/feed"], "remove": []})
 
-    resp, body = request(server, "GET", "/index.php/apps/gpoddersync/subscriptions",
-                         auth=admin_auth, json_body=None)
+    _resp, body = request(server, "GET", "/index.php/apps/gpoddersync/subscriptions",
+                          auth=admin_auth, json_body=None)
     admin_add = json.loads(body)["add"]
-    resp, body = request(server, "GET", "/index.php/apps/gpoddersync/subscriptions",
+    _resp, body = request(server, "GET", "/index.php/apps/gpoddersync/subscriptions",
                          auth=alice_auth, json_body=None)
     alice_add = json.loads(body)["add"]
 
@@ -2514,7 +2514,7 @@ def test_gpodder_sync_quota_enforced_for_non_admin(server, tmp_path):
     urls = [f"https://quota-test-{i}.example/feed" for i in range(15)]
     request(server, "POST", "/index.php/apps/gpoddersync/subscription_change/create",
             auth=auth, json_body={"add": urls, "remove": []})
-    resp, body = request(server, "GET", "/index.php/apps/gpoddersync/subscriptions",
+    _resp, body = request(server, "GET", "/index.php/apps/gpoddersync/subscriptions",
                          auth=auth, json_body=None)
     data = json.loads(body)
     assert len(data["add"]) == 10
@@ -2525,7 +2525,7 @@ def test_gpodder_sync_quota_not_enforced_for_admin(server, tmp_path):
     urls = [f"https://admin-quota-test-{i}.example/feed" for i in range(15)]
     request(server, "POST", "/index.php/apps/gpoddersync/subscription_change/create",
             auth=admin_auth, json_body={"add": urls, "remove": []})
-    resp, body = request(server, "GET", "/index.php/apps/gpoddersync/subscriptions",
+    _resp, body = request(server, "GET", "/index.php/apps/gpoddersync/subscriptions",
                          auth=admin_auth, json_body=None)
     data = json.loads(body)
     assert len([u for u in urls if u in data["add"]]) == 15

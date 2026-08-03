@@ -31,7 +31,7 @@ def test_subscription_changes_since_only_returns_later_events(tmp_path):
         ("https://b.example/feed", cursor_after_first + 10),
     )
     conn.commit()
-    add, remove, _ = gpodder_server.subscription_changes_since(conn, 1, cursor_after_first)
+    add, _remove, _ = gpodder_server.subscription_changes_since(conn, 1, cursor_after_first)
     assert add == ["https://b.example/feed"]
 
 

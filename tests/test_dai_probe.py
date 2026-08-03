@@ -1,7 +1,7 @@
 import httpx
 import pytest
-
 from adscrub import dai
+
 from hark import dai_probe, db
 
 
@@ -178,7 +178,7 @@ def test_run_probe_records_an_attempt_on_fetch_failure(conn):
     def handler(request):
         return httpx.Response(404)
 
-    factory = lambda: httpx.Client(transport=httpx.MockTransport(handler))  # noqa: E731
+    factory = lambda: httpx.Client(transport=httpx.MockTransport(handler))
     result = dai_probe.run_probe(factory, conn, ep, "acast.com")
 
     assert result.error is not None

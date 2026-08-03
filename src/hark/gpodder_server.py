@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from . import resolve
 
@@ -36,7 +36,7 @@ MAX_SHOWS_PER_USER = 10
 
 
 def _format_ts(epoch: float) -> str:
-    return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime(_ACTION_TS_FORMAT)
+    return datetime.fromtimestamp(epoch, tz=UTC).strftime(_ACTION_TS_FORMAT)
 
 
 def record_subscription_changes(

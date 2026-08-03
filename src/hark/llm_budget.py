@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 # Opus 4.8 input price, $/1M tokens — the model hark's ad/topic extraction defaults to. Output is
 # tiny for these tasks (span-index lists, short topic labels) so only input is metered.
@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS llm_spend (
 
 
 def _today() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return datetime.now(UTC).strftime("%Y-%m-%d")
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:

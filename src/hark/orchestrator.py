@@ -20,13 +20,13 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
 import sqlite3
+import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Callable
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from . import alert, llm_budget
 
@@ -165,13 +165,15 @@ def stage_meta() -> list[dict]:
 
 
 def _log(msg: str) -> None:
-    print(f"[{datetime.now(timezone.utc):%Y-%m-%dT%H:%M:%SZ}] pipeline: {msg}", flush=True)
+    print(f"[{datetime.now(UTC):%Y-%m-%dT%H:%M:%SZ}] pipeline: {msg}", flush=True)
 
 
 def _default_run(db_path: str, argv: list[str]) -> int:
     """Run one `hark` subcommand as its own process, so a crash is isolated."""
     try:
-        return subprocess.run([sys.executable, "-m", "hark", "--db", db_path, *argv]).returncode
+        return subprocess.run(
+            [sys.executable, "-m", "hark", "--db", db_path, *argv], check=False
+        ).returncode
     except Exception as exc:  # noqa: BLE001
         _log(f"stage {' '.join(argv)} raised {exc}")
         return 1
@@ -231,7 +233,7 @@ def run_cycle(
         path = os.path.join(data_dir, fname)
         if os.path.exists(path):
             if run(argv + [path]) == 0:
-                stamp = datetime.now(timezone.utc).strftime("%s")
+                stamp = datetime.now(UTC).strftime("%s")
                 loaded = os.path.join(data_dir, fname.replace("pending-", f"loaded-{stamp}-"))
                 try:
                     os.replace(path, loaded)

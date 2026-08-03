@@ -22,11 +22,11 @@ import argparse
 import os
 import sys
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
+from datetime import UTC
 from pathlib import Path
-from typing import Callable
 
 import httpx
-
 from adscrub import chapters as ad_chapters
 from adscrub import cut as ad_cut
 from adscrub import dai as ad_dai
@@ -36,9 +36,24 @@ from adscrub import repeats as ad_repeats
 from adscrub import transcribe as ad_transcribe
 
 from . import (
-    __version__, claims, dai_probe, db, discover, extract, gpodder_server,
-    hosting, ingest, llm_budget, nextcloud, opml, orchestrator, pipeline,
-    ratings, resolve, transcript_search, wikidata,
+    __version__,
+    claims,
+    dai_probe,
+    db,
+    discover,
+    extract,
+    gpodder_server,
+    hosting,
+    ingest,
+    llm_budget,
+    nextcloud,
+    opml,
+    orchestrator,
+    pipeline,
+    ratings,
+    resolve,
+    transcript_search,
+    wikidata,
 )
 
 DEFAULT_DB = os.environ.get("HARK_DB", "hark.db")
@@ -724,8 +739,8 @@ def cmd_seeds(args: argparse.Namespace) -> int:
         # /pipeline can show EXACTLY which episodes detect-ads would read — and that it is these
         # few, campaign-deduplicated, not the thousands merely "pending". select_seed_episodes
         # writes via ensure_schema, so the web can't recompute this itself.
-        from datetime import datetime, timezone
-        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        from datetime import datetime
+        now_iso = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         by_id = {e["id"]: e for e in all_pending}
         conn.execute(
             "CREATE TABLE IF NOT EXISTS llm_ad_seeds (episode_id INTEGER PRIMARY KEY, title TEXT, "
@@ -756,7 +771,7 @@ def cmd_seeds(args: argparse.Namespace) -> int:
         return 1
 
     by_id = {e["id"]: e for e in all_pending}
-    out = open(args.out, "w", encoding="utf-8") if args.out else sys.stdout
+    out = open(args.out, "w", encoding="utf-8") if args.out else sys.stdout  # noqa: SIM115 — the sys.stdout branch must not be closed by a context manager
     try:
         print(f"# {len(seeds)} episode(s) to read — chosen to cover every unread ad campaign.",
               file=out)
@@ -1223,7 +1238,7 @@ def cmd_dai_probe(args: argparse.Namespace) -> int:
     # adscrub.dai's own docstring for why a shared client's cookie jar
     # silently defeats the comparison. User-Agent is set per-fetch by
     # probe_variance() itself, so no default is needed here.
-    client_factory = lambda: httpx.Client(timeout=60.0)  # noqa: E731
+    client_factory = lambda: httpx.Client(timeout=60.0)
     for ep in sample:
         r = dai_probe.run_probe(client_factory, conn, ep, ep["hosting_platform"])
         if r.error or r.result is None:  # run_probe sets exactly one of the two

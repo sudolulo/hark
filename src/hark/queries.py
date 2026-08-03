@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 PAGE_SIZE = 50
 
@@ -173,7 +173,7 @@ def pipeline_status(conn: sqlite3.Connection) -> dict:
     out: dict = {"stages": {}, "spans": [], "library": 0, "quarantined": 0, "held": 0,
                  "spend": {"ads": 0.0, "comparisons": 0.0}}
     try:
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         for r in conn.execute("SELECT category, dollars FROM llm_spend WHERE day = ?", (today,)):
             out["spend"][r["category"]] = r["dollars"]   # read-only: never touches llm_budget's ensure_schema
     except sqlite3.OperationalError:

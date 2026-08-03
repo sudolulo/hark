@@ -11,7 +11,7 @@ from __future__ import annotations
 import email.utils
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 
@@ -32,7 +32,7 @@ def _retry_after_seconds(value: str | None, default: float = 5.0) -> float:
             when = email.utils.parsedate_to_datetime(value)
         except (TypeError, ValueError):
             return default
-        seconds = (when - datetime.now(timezone.utc)).total_seconds()
+        seconds = (when - datetime.now(UTC)).total_seconds()
     return max(0.0, min(seconds, MAX_BACKOFF))
 
 

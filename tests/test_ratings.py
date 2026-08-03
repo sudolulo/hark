@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -114,18 +114,19 @@ def test_fetch_raises_taddy_error_on_graphql_error_body():
     def handler(variables):
         return httpx.Response(200, json={"errors": [{"message": "bad argument"}]})
 
-    with graphql_client(handler) as client:
-        with pytest.raises(ratings.TaddyError):
-            make_source(client).fetch("https://feeds.example.com/x", None)
+    with graphql_client(handler) as client, pytest.raises(ratings.TaddyError):
+        make_source(client).fetch("https://feeds.example.com/x", None)
 
 
 def test_fetch_raises_on_http_error_status():
     def handler(request):
         return httpx.Response(401, json={"message": "unauthorized"})
 
-    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        with pytest.raises(httpx.HTTPStatusError):
-            make_source(client).fetch("https://feeds.example.com/x", None)
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(httpx.HTTPStatusError),
+    ):
+        make_source(client).fetch("https://feeds.example.com/x", None)
 
 
 # --- refresh_ratings ---
@@ -290,7 +291,7 @@ def test_refresh_ratings_known_match_uses_shorter_stale_window_than_a_miss(tmp_p
     conn = db.connect(tmp_path / "t.db")
     # 100 days old: stale for a known match (90-day window) but not yet due
     # for a confirmed miss (180-day window).
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=100)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cutoff = (datetime.now(UTC) - timedelta(days=100)).strftime("%Y-%m-%dT%H:%M:%SZ")
     known_id = seed_existing_rating(conn, "https://feeds.example.com/known", "uuid-known", cutoff, 4.0)
     seed_existing_rating(conn, "https://feeds.example.com/miss", None, cutoff)
 

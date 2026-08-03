@@ -10,14 +10,24 @@ import secrets
 import sqlite3
 import urllib.parse
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
 
-from . import (claims, gpodder_server, llm_budget, orchestrator, podcast_feed, ratings, resolve,
-               scoring, series, transcript_search)
-from .auth import BASE_URL_SETTING, Auth, parse_iso, utcnow
+from . import (
+    claims,
+    gpodder_server,
+    llm_budget,
+    orchestrator,
+    podcast_feed,
+    ratings,
+    resolve,
+    scoring,
+    series,
+    transcript_search,
+)
+from .auth import BASE_URL_SETTING, Auth, parse_iso
 from .extract import GENRES as GENRES_FILTER
 from .queries import (
     PAGE_SIZE,
@@ -46,8 +56,8 @@ from .templates import (
     plural,
     relative_time,
     stage_status_badge,
-    topic_table,
     topic_pills,
+    topic_table,
 )
 
 # MAX_SHOWS_PER_USER lives in gpodder_server.py — shared with the
@@ -568,7 +578,7 @@ class App:
             status = row["last_status"] if row else None
             exit_code = row["last_exit"] if row else None
             last_run = (row["last_run"] if row else None) or 0.0
-            when = relative_time(datetime.fromtimestamp(last_run, timezone.utc)) if last_run > 0 else "—"
+            when = relative_time(datetime.fromtimestamp(last_run, UTC)) if last_run > 0 else "—"
             stage_rows.append(
                 f"<tr class='stagerow'><td>{esc(meta['name'])}</td>"
                 f"<td class='dim'>{esc(meta['cadence'])}</td>"
@@ -913,7 +923,7 @@ class App:
             ),
             "rare": (
                 "<h2>Rare coverage</h2>" +
-                (f'<p class="dim">Top 15 episodes covering hark\'s least-common genres — '
+                ('<p class="dim">Top 15 episodes covering hark\'s least-common genres — '
                  + " and ".join(
                      f'<a href="/topics?genre={esc(g)}">{esc(g)}</a>' for g in rare_genres
                  ) + ".</p>"
@@ -1006,7 +1016,7 @@ class App:
             )
             related_html = f"<h2>Related topics</h2><p>{related_pills}</p>"
         comparison_html = (
-            f'<h2 id="comparison">what each show said</h2>'
+            '<h2 id="comparison">what each show said</h2>'
             + claims_html(comparison, shows_transcribed)
         ) if comparison is not None or shows_transcribed >= 2 else ""
         span_html = ""

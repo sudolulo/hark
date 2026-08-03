@@ -110,7 +110,7 @@ def test_chapters_mode_serves_original_audio_with_chapter_links(server, tmp_path
     assert doc["version"] == "1.2.0"
     assert {"startTime": 30.0, "title": "Advertisement"} in doc["chapters"]
     assert {"startTime": 60.0, "title": "Content"} in doc["chapters"]
-    assert request(server, f"/chapters/2/wrong.json")[0].status == 404  # wrong token
+    assert request(server, "/chapters/2/wrong.json")[0].status == 404  # wrong token
 
 
 def test_feed_route_uses_admin_base_url_override(server, tmp_path):

@@ -7,8 +7,8 @@ which platforms actually support this technique, not just running it once.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 import httpx
 from adscrub import dai

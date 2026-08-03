@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- CI: refreshed the stale `uv.lock` (unblocks the `uv lock --check` gate), fixed all
+  outstanding ruff findings, and pinned ruff to 0.16.1 in the lint workflow so an
+  upstream ruff release can no longer turn `main` red without a code change.
+- README CI badge now points at the public GitHub mirror's workflow instead of the
+  forge outsiders can't browse.
+
 ## [0.35.0] - 2026-07-24
 
 ### Added

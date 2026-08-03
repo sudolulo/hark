@@ -274,7 +274,6 @@ def test_recanonicalize_limit_caps_batch_size(tmp_path):
 
     def canonicalize(label):
         calls.append(label)
-        return None
 
     results = pipeline.recanonicalize(conn, canonicalize, limit=2)
     assert results == []  # canonicalize returns None for all, no upgrades

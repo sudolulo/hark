@@ -84,7 +84,8 @@ from .templates import (  # noqa: F401 — re-exported for callers (cli.py, test
     topic_pills,
     topic_table,
 )
-from .views import COOKIE, App  # noqa: F401 — re-exported for callers (cli.py, tests)
+from .views import COOKIE, App
+
 
 def _safe_next(value: str, default: str) -> str:
     """Validate a same-origin-relative redirect target from a form's `next`

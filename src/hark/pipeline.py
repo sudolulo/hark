@@ -15,8 +15,8 @@ store path.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable
 
 from .db import utcnow
 from .extract import GENRES, ExtractedTopic, TopicExtractor

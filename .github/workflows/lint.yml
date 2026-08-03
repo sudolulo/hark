@@ -19,3 +19,6 @@ jobs:
         uses: astral-sh/ruff-action@0ce1b0bf8b818ef400413f810f8a11cdbda0034b # v4.0.0
         with:
           args: "check"
+          # Pinned: an unpinned ruff means any upstream release can turn main red
+          # with no code change (exactly what happened 2026-07 → 2026-08).
+          version: "0.16.1"

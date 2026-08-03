@@ -1,6 +1,8 @@
 import sqlite3
+
 import pytest
-from hark import orchestrator, llm_budget
+
+from hark import llm_budget, orchestrator
 
 
 def _db(tmp_path):

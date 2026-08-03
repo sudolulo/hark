@@ -1,7 +1,6 @@
 import json
 
 import httpx
-
 from adscrub import cut as ad_cut
 from adscrub import detect as ad_detect
 from adscrub import transcribe as ad_transcribe
@@ -983,7 +982,7 @@ def test_user_add_admin_flag(tmp_path, capsys):
 
     from hark import web
     auth = web.Auth(auth_db, admin_token=None)
-    row = [u for u in auth.list_users() if u["username"] == "bob"][0]
+    row = next(u for u in auth.list_users() if u["username"] == "bob")
     assert row["is_admin"] == 1
 
 
@@ -1054,7 +1053,7 @@ def test_user_invite_creates_account_and_prints_link(tmp_path, capsys):
 
     from hark import web
     auth = web.Auth(auth_db, admin_token=None)
-    row = [u for u in auth.list_users() if u["username"] == "alice"][0]
+    row = next(u for u in auth.list_users() if u["username"] == "alice")
     assert row["invite_pending"] == 1
 
 
@@ -1065,7 +1064,7 @@ def test_user_invite_admin_flag(tmp_path, capsys):
 
     from hark import web
     auth = web.Auth(auth_db, admin_token=None)
-    row = [u for u in auth.list_users() if u["username"] == "bob"][0]
+    row = next(u for u in auth.list_users() if u["username"] == "bob")
     assert row["is_admin"] == 1
 
 
