@@ -221,3 +221,8 @@ Tests use local feed fixtures — no network.
 This project is developed with substantial assistance from AI coding tools
 (Anthropic Claude). Design decisions and review are human; much of the code is
 AI-written.
+
+## Support
+
+If hark is useful to you, consider supporting development via
+[GitHub Sponsors](https://github.com/sponsors/sudolulo) or [Ko-fi](https://ko-fi.com/sudolulo).
