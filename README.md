@@ -1,5 +1,7 @@
 # hark
 
+[![Tests](https://git.arch.fyi/flan/hark/actions/workflows/test.yml/badge.svg)](https://git.arch.fyi/flan/hark/actions)
+
 Cross-podcast topic index and discovery service for subject-per-episode genres
 (true crime, history, disasters, and the like). The goal: resolve episodes to the
 real-world case/event/person they cover, so you can ask "who covered the Dyatlov
